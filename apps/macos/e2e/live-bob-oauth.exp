@@ -1,0 +1,87 @@
+#!/usr/bin/expect -f
+
+# Live contract test for the locally installed IBM Bob Shell.
+# This intentionally does not run as part of the deterministic E2E suite:
+# it needs an IBM account, browser SSO and network access.
+set timeout 180
+set bob_path "/Users/aniskedidi/.local/bin/bob"
+if {[info exists env(BOB_LIVE_BIN)] && $env(BOB_LIVE_BIN) ne ""} {
+  set bob_path $env(BOB_LIVE_BIN)
+}
+
+# Prove that this path uses Bob Chat OAuth rather than an inherited API key.
+catch { unset env(BOB_API_KEY) }
+catch { unset env(BOBSHELL_API_KEY) }
+
+spawn -noecho $bob_path chat --mode ask --max-turns 1 --max-cost 0.10 --disable-mcp --disable-subagents --workspace /private/tmp
+
+expect {
+  -re {Do you trust this folder\?} {
+    # Select "Don't trust". Ask mode does not need filesystem tools.
+    send -- "\033\[B\033\[B\r"
+    exp_continue
+  }
+  -re {Complete sign-in in your browser} {
+    exp_continue
+  }
+  -re {Logged in as [^\r\n]+\.} {}
+  -re {Already authenticated\.} {}
+  -re {(Authentication failed|Login failed|Callback server timed out)} {
+    puts stderr "LIVE_BOB_OAUTH_AUTH_FAILED"
+    exit 2
+  }
+  timeout {
+    puts stderr "LIVE_BOB_OAUTH_AUTH_TIMEOUT"
+    exit 3
+  }
+  eof {
+    puts stderr "LIVE_BOB_OAUTH_EARLY_EXIT"
+    exit 4
+  }
+}
+
+# Bob redraws its terminal once more after the authentication status. Waiting
+# avoids losing Return while the input component is being remounted.
+after 1500
+send -- "Réponds en français en une seule phrase. Commence exactement par BOB_CHAT_OAUTH_OK puis confirme qu'il s'agit d'une réponse IBM Bob réelle via la session navigateur, sans utiliser d'outil ni modifier de fichier."
+after 1200
+send -- "\r"
+
+# Ink/Bob may redraw the input immediately after authentication and consume
+# the first Return. Confirm that execution really started; retry Return only
+# while the prompt is still waiting in the composer.
+set timeout 8
+expect {
+  -re {Processing} {}
+  -re {•[[:space:]]+BOB_CHAT_OAUTH_OK} {
+    puts "\nLIVE_BOB_OAUTH_RESPONSE_CONFIRMED"
+    exit 0
+  }
+  timeout {
+    send -- "\r"
+  }
+  eof {
+    puts stderr "LIVE_BOB_OAUTH_EARLY_EXIT_AFTER_PROMPT"
+    exit 8
+  }
+}
+set timeout 180
+
+expect {
+  -re {•[[:space:]]+BOB_CHAT_OAUTH_OK} {
+    puts "\nLIVE_BOB_OAUTH_RESPONSE_CONFIRMED"
+    exit 0
+  }
+  -re {(Authentication failed|API key is required|Error:)} {
+    puts stderr "LIVE_BOB_OAUTH_RESPONSE_FAILED"
+    exit 5
+  }
+  timeout {
+    puts stderr "LIVE_BOB_OAUTH_RESPONSE_TIMEOUT"
+    exit 6
+  }
+  eof {
+    puts stderr "LIVE_BOB_OAUTH_RESPONSE_MISSING"
+    exit 7
+  }
+}

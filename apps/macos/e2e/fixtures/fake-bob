@@ -1,0 +1,488 @@
+#!/bin/sh
+set -eu
+
+command_name="${1:-}"
+
+if [ "$command_name" = "--version" ]; then
+  printf '%s\n' '2.0.0' 'commit: e2e-fixture'
+  exit 0
+fi
+
+if [ "$command_name" = "--help" ]; then
+  printf '%s\n' \
+    'Usage: bob [options] [command]' \
+    '--resume [task-id]' \
+    '--list-tasks' \
+    'Commands: chat run mcp'
+  exit 0
+fi
+
+if [ "$command_name" = "run" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' \
+    'Usage: bob run [options] [prompt...]' \
+    'Execute a single task in headless mode' \
+    '--format <pretty|json|stream-json>' \
+    '--workspace <path>' \
+    '--mode <mode>' \
+    '--max-cost <number>' \
+    '--max-turns <number>' \
+    '--log-level <debug|info|warn|error|silent>' \
+    '--disable-mcp' \
+    '--disable-subagents' \
+    '--trust' \
+    '--resume [task-id]'
+  exit 0
+fi
+
+if [ "$command_name" = "chat" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' 'Usage: bob chat [options]' '--auto-approve' '--disable-subagents' '--log-level <level>'
+  exit 0
+fi
+
+if [ "$command_name" = "mcp" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' 'Usage: bob mcp [command]' 'add add-json remove list enable disable'
+  exit 0
+fi
+
+if [ "$command_name" = "chat" ]; then
+  mkdir -p "$HOME/.bob/settings"
+  printf '%s\n' '{"bob.auth.tokens-https://api.test.bob.ibm.com":"e2e-session-marker"}' > "$HOME/.bob/settings/auth-secrets.json"
+  printf '%s\n' 'Complete sign-in in your browser…' 'Logged in as e2e@ibm.com.'
+  exit 0
+fi
+
+if [ "$command_name" = "mcp" ]; then
+  action="${2:-}"
+  name="${3:-}"
+  mkdir -p "$HOME/.bob/settings"
+  config="$HOME/.bob/settings/mcp.json"
+  mcp_python() {
+    python3 - "$@"
+  }
+  if [ "$action" = "add-json" ]; then
+    definition="${4:-}"
+    if [ -z "$definition" ]; then
+      definition='{}'
+    fi
+    mcp_python "$config" "$name" "$definition" <<'PY'
+import json
+import os
+import sys
+
+path, name, definition = sys.argv[1:4]
+servers = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as source:
+        data = json.load(source)
+        servers = data.get("mcpServers", {})
+servers[name] = json.loads(definition)
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump({"mcpServers": servers}, destination, ensure_ascii=False)
+PY
+    exit 0
+  fi
+  if [ "$action" = "remove" ]; then
+    mcp_python "$config" "$name" <<'PY'
+import json
+import os
+import sys
+
+path, name = sys.argv[1:3]
+if not os.path.exists(path):
+    sys.exit(0)
+with open(path, encoding="utf-8") as source:
+    data = json.load(source)
+servers = data.get("mcpServers", {})
+servers.pop(name, None)
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump({"mcpServers": servers}, destination, ensure_ascii=False)
+PY
+    exit 0
+  fi
+  if [ "$action" = "disable" ]; then
+    mcp_python "$config" "$name" "true" <<'PY'
+import json
+import os
+import sys
+
+path, name, disabled = sys.argv[1:4]
+if not os.path.exists(path):
+    sys.exit(0)
+with open(path, encoding="utf-8") as source:
+    data = json.load(source)
+servers = data.get("mcpServers", {})
+if name in servers and isinstance(servers[name], dict):
+    servers[name]["disabled"] = disabled == "true"
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump({"mcpServers": servers}, destination, ensure_ascii=False)
+PY
+    exit 0
+  fi
+  if [ "$action" = "enable" ]; then
+    mcp_python "$config" "$name" "false" <<'PY'
+import json
+import os
+import sys
+
+path, name, disabled = sys.argv[1:4]
+if not os.path.exists(path):
+    sys.exit(0)
+with open(path, encoding="utf-8") as source:
+    data = json.load(source)
+servers = data.get("mcpServers", {})
+if name in servers and isinstance(servers[name], dict):
+    servers[name]["disabled"] = disabled == "true"
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump({"mcpServers": servers}, destination, ensure_ascii=False)
+PY
+    exit 0
+  fi
+fi
+
+if [ "$command_name" = "run" ]; then
+  # Bob Shell 2 reads non-TTY stdin to EOF before it starts the task, even
+  # when a positional prompt is present. This catches regressions where Bob
+  # Work leaves a writable stdin pipe open for the whole session.
+  stdin_prompt=$(cat)
+
+  if [ -n "${BOB_API_KEY:-}" ] || [ -n "${BOBSHELL_API_KEY:-}" ]; then
+    if [ "${BOB_API_KEY:-}" != "${BOBSHELL_API_KEY:-}" ]; then
+      printf '%s\n' 'Les variables API Bob reçues par le processus enfant diffèrent.' >&2
+      exit 3
+    fi
+  fi
+  prompt=''
+  for argument in "$@"; do
+    prompt="$argument"
+  done
+  if [ -n "$stdin_prompt" ]; then
+    prompt="$prompt
+$stdin_prompt"
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'SESSION_SECRET_E2E'; then
+    if [ "${BOB_API_KEY:-}" != 'e2e-session-secret' ] || [ "${BOBSHELL_API_KEY:-}" != 'e2e-session-secret' ]; then
+      printf '%s\n' 'La clé de session n’a pas été injectée uniquement au processus Bob.' >&2
+      exit 4
+    fi
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'BOB_WORK_CONVERSATION_TITLE'; then
+    if printf '%s' "$prompt" | grep -q 'PREMIER_PROMPT_VISIBLE_E2E'; then
+      generated_title='Affichage immédiat du premier prompt'
+    elif printf '%s' "$prompt" | grep -q 'PREMIER_PROMPT_E2E'; then
+      generated_title='Analyse du budget alpha'
+    elif printf '%s' "$prompt" | grep -q 'SECOND_PROMPT_E2E'; then
+      generated_title='Titre incorrect du second prompt'
+    else
+      generated_title='Conversation générée par Bob'
+    fi
+    sleep 1
+    printf '%s\n' "{\"type\":\"message\",\"timestamp\":\"2026-08-08T11:59:59Z\",\"role\":\"assistant\",\"isReasoning\":false,\"content\":\"$generated_title\"}"
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:00:00Z","status":"success","stats":{"task_id":"e2e-title","duration_ms":50,"tool_calls":0}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_WORD_PLUGIN_E2E'; then
+    if ! printf '%s' "$prompt" | grep -q '\$bob-work-microsoft-word'; then
+      printf '%s\n' 'Le plugin Word intégré n’a pas été traduit en skill Bob.' >&2
+      exit 6
+    fi
+    test -f "$HOME/.bob/skills/bob-work-microsoft-word/SKILL.md" || {
+      mkdir -p "$HOME/.bob/skills/bob-work-microsoft-word"
+      printf '%s\n' '---' 'name: bob-work-microsoft-word' 'description: Microsoft Word E2E' 'user-invocable: true' '---' > "$HOME/.bob/skills/bob-work-microsoft-word/SKILL.md"
+    }
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:30:00Z","role":"assistant","isReasoning":true,"content":"Chargement du plugin Microsoft Word intégré."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:30:01Z","tool_name":"read_file","tool_id":"word-read","parameters":{"path":"draft.docx"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:30:02Z","tool_id":"word-read","status":"success","output":"Structure DOCX inspectée"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:30:03Z","role":"assistant","isReasoning":false,"content":"Plugin Microsoft Word utilisé : le brouillon DOCX a été analysé et est prêt pour modification."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:30:04Z","status":"success","stats":{"task_id":"e2e-builtin-word","duration_ms":350,"tool_calls":1}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'USE_SKILL_E2E'; then
+    if ! printf '%s' "$prompt" | grep -q '\$skill-e2e-local'; then
+      printf '%s\n' 'Le skill personnel n’a pas été traduit pour Bob Shell.' >&2
+      exit 7
+    fi
+    test -f "$HOME/.bob/skills/skill-e2e-local/SKILL.md" || {
+      printf '%s\n' 'Le skill skill-e2e-local est absent du workspace Bob.' >&2
+      exit 7
+    }
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:31:00Z","role":"assistant","isReasoning":true,"content":"Chargement du skill personnel skill-e2e-local."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:31:01Z","tool_name":"read_file","tool_id":"skill-read","parameters":{"path":"~/.bob/skills/skill-e2e-local/SKILL.md"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:31:02Z","tool_id":"skill-read","status":"success","output":"Instructions skill E2E chargées"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:31:03Z","role":"assistant","isReasoning":false,"content":"Skill skill-e2e-local exécuté : synthèse locale produite à partir des instructions E2E."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:31:04Z","status":"success","stats":{"task_id":"e2e-skill-use","duration_ms":250,"tool_calls":1}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'GITHUB_INTEGRATION_E2E'; then
+    if [ "${GH_TOKEN:-}" != 'e2e-github-token' ] && [ "${GITHUB_TOKEN:-}" != 'e2e-github-token' ]; then
+      printf '%s\n' 'Le jeton GitHub de session n’a pas été injecté dans le processus Bob.' >&2
+      exit 8
+    fi
+    if ! printf '%s' "$prompt" | grep -q '\$bob-work-github'; then
+      printf '%s\n' 'Le skill GitHub intégré n’a pas été invoqué.' >&2
+      exit 8
+    fi
+    test -f "$HOME/.bob/skills/bob-work-github/SKILL.md" || {
+      printf '%s\n' 'Le skill bob-work-github n’a pas été installé après connexion.' >&2
+      exit 8
+    }
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:32:00Z","role":"assistant","isReasoning":true,"content":"Consultation GitHub via le jeton de session autorisé."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:32:01Z","tool_name":"execute_command","tool_id":"gh-repo-list","parameters":{"command":"gh repo list --limit 3"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:32:02Z","tool_id":"gh-repo-list","status":"success","output":"bob-work/demo\\nbob-work/plugins"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:32:03Z","role":"assistant","isReasoning":false,"content":"Intégration GitHub active : deux dépôts consultés en lecture seule via gh CLI."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:32:04Z","status":"success","stats":{"task_id":"e2e-github-integration","duration_ms":300,"tool_calls":1}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'USE_MCP_ECHO_E2E'; then
+    test -f "$HOME/.bob/settings/mcp.json" || {
+      printf '%s\n' 'Aucun serveur MCP configuré.' >&2
+      exit 9
+    }
+    grep -q 'mcp-e2e-echo' "$HOME/.bob/settings/mcp.json" || {
+      printf '%s\n' 'Le serveur MCP mcp-e2e-echo est absent de la configuration Bob.' >&2
+      exit 9
+    }
+    mcp_script=""
+    for candidate in \
+      "$(dirname "$0")/mcp-echo-server.py" \
+      "$HOME/mcp-echo-server.py"; do
+      if [ -f "$candidate" ]; then
+        mcp_script="$candidate"
+        break
+      fi
+    done
+    if [ -z "$mcp_script" ]; then
+      printf '%s\n' 'Fixture MCP echo introuvable.' >&2
+      exit 9
+    fi
+    mcp_result=$(printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bob-work-e2e","version":"1"}}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo_text","arguments":{"text":"integration-mcp"}}}' \
+      | python3 "$mcp_script")
+    printf '%s' "$mcp_result" | grep -q 'echo:integration-mcp'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:33:00Z","role":"assistant","isReasoning":true,"content":"Initialisation du serveur MCP mcp-e2e-echo."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:33:01Z","tool_name":"use_mcp_tool","tool_id":"mcp-echo","parameters":{"server":"mcp-e2e-echo","tool":"echo_text","arguments":{"text":"integration-mcp"}}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:33:02Z","tool_id":"mcp-echo","status":"success","output":"echo:integration-mcp"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:33:03Z","role":"assistant","isReasoning":false,"content":"Serveur MCP mcp-e2e-echo opérationnel : echo:integration-mcp reçu depuis l’outil echo_text."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:33:04Z","status":"success","stats":{"task_id":"e2e-mcp-echo","duration_ms":280,"tool_calls":1}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'CREATE_CLOUD_ARCHITECT_PLUGIN_E2E'; then
+    plugin_dir="$HOME/.bob/skills/cloud-architect-agent"
+    script_dir="$plugin_dir/scripts"
+    mcp_dir="$plugin_dir/mcp"
+    mkdir -p "$script_dir" "$mcp_dir"
+    printf '%s\n' \
+      '---' \
+      'name: cloud-architect-agent' \
+      'description: "Évalue une architecture cloud avec un outil Python local en ligne de commande."' \
+      'user-invocable: true' \
+      '---' \
+      '' \
+      '# Cloud Architect Agent' \
+      '' \
+      'Analyse les contraintes, identifie les risques de résilience, sécurité, coût et exploitation, puis propose des décisions traçables.' \
+      'Pour une évaluation structurée, utilise en priorité l’outil MCP `assess_architecture` fourni par ce plugin.' \
+      'Le CLI `python3 scripts/architecture_assessment.py` reste disponible pour les validations locales du bundle.' \
+      'Lis toujours le résultat JSON, explique les hypothèses et demande une autorisation avant toute modification cloud.' \
+      > "$plugin_dir/SKILL.md"
+    printf '%s\n' \
+      '{"schemaVersion":1,"name":"Cloud Architect Agent","slug":"cloud-architect-agent","version":"1.2.0","description":"Évalue localement une architecture cloud et produit des recommandations traçables.","category":"executable","permissions":[{"type":"mcp.connect","description":"Utiliser les outils Cloud Architect du plugin","required":true},{"type":"command.execute","description":"Lancer le serveur MCP et le CLI Python locaux du plugin","required":true},{"type":"hook.execute","description":"Préparer le contexte avant la tâche","required":true},{"type":"browser.control","description":"Ouvrir les sources cloud dans le navigateur autorisé","required":false},{"type":"file.read","description":"Lire les fichiers d’architecture autorisés","required":false}],"runtime":{"python":">=3.9","cli":true,"mcp":true},"entrypoints":[{"name":"assess_architecture","runtime":"python3","path":"scripts/architecture_assessment.py"},{"name":"prepare_context","runtime":"python3","path":"scripts/prepare_context.py"},{"name":"cloud_architect_mcp","runtime":"python3","path":"mcp/server.py"}],"mcpServers":{"architecture-tools":{"displayName":"Outils Cloud Architect","description":"Évaluation structurée et traçable des architectures cloud.","required":true,"command":"python3","args":["mcp/server.py"],"cwd":".","tools":[{"name":"assess_architecture","description":"Évaluer les risques et recommandations d’une architecture cloud"}]}},"integrations":[{"provider":"cloud-architecture","displayName":"Cloud Architecture MCP","authType":"mcp","mcpServer":"architecture-tools","scopes":["architecture.read"],"optional":false},{"provider":"github","displayName":"GitHub","authType":"token","scopes":["repo.read"],"optional":true}],"browserExtensions":[{"id":"cloud-sources","displayName":"Sources cloud dans le navigateur","capability":"browser","mcpServer":"architecture-tools","required":false}],"hooks":[{"id":"prepare-context","displayName":"Préparation du contexte cloud","event":"before_task","entrypoint":"prepare_context","required":true,"timeoutSeconds":10}],"scheduledTaskTemplates":[{"id":"weekly-cloud-review","name":"Revue cloud hebdomadaire","description":"Analyse chaque semaine les risques et écarts d’architecture.","instructions":"Analyse les changements d’architecture cloud et priorise les risques.","cronOrEvent":"every week","offlineBehavior":"run_on_wake","overlapPolicy":"queue"}]}' \
+      > "$plugin_dir/.bob-work-plugin.json"
+    printf '%s\n' \
+      '#!/usr/bin/env python3' \
+      'import argparse' \
+      'import json' \
+      '' \
+      'def assess(provider: str, workload: str, regions: int) -> dict:' \
+      '    findings = ["Activer le chiffrement géré", "Définir des SLO et tests de restauration"]' \
+      '    if regions < 2:' \
+      '        findings.insert(0, "Ajouter une stratégie multi-région")' \
+      '    return {' \
+      '        "plugin": "cloud-architect-agent",' \
+      '        "provider": provider,' \
+      '        "workload": workload,' \
+      '        "risk": "medium" if regions < 2 else "low",' \
+      '        "findings": findings,' \
+      '    }' \
+      '' \
+      'def main() -> None:' \
+      '    parser = argparse.ArgumentParser(description="Local cloud architecture assessment")' \
+      '    parser.add_argument("--provider", required=True)' \
+      '    parser.add_argument("--workload", required=True)' \
+      '    parser.add_argument("--regions", type=int, default=1)' \
+      '    args = parser.parse_args()' \
+      '    result = assess(args.provider, args.workload, args.regions)' \
+      '    print(json.dumps(result, ensure_ascii=False, sort_keys=True))' \
+      '' \
+      'if __name__ == "__main__":' \
+      '    main()' \
+      > "$script_dir/architecture_assessment.py"
+    printf '%s\n' \
+      '#!/usr/bin/env python3' \
+      'from pathlib import Path' \
+      'Path("hook-ran.txt").write_text("prepared", encoding="utf-8")' \
+      > "$script_dir/prepare_context.py"
+    printf '%s\n' \
+      '#!/usr/bin/env python3' \
+      'import json' \
+      'import sys' \
+      'from pathlib import Path' \
+      '' \
+      'sys.path.insert(0, str(Path(__file__).resolve().parents[1]))' \
+      'from scripts.architecture_assessment import assess' \
+      '' \
+      'def send(request_id, result):' \
+      '    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False), flush=True)' \
+      '' \
+      'for line in sys.stdin:' \
+      '    if not line.strip():' \
+      '        continue' \
+      '    request = json.loads(line)' \
+      '    request_id = request.get("id")' \
+      '    method = request.get("method")' \
+      '    if request_id is None:' \
+      '        continue' \
+      '    if method == "initialize":' \
+      '        send(request_id, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "cloud-architect-agent", "version": "1.1.0"}})' \
+      '    elif method == "tools/list":' \
+      '        send(request_id, {"tools": [{"name": "assess_architecture", "description": "Évaluer une architecture cloud", "inputSchema": {"type": "object", "properties": {"provider": {"type": "string"}, "workload": {"type": "string"}, "regions": {"type": "integer", "minimum": 1}}, "required": ["provider", "workload"]}}]})' \
+      '    elif method == "tools/call" and request.get("params", {}).get("name") == "assess_architecture":' \
+      '        arguments = request.get("params", {}).get("arguments", {})' \
+      '        result = assess(arguments.get("provider", "unknown"), arguments.get("workload", "unknown"), int(arguments.get("regions", 1)))' \
+      '        send(request_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}], "structuredContent": result, "isError": False})' \
+      '    else:' \
+      '        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}), flush=True)' \
+      > "$mcp_dir/server.py"
+    chmod 700 "$script_dir/architecture_assessment.py" "$script_dir/prepare_context.py" "$mcp_dir/server.py"
+    python3 -m py_compile "$script_dir/architecture_assessment.py" "$script_dir/prepare_context.py" "$mcp_dir/server.py"
+    mcp_check=$(printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bob-work-e2e","version":"1"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+      '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"assess_architecture","arguments":{"provider":"aws","workload":"payments","regions":1}}}' \
+      | python3 "$mcp_dir/server.py")
+    printf '%s' "$mcp_check" | grep -q 'assess_architecture'
+    printf '%s' "$mcp_check" | grep -q 'multi-région'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:00Z","role":"assistant","isReasoning":true,"content":"Préparation du bundle agentique Cloud Architect."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:01Z","tool_name":"write_file","tool_id":"plugin-skill","parameters":{"path":"~/.bob/skills/cloud-architect-agent/SKILL.md"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:02Z","tool_id":"plugin-skill","status":"success","output":"SKILL.md créé"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:03Z","tool_name":"write_file","tool_id":"plugin-python","parameters":{"path":"~/.bob/skills/cloud-architect-agent/scripts/architecture_assessment.py"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:04Z","tool_id":"plugin-python","status":"success","output":"CLI Python créé"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:05Z","tool_name":"execute_command","tool_id":"plugin-check","parameters":{"command":"python3 -m py_compile ~/.bob/skills/cloud-architect-agent/scripts/architecture_assessment.py"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:06Z","tool_id":"plugin-check","status":"success","output":"Syntaxe Python validée"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:07Z","tool_name":"execute_command","tool_id":"plugin-mcp-check","parameters":{"command":"Initialiser le serveur MCP et appeler assess_architecture"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:08Z","tool_id":"plugin-mcp-check","status":"success","output":"Serveur MCP initialisé, outil assess_architecture disponible et testé"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:09Z","role":"assistant","isReasoning":false,"content":"Plugin Cloud Architect Agent créé avec son serveur MCP et validé localement."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:00:10Z","status":"success","stats":{"task_id":"e2e-plugin-create","duration_ms":900,"tool_calls":4}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'UPDATE_CLOUD_ARCHITECT_PLUGIN_E2E'; then
+    plugin_dir="$HOME/.bob/skills/cloud-architect-agent"
+    test -f "$plugin_dir/.bob-work-plugin.json"
+    python3 - "$plugin_dir/.bob-work-plugin.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    manifest = json.load(source)
+manifest["version"] = "1.3.0"
+manifest["releaseNotes"] = "Ajout du contrôle de conformité et de nouvelles sources cloud."
+manifest["capabilities"] = ["architecture.review", "compliance.review"]
+permissions = manifest.setdefault("permissions", [])
+if not any(item.get("type") == "network.request" for item in permissions):
+    permissions.append({"type": "network.request", "description": "Consulter les sources cloud autorisées", "required": False})
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump(manifest, destination, ensure_ascii=False, separators=(",", ":"))
+PY
+    printf '%s\n' \
+      '' \
+      '## Version 1.3.0' \
+      'Contrôle aussi la conformité et cite les nouvelles sources cloud autorisées.' \
+      >> "$plugin_dir/SKILL.md"
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:20:00Z","role":"assistant","isReasoning":true,"content":"Préparation de la version 1.3.0 sans écraser la version installée."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:20:01Z","tool_name":"write_file","tool_id":"plugin-update-manifest","parameters":{"path":"~/.bob/skills/cloud-architect-agent/.bob-work-plugin.json"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:20:02Z","tool_id":"plugin-update-manifest","status":"success","output":"Version 1.3.0 publiée localement"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:20:03Z","role":"assistant","isReasoning":false,"content":"La version 1.3.0 du plugin Cloud Architect Agent est prête à être examinée dans Plugins."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:20:04Z","status":"success","stats":{"task_id":"e2e-plugin-update","duration_ms":400,"tool_calls":1}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q '\$cloud-architect-agent'; then
+    plugin_dir="$HOME/.bob/skills/cloud-architect-agent"
+    script="$plugin_dir/scripts/architecture_assessment.py"
+    mcp_script="$plugin_dir/mcp/server.py"
+    test -f "$plugin_dir/SKILL.md"
+    test -f "$plugin_dir/.bob-work-plugin.json"
+    test -f "$script"
+    test -f "$mcp_script"
+    test -f "$plugin_dir/hook-ran.txt"
+    test -f "$HOME/.bob/settings/mcp.json"
+    grep -q 'bw-cloud-architect-agent-architecture-tools' "$HOME/.bob/settings/mcp.json"
+    assessment=$(python3 "$script" --provider aws --workload payments --regions 1)
+    printf '%s' "$assessment" | grep -q 'cloud-architect-agent'
+    printf '%s' "$assessment" | grep -q 'multi-région'
+    mcp_result=$(printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bob-work-e2e","version":"1"}}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"assess_architecture","arguments":{"provider":"aws","workload":"payments","regions":1}}}' \
+      | python3 "$mcp_script")
+    printf '%s' "$mcp_result" | grep -q 'multi-région'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:10:00Z","role":"assistant","isReasoning":true,"content":"Chargement du plugin agentique Cloud Architect et préparation de son CLI local."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:10:01Z","tool_name":"read_file","tool_id":"plugin-read-skill","parameters":{"path":"~/.bob/skills/cloud-architect-agent/SKILL.md"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:10:02Z","tool_id":"plugin-read-skill","status":"success","output":"Instructions Cloud Architect chargées"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:10:03Z","tool_name":"read_file","tool_id":"plugin-read-python","parameters":{"path":"~/.bob/skills/cloud-architect-agent/scripts/architecture_assessment.py"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:10:04Z","tool_id":"plugin-read-python","status":"success","output":"Entrypoint Python chargé"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:10:05Z","tool_name":"execute_command","tool_id":"plugin-run-cli","parameters":{"command":"python3 ~/.bob/skills/cloud-architect-agent/scripts/architecture_assessment.py --provider aws --workload payments --regions 1"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:10:06Z","tool_id":"plugin-run-cli","status":"success","output":"{\"plugin\":\"cloud-architect-agent\",\"provider\":\"aws\",\"workload\":\"payments\",\"risk\":\"medium\",\"findings\":[\"Ajouter une stratégie multi-région\"]}"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:10:07Z","tool_name":"use_mcp_tool","tool_id":"plugin-run-mcp","parameters":{"server":"bw-cloud-architect-agent-architecture-tools","tool":"assess_architecture","arguments":{"provider":"aws","workload":"payments","regions":1}}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:10:08Z","tool_id":"plugin-run-mcp","status":"success","output":"Outil MCP assess_architecture : risque moyen, stratégie multi-région prioritaire"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:10:09Z","role":"assistant","isReasoning":false,"content":"Cloud Architect Agent a utilisé son outil MCP : risque moyen, avec une stratégie multi-région à ajouter en priorité."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:10:10Z","status":"success","stats":{"task_id":"e2e-plugin-use","duration_ms":700,"tool_calls":4}}'
+    exit 0
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'ERROR_STREAM_E2E'; then
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:00Z","role":"assistant","isReasoning":true,"content":"Analyse E2E avant erreur."}'
+    printf '%s\n' '{"type":"error","timestamp":"2026-08-08T12:00:01Z","severity":"error","message":"Erreur Bob E2E structurée."}'
+    exit 2
+  fi
+
+  if printf '%s' "$prompt" | grep -q 'VISUAL_AGENT_ACTIVITY_E2E'; then
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:00Z","role":"assistant","isReasoning":true,"content":"J’analyse la structure du projet et je prépare les prochaines actions observables."}'
+    sleep 2
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:01Z","tool_name":"read_file","tool_id":"visual-read-1","parameters":{"path":"/tmp/package.json"}}'
+    sleep 2
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:02Z","tool_id":"visual-read-1","status":"success","output":"Fichier lu : /tmp/package.json"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:03Z","tool_name":"execute_command","tool_id":"visual-test-1","parameters":{"command":"npm test"}}'
+    sleep 2
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:04Z","tool_id":"visual-test-1","status":"success","output":"Tests passed\n/tmp\nhttps://example.test/source"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:05Z","role":"assistant","isReasoning":false,"content":"Analyse visuelle E2E terminée."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:00:06Z","status":"success","stats":{"task_id":"e2e-visual-activity","duration_ms":6000,"session_costs":0.05,"max_cost":1,"tool_calls":2}}'
+    exit 0
+  fi
+
+  printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:00Z","role":"assistant","isReasoning":true,"content":"Analyse E2E explicite du projet."}'
+  printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:01Z","tool_name":"read_file","tool_id":"tool-read-1","parameters":{"path":"/tmp/package.json"}}'
+  if printf '%s' "$prompt" | grep -q 'PREMIER_PROMPT_E2E'; then
+    sleep 3
+  elif printf '%s' "$prompt" | grep -q 'PREMIER_PROMPT_VISIBLE_E2E'; then
+    sleep 8
+  fi
+  printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:02Z","tool_id":"tool-read-1","status":"success","output":"Fichier lu : /tmp/package.json"}'
+  printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-08T12:00:03Z","tool_name":"execute_command","tool_id":"tool-test-1","parameters":{"command":"npm test"}}'
+  printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-08T12:00:04Z","tool_id":"tool-test-1","status":"success","output":"Tests passed\n/tmp\nhttps://example.test/source"}'
+  printf '%s\n' '{"type":"message","timestamp":"2026-08-08T12:00:05Z","role":"assistant","isReasoning":false,"content":"Réponse Bob E2E terminée."}'
+  printf '%s\n' '{"type":"result","timestamp":"2026-08-08T12:00:06Z","status":"success","stats":{"task_id":"e2e-shell-task","duration_ms":1250,"session_costs":0.05,"max_cost":1,"tool_calls":2}}'
+  exit 0
+fi
+
+printf '%s\n' "Commande Bob de test inconnue: $*" >&2
+exit 2

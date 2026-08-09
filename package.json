@@ -1,0 +1,24 @@
+{
+  "name": "bob-work-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter macos run dev:tauri",
+    "build": "pnpm --filter macos run build:tauri",
+    "mac:dev": "pnpm --filter macos run dev:tauri",
+    "mac:build": "pnpm --filter macos run build:tauri",
+    "mac:dmg": "pnpm --filter macos run build:tauri --bundles dmg",
+    "mac:test:rust": "cargo test --manifest-path apps/macos/src-tauri/Cargo.toml",
+    "mac:test:ts": "pnpm --filter macos run test",
+    "mac:test:e2e": "pnpm --filter macos run test:e2e",
+    "mac:test:live-bob-oauth": "pnpm --filter macos run test:e2e:live-bob-oauth",
+    "mac:test": "pnpm mac:test:rust && pnpm mac:test:ts",
+    "mac:verify": "pnpm --filter macos run verify",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm mac:test:ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

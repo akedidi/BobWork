@@ -1,0 +1,288 @@
+// ============================================================
+// Bob Work - IPC Layer
+// Typed wrappers for Tauri commands
+// ============================================================
+
+import { invoke } from '@tauri-apps/api/core';
+import type {
+  Project, CreateProjectInput, UpdateProjectInput,
+  Conversation, CreateConversationInput, ConversationTransferSummary, Message, AddMessageInput,
+  Task, CreateTaskInput,
+  Plugin, CreatePluginInput, PluginExtensionStatus, PluginMcpStatus, PluginVersion, PluginVersionDiff,
+  Approval, ResolveApprovalInput,
+  Artifact,
+  AppSettings,
+  BobDetectionResult, CapabilityInfo,
+  Schedule, ScheduleRun, CreateScheduleInput,
+  ShellProfile, BobMode, TaskDetail, SearchResult, WorkspaceSkill, SaveSkillInput,
+  McpServer, SaveMcpServerInput, PermissionGrant, UsageStatus, FilePreview,
+} from '@bob-work/shared-types';
+
+// ── Bob Commands ─────────────────────────────────────────────
+
+export const detectBob = () =>
+  invoke<BobDetectionResult>('detect_bob');
+
+export const getBobCapabilities = () =>
+  invoke<Record<string, CapabilityInfo>>('get_bob_capabilities');
+
+export const getBobProfile = (workspace?: string) =>
+  invoke<ShellProfile>('get_bob_profile', { workspace });
+
+export const getBobModes = (workspace?: string) =>
+  invoke<BobMode[]>('get_bob_modes', { workspace });
+
+export const sendMessage = (params: {
+  conversationId: string;
+  message: string;
+  mode: string;
+  projectId?: string;
+  attachmentPaths?: string[];
+  resumeTaskId?: string;
+  approvedPluginIds?: string[];
+}) => invoke<{ sessionId: string; taskId: string }>('send_message', {
+  conversationId: params.conversationId,
+  message: params.message,
+  mode: params.mode,
+  projectId: params.projectId,
+  attachmentPaths: params.attachmentPaths,
+  resumeTaskId: params.resumeTaskId,
+  approvedPluginIds: params.approvedPluginIds,
+});
+
+export const stopTask = (sessionId: string) =>
+  invoke<void>('stop_task', { sessionId });
+
+// ── Project Commands ─────────────────────────────────────────
+
+export const getProjects = () => invoke<Project[]>('get_projects');
+
+export const getProject = (id: string) => invoke<Project | null>('get_project', { id });
+
+export const createProject = (input: CreateProjectInput) =>
+  invoke<Project>('create_project', { input });
+
+export const updateProject = (id: string, input: UpdateProjectInput) =>
+  invoke<Project>('update_project', { id, input });
+
+export const deleteProject = (id: string) => invoke<void>('delete_project', { id });
+
+export const archiveProject = (id: string, archived: boolean) =>
+  invoke<void>('archive_project', { id, archived });
+
+// ── Conversation Commands ─────────────────────────────────────
+
+export const getConversations = (projectId?: string) =>
+  invoke<Conversation[]>('get_conversations', { projectId });
+
+export const getConversation = (id: string) =>
+  invoke<Conversation | null>('get_conversation', { id });
+
+export const createConversation = (input: CreateConversationInput) =>
+  invoke<Conversation>('create_conversation', { input });
+
+export const updateConversation = (id: string, params: { title?: string; pinned?: boolean; archived?: boolean; projectId?: string }) =>
+  invoke<void>('update_conversation', { id, ...params });
+
+export const deleteConversation = (id: string) =>
+  invoke<void>('delete_conversation', { id });
+
+export const getMessages = (conversationId: string) =>
+  invoke<Message[]>('get_messages', { conversationId });
+
+export const addMessage = (input: AddMessageInput) =>
+  invoke<Message>('add_message', { input });
+
+export const importConversations = (path: string) =>
+  invoke<ConversationTransferSummary>('import_conversations', { path });
+
+export const exportConversations = (path: string) =>
+  invoke<ConversationTransferSummary>('export_conversations', { path });
+
+// ── Task Commands ─────────────────────────────────────────────
+
+export const getTasks = (projectId?: string) =>
+  invoke<Task[]>('get_tasks', { projectId });
+
+export const getTask = (id: string) => invoke<Task | null>('get_task', { id });
+
+export const getTaskDetail = (id: string) => invoke<TaskDetail | null>('get_task_detail', { id });
+
+export const createTask = (input: CreateTaskInput) =>
+  invoke<Task>('create_task', { input });
+
+export const updateTaskState = (id: string, state: string) =>
+  invoke<void>('update_task_state', { id, state });
+
+export const updateTaskPinned = (id: string, pinned: boolean) =>
+  invoke<void>('update_task_pinned', { id, pinned });
+
+export const cancelTask = (id: string) => invoke<void>('cancel_task', { id });
+
+// ── Plugin Commands ───────────────────────────────────────────
+
+export const getPlugins = () => invoke<Plugin[]>('get_plugins');
+
+export const getPlugin = (id: string) => invoke<Plugin | null>('get_plugin', { id });
+
+export const getPluginVersions = (pluginId: string) =>
+  invoke<PluginVersion[]>('get_plugin_versions', { pluginId });
+
+export const comparePluginVersion = (pluginId: string, version: string) =>
+  invoke<PluginVersionDiff>('compare_plugin_version', { pluginId, version });
+
+export const installPluginUpdate = (pluginId: string, version: string) =>
+  invoke<Plugin>('install_plugin_update', { pluginId, version });
+
+export const rollbackPluginVersion = (pluginId: string, version: string) =>
+  invoke<Plugin>('rollback_plugin_version', { pluginId, version });
+
+export const createPlugin = (input: CreatePluginInput) =>
+  invoke<Plugin>('create_plugin', { input });
+
+export const updatePlugin = (pluginId: string, input: CreatePluginInput) =>
+  invoke<Plugin>('update_plugin', { pluginId, input });
+
+export const deletePlugin = (pluginId: string) =>
+  invoke<void>('delete_plugin', { pluginId });
+
+export const installPlugin = (pluginId: string) =>
+  invoke<void>('install_plugin', { pluginId });
+
+export const uninstallPlugin = (pluginId: string) =>
+  invoke<void>('uninstall_plugin', { pluginId });
+
+export const togglePlugin = (pluginId: string, enabled: boolean) =>
+  invoke<void>('toggle_plugin', { pluginId, enabled });
+
+export const getPluginMcpStatus = (pluginId: string) =>
+  invoke<PluginMcpStatus[]>('get_plugin_mcp_status', { pluginId });
+
+export const getPluginExtensionStatus = (pluginId: string) =>
+  invoke<PluginExtensionStatus>('get_plugin_extension_status', { pluginId });
+
+export const validatePlugin = (manifest: unknown) =>
+  invoke<{ valid: boolean; warnings: string[]; errors: string[]; riskLevel: string }>('validate_plugin', { manifest });
+
+// ── Approval Commands ─────────────────────────────────────────
+
+export const getPendingApprovals = () =>
+  invoke<Approval[]>('get_pending_approvals');
+
+export const resolveApproval = (approvalId: string, input: ResolveApprovalInput) =>
+  invoke<void>('resolve_approval', { approvalId, input });
+
+// ── Artifact Commands ─────────────────────────────────────────
+
+export const getArtifacts = () => invoke<Artifact[]>('get_artifacts');
+
+export const getArtifact = (id: string) => invoke<Artifact | null>('get_artifact', { id });
+
+export const deleteArtifact = (id: string) => invoke<void>('delete_artifact', { id });
+
+export const openArtifact = (id: string) => invoke<void>('open_artifact', { id });
+
+// ── Settings Commands ─────────────────────────────────────────
+
+export const getSettings = () => invoke<AppSettings>('get_settings');
+
+export const updateSettings = (settings: AppSettings) =>
+  invoke<void>('update_settings', { settings });
+
+// ── System Commands ───────────────────────────────────────────
+
+export const getAppInfo = () =>
+  invoke<{ appVersion: string; tauriVersion: string; os: string; arch: string; dataDir: string; logDir: string }>('get_app_info');
+
+export const openDataDir = () => invoke<void>('open_data_dir');
+
+export const exportDiagnostics = () => invoke<string>('export_diagnostics');
+
+// ── Schedule Commands ─────────────────────────────────────────
+
+export const getSchedules = () => invoke<Schedule[]>('get_schedules');
+
+export const createSchedule = (input: CreateScheduleInput) =>
+  invoke<Schedule>('create_schedule', { input });
+
+export const updateScheduleState = (id: string, state: string) =>
+  invoke<void>('update_schedule_state', { id, state });
+
+export const deleteSchedule = (id: string) =>
+  invoke<void>('delete_schedule', { id });
+
+export const getScheduleLogs = (id: string) =>
+  invoke<string>('get_schedule_logs', { id });
+
+export const getScheduleRuns = (id: string) =>
+  invoke<ScheduleRun[]>('get_schedule_runs', { id });
+
+export const runScheduleNow = (id: string) =>
+  invoke<string>('run_schedule_now', { id });
+
+// ── Local encrypted vault secrets ─────────────────────────────
+
+export const setSessionSecret = (account: string, secret: string) =>
+  invoke<void>('set_session_secret', { account, secret });
+
+export const hasSessionSecret = (account: string) =>
+  invoke<boolean>('has_session_secret', { account });
+
+export const clearSessionSecret = (account: string) =>
+  invoke<void>('clear_session_secret', { account });
+
+// ── Artifact Generation Commands ──────────────────────────────
+
+export const generateArtifact = (input: {
+  artifactType: string;
+  title: string;
+  content: string;
+  conversationId?: string;
+}) => invoke<Artifact>('generate_artifact', { input });
+
+export const getArtifactsList = () => invoke<Artifact[]>('get_artifacts_list');
+
+// ── Search / Skills / MCP / Permissions / Usage ──────────────
+
+export const searchWorkspace = (query: string, limit = 30) =>
+  invoke<SearchResult[]>('search_workspace', { query, limit });
+
+export const getSkills = (workspace?: string) =>
+  invoke<WorkspaceSkill[]>('get_skills', { workspace });
+
+export const saveSkill = (input: SaveSkillInput) =>
+  invoke<WorkspaceSkill>('save_skill', { input });
+
+export const setSkillEnabled = (slug: string, scope: string, enabled: boolean, workspace?: string) =>
+  invoke<void>('set_skill_enabled', { slug, scope, enabled, workspace });
+
+export const deleteSkill = (slug: string, workspace?: string) =>
+  invoke<void>('delete_skill', { slug, workspace });
+
+export const installBuiltinIntegration = (integrationId: string) =>
+  invoke<WorkspaceSkill>('install_builtin_integration', { integrationId });
+
+export const getMcpServers = () => invoke<McpServer[]>('get_mcp_servers');
+
+export const saveMcpServer = (input: SaveMcpServerInput) =>
+  invoke<void>('save_mcp_server', { input });
+
+export const setMcpServerEnabled = (name: string, enabled: boolean) =>
+  invoke<void>('set_mcp_server_enabled', { name, enabled });
+
+export const deleteMcpServer = (name: string) =>
+  invoke<void>('delete_mcp_server', { name });
+
+export const getPermissionGrants = () => invoke<PermissionGrant[]>('get_permission_grants');
+
+export const revokePermissionGrant = (id: string) => invoke<void>('revoke_permission_grant', { id });
+
+export const getUsageStatus = () => invoke<UsageStatus>('get_usage_status');
+
+// ── Right-side file and browser preview ─────────────────────
+
+export const prepareFilePreview = (path: string) =>
+  invoke<FilePreview>('prepare_file_preview', { path });
+
+export const openPreviewResource = (target: string) =>
+  invoke<void>('open_preview_resource', { target });

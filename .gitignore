@@ -1,0 +1,28 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Rust / Tauri
+**/src-tauri/target/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Test artifacts
+**/coverage/
+**/.turbo/

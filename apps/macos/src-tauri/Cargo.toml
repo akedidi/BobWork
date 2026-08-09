@@ -1,0 +1,58 @@
+[package]
+name = "bob-work"
+version = "0.1.4"
+description = "Bob Work - IBM Bob Desktop Application for macOS"
+authors = ["Bob Work Team"]
+edition = "2021"
+
+[lib]
+name = "bob_work_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-os = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-autostart = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.15"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+dirs = "5"
+which = "6"
+semver = "1"
+open = "5"
+zip = { version = "2", features = ["deflate"] }
+zeroize = "1"
+aes-gcm = "0.10"
+rand = "0.8"
+tauri-plugin-wdio-webdriver = "1.3.0"
+tauri-plugin-wdio = "1.3.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+
+[features]
+e2e = []

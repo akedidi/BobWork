@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f3f5ff"/>
+      <stop offset="100%" style="stop-color:#e8ecff"/>
+    </linearGradient>
+    <!-- Stroke gradient blue→indigo, applied left→right -->
+    <linearGradient id="sg" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" style="stop-color:#5B9DF5"/>
+      <stop offset="100%" style="stop-color:#2923A0"/>
+    </linearGradient>
+    <linearGradient id="eyeG" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2923A0"/>
+      <stop offset="100%" style="stop-color:#1a177a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+
+  <!-- ════════════════════════════════════
+       HARD HAT
+       - Dome: elliptical arc  rx=310, ry=230  (wide & shallow)
+       - Brim: horizontal line from x=140 to x=884
+       - Crest: vertical line top-to-brim
+       Dome feet sit exactly on brim line y=488
+       Dome center is at (512, 488), rx=280, ry=238
+       Arc starts (232, 488) sweeps to (792, 488)
+       ════════════════════════════════════ -->
+
+  <!--
+    Dome: elliptical arc.
+    Endpoints: (212, 488) → (812, 488)  chord = 600, half-chord = 300
+    rx = 360 (> 300 so arc is shallower than hemisphere)
+    ry = 190  (height from brim to apex ≈ 190·(1 - half_chord²/rx²)^0.5 ... )
+    To get apex ~y=280: height = ry * sqrt(1 - (300/360)²) = 190*0.554 ≈ 105  → apex y ≈ 488-105 = 383  too small
+    Let's use ry=310, rx=340:  height = 310 * sqrt(1-(300/340)²) = 310*0.47 = 146 → apex ≈ 342  good
+  -->
+  <path d="M 212 488 A 340 310 0 0 1 812 488"
+        fill="none" stroke="url(#sg)" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- Brim: protrudes well past dome feet (212/812) -->
+  <line x1="128" y1="488" x2="896" y2="488"
+        stroke="url(#sg)" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- Crest: apex of A 340 310 with the above endpoints is near y≈342 -->
+  <line x1="512" y1="358" x2="512" y2="464"
+        stroke="url(#sg)" stroke-width="44" stroke-linecap="round"/>
+
+  <!-- ════════════════════════════════════
+       FACE / HEAD
+       Sits below brim with small gap
+       ════════════════════════════════════ -->
+
+  <!-- Face rounded rect -->
+  <rect x="260" y="530" width="504" height="406" rx="94" ry="94"
+        fill="none" stroke="url(#sg)" stroke-width="52"/>
+
+  <!-- Left eye -->
+  <circle cx="390" cy="684" r="37" fill="url(#eyeG)"/>
+  <!-- Right eye -->
+  <circle cx="634" cy="684" r="37" fill="url(#eyeG)"/>
+
+  <!-- Smile -->
+  <path d="M 382 796 Q 512 906 642 796"
+        fill="none" stroke="url(#sg)" stroke-width="48" stroke-linecap="round"/>
+</svg>
