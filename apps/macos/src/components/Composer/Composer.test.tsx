@@ -5,17 +5,42 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { open } from '@tauri-apps/plugin-dialog'
 import Composer from './Composer'
 
-const mocks = vi.hoisted(() => ({ getPlugins: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  getPlugins: vi.fn(),
+  getSkills: vi.fn(),
+  allowComposerAttachments: vi.fn(),
+  onDragDropHandler: null as null | ((event: { payload: { type: string; paths?: string[] } }) => void),
+}))
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    onDragDropEvent: (handler: typeof mocks.onDragDropHandler) => {
+      mocks.onDragDropHandler = handler
+      return Promise.resolve(() => {
+        mocks.onDragDropHandler = null
+      })
+    },
+  }),
+}))
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (path: string) => `asset://${path}`,
+}))
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  stat: vi.fn(async (path: string) => ({
+    isDirectory: path.endsWith('dossier-projet'),
+    size: path.endsWith('.png') ? 2048 : 4096,
+  })),
+}))
 vi.mock('../../lib/ipc', () => ({
   getBobModes: vi.fn().mockResolvedValue([
     { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'test' },
     { slug: 'plan', name: 'Plan', description: 'Préparer un plan', groups: [], builtin: true, source: 'test' },
   ]),
   getProjects: vi.fn().mockResolvedValue([]),
-  getSkills: vi.fn().mockResolvedValue([]),
+  getSkills: mocks.getSkills,
   getPlugins: mocks.getPlugins,
+  allowComposerAttachments: mocks.allowComposerAttachments,
 }))
 
 async function renderComposer(props: Partial<ComponentProps<typeof Composer>> = {}) {
@@ -30,6 +55,8 @@ describe('Composer popovers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.getPlugins.mockResolvedValue([])
+    mocks.getSkills.mockResolvedValue([])
+    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
   })
 
   it('renders popovers in a portal outside the clipped composer surface', async () => {
@@ -89,6 +116,8 @@ describe('Composer popovers', () => {
     fireEvent.click(screen.getByRole('button', { name: /Fichier\(s\)/ }))
     await waitFor(() => expect(screen.getByText('rapport.pdf')).toBeVisible())
     expect(screen.getByText('tableau.xlsx')).toBeVisible()
+    expect(screen.getByText('PDF')).toBeVisible()
+    expect(screen.getByText('XLSX')).toBeVisible()
     expect(screen.getAllByRole('button', { name: 'Retirer' })).toHaveLength(2)
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Analyse les pièces jointes' } })
@@ -110,6 +139,63 @@ describe('Composer popovers', () => {
     await waitFor(() => expect(screen.getByText('dossier-projet')).toBeVisible())
     fireEvent.click(screen.getByRole('button', { name: 'Retirer' }))
     expect(screen.queryByText('dossier-projet')).not.toBeInTheDocument()
+  })
+
+  it('accepte le drag & drop natif Tauri avec chemins absolus', async () => {
+    await renderComposer()
+    await waitFor(() => expect(mocks.onDragDropHandler).toBeTypeOf('function'))
+
+    await act(async () => {
+      mocks.onDragDropHandler?.({ payload: { type: 'enter', paths: [] } })
+      mocks.onDragDropHandler?.({
+        payload: { type: 'drop', paths: ['/tmp/photo.png', '/tmp/note.txt'] },
+      })
+    })
+
+    await waitFor(() => expect(screen.getByRole('img', { name: 'photo.png' })).toBeVisible())
+    expect(screen.getByText('note.txt')).toBeVisible()
+    expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/photo.png', '/tmp/note.txt'])
+  })
+
+  it('accepte le drag & drop HTML avec chemins injectés par Tauri', async () => {
+    await renderComposer()
+    const composer = document.querySelector('.composer')
+    expect(composer).toBeTruthy()
+
+    fireEvent.dragEnter(composer!)
+    expect(composer).toHaveClass('composer-dragging')
+
+    const file = new File(['hello'], 'hello.pdf', { type: 'application/pdf' })
+    Object.defineProperty(file, 'path', { value: '/tmp/hello.pdf' })
+
+    fireEvent.drop(composer!, {
+      dataTransfer: { files: [file] },
+    })
+
+    expect(composer).not.toHaveClass('composer-dragging')
+    await waitFor(() => expect(screen.getByText('hello.pdf')).toBeVisible())
+    expect(screen.getByText('PDF')).toBeVisible()
+  })
+
+  it('sélectionne un skill activé depuis le bouton plus et l’ajoute au prompt', async () => {
+    mocks.getSkills.mockResolvedValue([{
+      slug: 'bob-work-github',
+      name: 'GitHub',
+      description: 'Utiliser gh et GH_TOKEN localement.',
+      content: 'Instructions…',
+      sourcePath: '/tmp/.bob/skills/bob-work-github/SKILL.md',
+      scope: 'global-bob',
+      enabled: true,
+    }])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = screen.getByRole('menu', { name: 'Ajouter une pièce jointe' })
+    expect(menu).toHaveTextContent('Skills')
+    fireEvent.click(screen.getByRole('button', { name: /GitHub/ }))
+
+    expect(screen.getByRole('textbox')).toHaveValue('@skill:bob-work-github ')
+    expect(screen.queryByRole('menu', { name: 'Ajouter une pièce jointe' })).not.toBeInTheDocument()
   })
 
   it('sélectionne un plugin activé depuis le bouton plus et l’ajoute au prompt', async () => {
@@ -134,6 +220,8 @@ describe('Composer popovers', () => {
     await renderComposer()
     fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
 
+    expect(screen.getByText('Aucun skill activé.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Gérer les skills' })).toBeVisible()
     expect(screen.getByText('Aucun plugin activé.')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Gérer les plugins' })).toBeVisible()
   })

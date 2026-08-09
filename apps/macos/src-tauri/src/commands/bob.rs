@@ -250,6 +250,7 @@ pub async fn send_message(
 
     let mut plugin_integration_ids = vec![];
     let mut plugin_hooks = vec![];
+    let mut office_plugins = vec![];
     let mut checked_plugin_ids = std::collections::HashSet::new();
     for captures in regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)")
         .unwrap()
@@ -287,7 +288,12 @@ pub async fn send_message(
                     )
                 })
             });
-        if requires_preflight && !approved_plugin_ids.iter().any(|value| value == plugin_id) {
+        let trusted_local_office = plugin.manifest.get("builtin") == Some(&serde_json::Value::Bool(true))
+            && plugin.manifest.get("specializedMode").is_some();
+        if requires_preflight
+            && !trusted_local_office
+            && !approved_plugin_ids.iter().any(|value| value == plugin_id)
+        {
             return Err(AppError::PermissionDenied(format!(
                 "Le plugin {} nécessite une autorisation explicite avant cette exécution.",
                 plugin.name
@@ -340,7 +346,7 @@ pub async fn send_message(
             .collect::<Vec<_>>();
         if !missing_browser.is_empty() {
             return Err(AppError::PermissionDenied(format!(
-                "Le plugin {} nécessite une capacité navigateur autorisée : {}. Activez-la dans Réglages et son outil MCP compatible.",
+                "Le plugin {} nécessite une capacité navigateur autorisée : {}. Activez-la dans Réglages Bob Work → Accès et contrôle, puis configurez l’outil MCP compatible.",
                 plugin.name,
                 missing_browser.join(", ")
             )));
@@ -353,6 +359,9 @@ pub async fn send_message(
                 .map(|integration| integration.provider.clone()),
         );
         plugin_hooks.extend(PluginExtensionService::new().prepare_hooks(&plugin.manifest)?);
+        if plugin.manifest.get("specializedMode").is_some() {
+            office_plugins.push(plugin);
+        }
     }
 
     // 1. Persist user message
@@ -371,7 +380,7 @@ pub async fn send_message(
             })
             .collect(),
     );
-    conv_service.add_message(
+    let user_message = conv_service.add_message(
         &db,
         AddMessageInput {
             conversation_id: conversation_id.clone(),
@@ -531,7 +540,7 @@ pub async fn send_message(
         .as_ref()
         .map(|value| value.allowed_integrations.clone())
         .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec!["github".into(), "slack".into(), "monday".into()]);
+        .unwrap_or_else(|| vec!["github".into(), "slack".into(), "monday".into(), "outlook-mail".into(), "teams".into(), "outlook-calendar".into(), "onedrive".into()]);
     integration_ids.extend(plugin_integration_ids);
     integration_ids.sort();
     integration_ids.dedup();
@@ -546,6 +555,7 @@ pub async fn send_message(
         &attachment_paths,
         settings.web_enabled,
         &available_integration_context(&bob_service, &integration_ids),
+        build_office_specialized_context(&office_plugins, &attachment_paths),
     );
 
     // 6. Audit log: session started
@@ -600,6 +610,7 @@ pub async fn send_message(
     Ok(StartSessionResult {
         session_id,
         task_id: task.id,
+        user_message_id: user_message.id,
     })
 }
 
@@ -699,6 +710,7 @@ fn build_prompt_with_history(
     attachment_paths: &[String],
     web_enabled: bool,
     integration_context: &[String],
+    office_context: Option<String>,
 ) -> String {
     let prefix = match mode {
         "ask" | "quick_chat" =>
@@ -738,8 +750,9 @@ fn build_prompt_with_history(
         (!global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", global_instructions.trim())),
         project_instructions.filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
         plugin_creation_protocol(message),
+        office_context,
         (!attachment_paths.is_empty()).then(|| format!(
-            "Pièces jointes autorisées pour cette demande :\n{}",
+            "Pièces jointes autorisées pour cette demande (fichiers locaux — ne pas uploader vers un cloud) :\n{}",
             attachment_paths.iter().map(|path| format!("- {}", path)).collect::<Vec<_>>().join("\n")
         )),
         (!web_enabled).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette demande.".to_string()),
@@ -771,6 +784,108 @@ fn build_prompt_with_history(
             format!("{}\n\n{}", prefix, instruction_context), ctx, message
         )
     }
+}
+
+fn build_office_specialized_context(
+    plugins: &[crate::models::plugin::Plugin],
+    attachment_paths: &[String],
+) -> Option<String> {
+    if plugins.is_empty() {
+        return None;
+    }
+
+    let matched_attachments = attachment_paths
+        .iter()
+        .filter(|path| {
+            let ext = std::path::Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| format!(".{}", value.to_lowercase()))
+                .unwrap_or_default();
+            plugins
+                .iter()
+                .any(|plugin| plugin_matches_extension(&plugin.manifest, &ext))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut blocks = vec![];
+    for plugin in plugins {
+        let Some(mode) = plugin.manifest.get("specializedMode") else {
+            continue;
+        };
+        let label = mode
+            .get("label")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&plugin.name);
+        let workflow = mode.get("workflow").and_then(|value| value.as_str()).unwrap_or("");
+        let allowed_tools = mode
+            .get("allowedTools")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let output_formats = mode
+            .get("outputFormats")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let libraries = mode
+            .get("preferredLibraries")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+
+        blocks.push(format!(
+            "Mode spécialisé actif — {} :\n- Format de sortie attendu : {}\n- Outils autorisés : {}\n- Bibliothèques Python recommandées : {}\n- Workflow : {}\n- Utilise d’abord le MCP local office-tools du plugin (use_mcp_tool), puis une commande Python si nécessaire.\n- Traitement 100 % local : ne pas uploader les pièces jointes.",
+            label, output_formats, allowed_tools, libraries, workflow
+        ));
+    }
+
+    if !matched_attachments.is_empty() {
+        blocks.push(format!(
+            "Fichiers Office/documents joints à traiter en priorité :\n{}",
+            matched_attachments
+                .iter()
+                .map(|path| format!("- {}", path))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Some(format!(
+        "Protocole Bob Work — plugins Microsoft/Documents (équivalent ChatGPT Work, sandbox locale)\n\n{}",
+        blocks.join("\n\n")
+    ))
+}
+
+fn plugin_matches_extension(manifest: &serde_json::Value, extension: &str) -> bool {
+    manifest
+        .get("fileExtensions")
+        .and_then(|value| value.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
+            })
+        })
 }
 
 fn plugin_creation_protocol(message: &str) -> Option<String> {
@@ -808,6 +923,10 @@ fn available_integration_context(bob_service: &BobService, ids: &[String]) -> Ve
                 "github" => "- GitHub via GH_TOKEN/GITHUB_TOKEN et le skill $bob-work-github",
                 "slack" => "- Slack via SLACK_BOT_TOKEN et le skill $bob-work-slack",
                 "monday" => "- Monday.com via MONDAY_API_TOKEN et le skill $bob-work-monday",
+                "outlook-mail" => "- Outlook via MICROSOFT_GRAPH_ACCESS_TOKEN et le skill $bob-work-outlook-mail",
+                "outlook-calendar" => "- Outlook Calendar via MICROSOFT_GRAPH_ACCESS_TOKEN et le skill $bob-work-outlook-calendar",
+                "teams" => "- Microsoft Teams via MICROSOFT_GRAPH_ACCESS_TOKEN et le skill $bob-work-teams",
+                "onedrive" => "- OneDrive via MICROSOFT_GRAPH_ACCESS_TOKEN et le skill $bob-work-onedrive",
                 _ => return None,
             };
             bob_service
@@ -822,4 +941,5 @@ fn available_integration_context(bob_service: &BobService, ids: &[String]) -> Ve
 pub struct StartSessionResult {
     pub session_id: String,
     pub task_id: String,
+    pub user_message_id: String,
 }

@@ -6,13 +6,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { Copy, Check } from 'lucide-react'
+import { Copy, Check, Pencil } from 'lucide-react'
 import Composer from '../components/Composer/Composer'
 import WorkspacePanel, { type PanelActivity, type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
 import ReactMarkdown from 'react-markdown'
 import {
   sendMessage, stopTask,
   getConversation, getMessages, createConversation, updateConversation, getTaskDetail, cancelTask, getTasks, getPlugin,
+  rewindConversationFromMessage,
 } from '../lib/ipc'
 import type { MessageAttachment, MessageSource, TaskDetail } from '@bob-work/shared-types'
 
@@ -24,6 +25,7 @@ interface Msg {
   content: string
   ts: string
   state: 'sent' | 'streaming' | 'done' | 'error'
+  persisted?: boolean
   attachments?: MessageAttachment[]
   sources?: MessageSource[]
 }
@@ -87,8 +89,11 @@ export default function ChatView() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [previewRequest, setPreviewRequest] = useState<PreviewRequest | null>(null)
   const [activities, setActivities] = useState<BobActivityEvent[]>([])
+  const [thinkingText, setThinkingText] = useState('')
   const [promptQueue, setPromptQueue] = useState<QueuedPrompt[]>([])
   const [loadingHistory, setLoadingHistory] = useState(!!id)
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [bobMode, setBobMode] = useState('agent')
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const unlistenRef = useRef<UnlistenFn[]>([])
@@ -105,7 +110,7 @@ export default function ChatView() {
   // Auto-scroll on new content
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [msgs])
+  }, [msgs, thinkingText])
 
   // ── Load existing conversation ───────────────────────────────
   useEffect(() => {
@@ -123,6 +128,7 @@ export default function ChatView() {
         if (conv) {
           setConvTitle(conv.title)
           setConversationPinned(conv.pinned)
+          setBobMode(conv.bobMode ?? 'agent')
         }
         setMsgs(prev => {
           const loaded = messages.map(m => ({
@@ -131,6 +137,7 @@ export default function ChatView() {
             content: m.content,
             ts: m.createdAt,
             state: 'done' as const,
+            persisted: true,
             attachments: m.attachments,
             sources: m.sources,
           }))
@@ -161,6 +168,34 @@ export default function ChatView() {
     })
     return () => { disposed = true; unlisten?.() }
   }, [convId])
+
+  useEffect(() => {
+    if (!convId || convId.startsWith('ephemeral-')) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen<string>('conversation-messages-changed', event => {
+      if (event.payload !== convId || editingMessageId) return
+      getMessages(convId).then(messages => {
+        if (disposed || runningRef.current) return
+        setMsgs(messages.map(m => ({
+          id: m.id,
+          role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: m.content,
+          ts: m.createdAt,
+          state: 'done' as const,
+          persisted: true,
+          attachments: m.attachments,
+          sources: m.sources,
+        })))
+        setActivities([])
+        setTaskDetail(null)
+        setTaskId(null)
+      }).catch(() => {})
+    }).then(fn => {
+      if (disposed) fn(); else unlisten = fn
+    })
+    return () => { disposed = true; unlisten?.() }
+  }, [convId, editingMessageId])
 
   // ── Handle initial prompt from HomeView ──────────────────────
   const routeState = location.state as { initialPrompt?: string; mode?: string; attachmentPaths?: string[]; projectId?: string; resumeTaskId?: string } | null
@@ -193,6 +228,10 @@ export default function ChatView() {
     const unToken = await listen<BobTokenEvent>('bob-token', event => {
       if (!matchesActiveSession(event.payload)) return
 
+      if (event.payload.eventType === 'thought' && event.payload.chunk) {
+        setThinkingText(current => appendThinkingText(current, event.payload.chunk))
+      }
+
       setMsgs(prev => {
         const streaming = prev.find(m => m.state === 'streaming')
         if (streaming) {
@@ -216,6 +255,15 @@ export default function ChatView() {
     const unActivity = await listen<BobActivityEvent>('bob-activity', event => {
       if (!matchesActiveSession(event.payload)) return
       setActivities(current => [...current, event.payload])
+      const { eventType, content, title, toolName } = event.payload
+      if (eventType === 'analysis' && content) {
+        setThinkingText(current => appendThinkingText(current, content))
+      } else if (eventType === 'tool_started') {
+        const line = title || (toolName ? `Outil ${toolName}` : 'Outil en cours…')
+        setThinkingText(current => appendThinkingText(current, line))
+      } else if (eventType === 'step' && content) {
+        setThinkingText(current => appendThinkingText(current, content))
+      }
     })
 
     // bob-session-done: finalise + persist
@@ -254,6 +302,7 @@ export default function ChatView() {
       setIsRunning(false)
       runningRef.current = false
       setSessionId(null)
+      setThinkingText('')
 
       const completedTaskId = event.payload.taskId
       if (completedTaskId) {
@@ -336,10 +385,12 @@ export default function ChatView() {
       content: text,
       ts: new Date().toISOString(),
       state: 'sent',
+      persisted: false,
       attachments: attachmentPaths.map((path, index) => ({ id: `attachment-${index}`, name: path.split('/').pop() || path, size: 0, type: 'file', path })),
     }
     setMsgs(prev => [...prev, userMsg])
     setActivities([])
+    setThinkingText('')
     setTaskDetail(null)
 
     const mentionedPluginIds = Array.from(text.matchAll(/@plugin:([A-Za-z0-9-]+)/g), match => match[1])
@@ -347,9 +398,10 @@ export default function ChatView() {
     for (const pluginId of mentionedPluginIds) {
       try {
         const plugin = await getPlugin(pluginId)
-        const manifest = plugin?.manifest as unknown as { permissions?: { type?: string; description?: string }[]; runtime?: { python?: string; cli?: boolean } } | undefined
+        const manifest = plugin?.manifest as unknown as { builtin?: boolean; specializedMode?: unknown; permissions?: { type?: string; description?: string }[]; runtime?: { python?: string; cli?: boolean } } | undefined
         const guarded = manifest?.permissions?.filter(permission => ['command.execute', 'file.delete', 'network.request', 'mcp.connect'].includes(permission.type ?? '')) ?? []
-        if (plugin && guarded.length > 0) {
+        const trustedLocalOffice = Boolean(manifest?.builtin && manifest?.specializedMode)
+        if (plugin && guarded.length > 0 && !trustedLocalOffice) {
           const runtime = [manifest?.runtime?.python ? 'Python' : '', manifest?.runtime?.cli ? 'CLI' : ''].filter(Boolean).join(' / ')
           const details = guarded.map(permission => `• ${permission.description || permission.type}`).join('\n')
           const accepted = window.confirm(`Autoriser « ${plugin.name} » pour ce prompt${runtime ? ` (${runtime})` : ''} ?\n\n${details}\n\nBob Work lancera Bob Shell uniquement après votre accord.`)
@@ -384,6 +436,10 @@ export default function ChatView() {
         resumeTaskId,
         approvedPluginIds,
       })
+
+      setMsgs(prev => prev.map(m =>
+        m.id === userMsg.id ? { ...m, id: result.userMessageId, persisted: true } : m
+      ))
 
       setTaskId(result.taskId)
       if (completedSessionsRef.current.delete(result.sessionId)) {
@@ -452,7 +508,7 @@ export default function ChatView() {
   }, [replaceQueue])
 
   // ── Stop ─────────────────────────────────────────────────────
-  const handleStop = async () => {
+  const handleStop = useCallback(async () => {
     if (!sessionId) return
     try {
       await stopTask(sessionId)
@@ -461,13 +517,93 @@ export default function ChatView() {
     runningRef.current = false
     setIsRunning(false)
     setSessionId(null)
+    setThinkingText('')
     if (taskId) setTaskId(null)
     unlistenRef.current.forEach(fn => fn())
     unlistenRef.current = []
     setMsgs(prev =>
       prev.map(m => m.state === 'streaming' ? { ...m, state: 'done' } : m)
     )
-  }
+  }, [sessionId, taskId])
+
+  const handleEditMessage = useCallback(async (msg: Msg, newContent: string) => {
+    const trimmed = newContent.trim()
+    if (!trimmed || !convId || convId.startsWith('ephemeral-')) return
+    if (trimmed === msg.content.trim()) {
+      setEditingMessageId(null)
+      return
+    }
+    if (!msg.persisted) {
+      setMsgs(prev => [...prev, {
+        id: `edit-err-${Date.now()}`,
+        role: 'assistant',
+        content: 'Ce message n’est pas encore enregistré. Attendez la fin de l’envoi ou rechargez la conversation.',
+        ts: new Date().toISOString(),
+        state: 'error',
+      }])
+      setEditingMessageId(null)
+      return
+    }
+
+    const index = msgs.findIndex(item => item.id === msg.id)
+    if (index < 0) return
+
+    const messagesAfter = msgs.length - index - 1
+    if (messagesAfter > 0) {
+      const accepted = window.confirm(
+        messagesAfter === 1
+          ? 'Modifier ce message supprimera la réponse suivante et relancera Bob avec le nouveau prompt.'
+          : `Modifier ce message supprimera ${messagesAfter} message(s) suivant(s) et relancera Bob avec le nouveau prompt.`,
+      )
+      if (!accepted) return
+    }
+
+    setEditingMessageId(null)
+    replaceQueue([])
+
+    if (runningRef.current) {
+      await handleStop()
+      if (taskId) {
+        try { await cancelTask(taskId) } catch { /* ignore */ }
+      }
+    }
+
+    activeSessionRef.current = null
+    setSessionId(null)
+    setTaskId(null)
+    setTaskDetail(null)
+    completedSessionsRef.current.clear()
+
+    try {
+      const rewind = await rewindConversationFromMessage(convId, msg.id)
+      if (rewind.titleReset) {
+        setConvTitle('Nouvelle conversation')
+      }
+      setMsgs(prev => prev.slice(0, index))
+      setActivities([])
+      setThinkingText('')
+
+      const attachmentPaths = (msg.attachments ?? [])
+        .map(item => item.path)
+        .filter((path): path is string => !!path)
+
+      await executePrompt({
+        id: `queued-edit-${Date.now()}`,
+        text: trimmed,
+        mode: bobMode,
+        attachmentPaths,
+        queuedAt: new Date().toISOString(),
+      })
+    } catch (err) {
+      setMsgs(prev => [...prev, {
+        id: `edit-err-${Date.now()}`,
+        role: 'assistant',
+        content: `Impossible de modifier le message : ${err instanceof Error ? err.message : String(err)}`,
+        ts: new Date().toISOString(),
+        state: 'error',
+      }])
+    }
+  }, [bobMode, convId, executePrompt, handleStop, msgs, replaceQueue, taskId])
 
   const handleTogglePin = async () => {
     if (!convId || convId.startsWith('ephemeral-')) return
@@ -542,8 +678,31 @@ export default function ChatView() {
           <LoadingMessages />
         ) : (
           <div style={{ maxWidth: 720, margin: '0 auto', padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {msgs.map(msg => <MessageBubble key={msg.id} msg={msg} onOpenResource={openPreview} />)}
-            {isRunning && msgs[msgs.length - 1]?.state !== 'streaming' && <TypingIndicator />}
+            {msgs.map(msg => (
+              <div key={msg.id}>
+                {isRunning && msg.state === 'streaming' && thinkingText && (
+                  <WorkingIndicator thinking={thinkingText} loading={false} />
+                )}
+                <MessageBubble
+                  msg={msg}
+                  onOpenResource={openPreview}
+                  canEdit={
+                    msg.role === 'user'
+                    && !!msg.persisted
+                    && !isRunning
+                    && !convId?.startsWith('ephemeral-')
+                    && (msg.state === 'done' || msg.state === 'sent')
+                  }
+                  isEditing={editingMessageId === msg.id}
+                  onStartEdit={() => setEditingMessageId(msg.id)}
+                  onCancelEdit={() => setEditingMessageId(null)}
+                  onSubmitEdit={content => handleEditMessage(msg, content)}
+                />
+              </div>
+            ))}
+            {isRunning && !msgs.some(message => message.state === 'streaming') && (
+              <WorkingIndicator thinking={thinkingText} loading />
+            )}
             <div ref={bottomRef} />
           </div>
         )}
@@ -583,21 +742,101 @@ export default function ChatView() {
 
 // ── Message Bubble ────────────────────────────────────────────
 
-export function MessageBubble({ msg, onOpenResource }: { msg: Msg; onOpenResource: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
+export function MessageBubble({
+  msg,
+  onOpenResource,
+  canEdit = false,
+  isEditing = false,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+}: {
+  msg: Msg
+  onOpenResource: (target: string, title?: string, kind?: 'file' | 'web') => void
+  canEdit?: boolean
+  isEditing?: boolean
+  onStartEdit?: () => void
+  onCancelEdit?: () => void
+  onSubmitEdit?: (content: string) => void
+}) {
   const [copied, setCopied] = useState(false)
+  const [draft, setDraft] = useState(msg.content)
+  const editRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (isEditing) {
+      setDraft(msg.content)
+      requestAnimationFrame(() => {
+        const el = editRef.current
+        if (!el) return
+        el.focus()
+        el.setSelectionRange(el.value.length, el.value.length)
+      })
+    }
+  }, [isEditing, msg.content])
+
   const handleCopy = () => {
     navigator.clipboard.writeText(msg.content)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const submitEdit = () => {
+    if (!onSubmitEdit) return
+    const trimmed = draft.trim()
+    if (!trimmed) return
+    onSubmitEdit(trimmed)
+  }
+
   if (msg.role === 'user') {
     return (
       <div className="msg-user-row group items-center gap-2">
-        <button onClick={handleCopy} className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400" title="Copier" style={{ cursor: 'pointer' }}>
-           {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
-        <div className="msg-user-stack"><div className="msg-user">{msg.content}</div><MessageResources msg={msg} onOpen={onOpenResource} /></div>
+        <div className="msg-user-actions">
+          {canEdit && !isEditing && (
+            <button
+              onClick={onStartEdit}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400"
+              title="Modifier"
+              style={{ cursor: 'pointer' }}
+            >
+              <Pencil size={14} />
+            </button>
+          )}
+          {!isEditing && (
+            <button onClick={handleCopy} className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400" title="Copier" style={{ cursor: 'pointer' }}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          )}
+        </div>
+        <div className="msg-user-stack">
+          {isEditing ? (
+            <div className="msg-user-edit">
+              <textarea
+                ref={editRef}
+                className="msg-user-edit-input"
+                value={draft}
+                onChange={event => setDraft(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancelEdit?.()
+                  } else if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    submitEdit()
+                  }
+                }}
+                rows={Math.min(12, Math.max(2, draft.split('\n').length))}
+              />
+              <div className="msg-edit-actions">
+                <button type="button" className="msg-edit-cancel" onClick={onCancelEdit}>Annuler</button>
+                <button type="button" className="msg-edit-save" onClick={submitEdit} disabled={!draft.trim()}>Envoyer</button>
+              </div>
+            </div>
+          ) : (
+            <div className="msg-user">{msg.content}</div>
+          )}
+          {!isEditing && <MessageResources msg={msg} onOpen={onOpenResource} />}
+        </div>
       </div>
     )
   }
@@ -698,27 +937,33 @@ function BobAvatar({ streaming, error }: { streaming?: boolean; error?: boolean 
   )
 }
 
-function TypingIndicator() {
+export function appendThinkingText(current: string, chunk: string): string {
+  const next = chunk.trim()
+  if (!next) return current
+  if (!current) return next
+  if (current === next || current.endsWith(next)) return current
+  if (next.startsWith(current)) return next
+  if (next.length <= 48 && !next.includes('\n') && !current.endsWith('\n')) {
+    return `${current} ${next}`.replace(/\s{2,}/g, ' ').trim()
+  }
+  return `${current}\n${next}`
+}
+
+export function WorkingIndicator({ thinking, loading }: { thinking: string; loading: boolean }) {
   return (
-    <div role="status" aria-label="Bob travaille" style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+    <div role="status" aria-label="Bob réfléchit" className="working-indicator">
       <BobAvatar streaming />
-      <div style={{
-        display: 'flex', gap: 5, alignItems: 'center',
-        padding: '12px 16px', borderRadius: 'var(--radius-lg)',
-        background: 'var(--bg-surface)', border: '1px solid var(--border)',
-      }}>
-        {[0, 1, 2].map(i => (
-          <div key={i} style={{
-            width: 7, height: 7, borderRadius: '50%',
-            background: 'var(--text-muted)',
-            animation: `bounce 1.2s ${i * 0.2}s ease-in-out infinite`,
-          }} />
-        ))}
+      <div className="working-indicator-body">
+        {loading && (
+          <div className="typing-dots" aria-hidden="true">
+            {[0, 1, 2].map(index => <span key={index} className="typing-dot" style={{ animationDelay: `${index * 0.2}s` }} />)}
+          </div>
+        )}
+        <div className="thinking-stream-wrap">
+          <div className="thinking-stream-label">{loading ? 'Réflexion' : 'Réflexion en cours'}</div>
+          <div className="thinking-stream">{thinking || 'Analyse de la demande…'}</div>
+        </div>
       </div>
-      <style>{`
-        @keyframes bounce { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-5px);opacity:1} }
-        @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:0} }
-      `}</style>
     </div>
   )
 }

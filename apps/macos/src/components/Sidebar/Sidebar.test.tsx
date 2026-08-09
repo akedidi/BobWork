@@ -24,6 +24,7 @@ vi.mock('../../lib/ipc', () => ({
   updateConversation: mocks.updateConversation,
   updateTaskPinned: mocks.updateTaskPinned,
   searchWorkspace: vi.fn().mockResolvedValue([]),
+  getUsageStatus: vi.fn().mockResolvedValue(null),
 }))
 
 describe('Sidebar', () => {
@@ -71,5 +72,22 @@ describe('Sidebar', () => {
 
     expect(projectsHeading.compareDocumentPosition(conversationsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByText('Documents')).not.toBeInTheDocument()
+  })
+
+  it('keeps Nouveau chat outside the scrollable conversation list', async () => {
+    render(
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(screen.getByText('Nouveau chat')).toBeVisible())
+
+    const newChat = screen.getByText('Nouveau chat')
+    const scrollArea = document.querySelector('.sidebar-content')
+
+    expect(scrollArea).toBeTruthy()
+    expect(newChat.closest('.sidebar-nav')).toBeTruthy()
+    expect(scrollArea?.contains(newChat)).toBe(false)
   })
 })

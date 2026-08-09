@@ -508,6 +508,14 @@ export interface PluginIntegrationStatus {
   message: string;
 }
 
+export interface MacosChromeControlStatus {
+  chromeInstalled: boolean;
+  mcpConfigured: boolean;
+  mcpEnabled: boolean;
+  automation: 'granted' | 'denied' | 'chrome_missing' | 'unavailable' | 'unknown';
+  automationMessage: string;
+}
+
 export interface PluginBrowserExtension {
   id: string;
   displayName: string;
@@ -874,8 +882,10 @@ export interface UsageStatus {
   available: boolean;
   usedAmount?: number;
   remainingAmount?: number;
+  totalAmount?: number;
   unit?: string;
   capturedAt?: string;
+  instanceLabel?: string;
   message: string;
 }
 

@@ -12,6 +12,7 @@ import type {
   Approval, ResolveApprovalInput,
   Artifact,
   AppSettings,
+  MacosChromeControlStatus,
   BobDetectionResult, CapabilityInfo,
   Schedule, ScheduleRun, CreateScheduleInput,
   ShellProfile, BobMode, TaskDetail, SearchResult, WorkspaceSkill, SaveSkillInput,
@@ -40,7 +41,7 @@ export const sendMessage = (params: {
   attachmentPaths?: string[];
   resumeTaskId?: string;
   approvedPluginIds?: string[];
-}) => invoke<{ sessionId: string; taskId: string }>('send_message', {
+}) => invoke<{ sessionId: string; taskId: string; userMessageId: string }>('send_message', {
   conversationId: params.conversationId,
   message: params.message,
   mode: params.mode,
@@ -93,11 +94,31 @@ export const getMessages = (conversationId: string) =>
 export const addMessage = (input: AddMessageInput) =>
   invoke<Message>('add_message', { input });
 
+export const truncateMessagesFrom = (conversationId: string, messageId: string) =>
+  invoke<number>('truncate_messages_from', { conversationId, messageId });
+
+export interface RewindConversationResult {
+  deletedMessages: number;
+  cancelledTasks: number;
+  titleReset: boolean;
+}
+
+export const rewindConversationFromMessage = (conversationId: string, messageId: string) =>
+  invoke<RewindConversationResult>('rewind_conversation_from_message', { conversationId, messageId });
+
 export const importConversations = (path: string) =>
   invoke<ConversationTransferSummary>('import_conversations', { path });
 
-export const exportConversations = (path: string) =>
-  invoke<ConversationTransferSummary>('export_conversations', { path });
+export type ConversationExportFormat = 'bob-work-export-v1' | 'chatgpt' | 'claude-cowork';
+
+export const exportConversations = (path: string, format: ConversationExportFormat = 'bob-work-export-v1') =>
+  invoke<ConversationTransferSummary>('export_conversations', { path, format });
+
+export const openMacosPrivacyPane = (pane: 'accessibility' | 'automation') =>
+  invoke<void>('open_macos_privacy_pane', { pane });
+
+export const getChromeControlStatus = () =>
+  invoke<MacosChromeControlStatus>('get_chrome_control_status');
 
 // ── Task Commands ─────────────────────────────────────────────
 
@@ -262,6 +283,68 @@ export const deleteSkill = (slug: string, workspace?: string) =>
 export const installBuiltinIntegration = (integrationId: string) =>
   invoke<WorkspaceSkill>('install_builtin_integration', { integrationId });
 
+export interface IntegrationConnectionStatus {
+  integrationId: string;
+  connected: boolean;
+  authMethod?: 'oauth' | 'token' | null;
+  accountLabel?: string | null;
+  expiresAt?: string | null;
+  oauthClientConfigured: boolean;
+  deviceFlowAvailable: boolean;
+  /** False when the provider token exists but lacks this integration's scopes. */
+  scopeSatisfied: boolean;
+}
+
+export interface OAuthClientConfig {
+  clientId: string;
+  clientSecret?: string | null;
+}
+
+export interface OAuthStartResult {
+  integrationId: string;
+  authUrl: string;
+  state: string;
+  mode: 'web' | 'device';
+  userCode?: string | null;
+  verificationUri?: string | null;
+}
+
+export const getIntegrationStatuses = () =>
+  invoke<IntegrationConnectionStatus[]>('get_integration_statuses');
+
+export const getOAuthClientConfig = (integrationId: string) =>
+  invoke<OAuthClientConfig | null>('get_oauth_client_config', { integrationId });
+
+export const setOAuthClientConfig = (integrationId: string, clientId: string, clientSecret?: string) =>
+  invoke<void>('set_oauth_client_config', { integrationId, clientId, clientSecret });
+
+export const startIntegrationOAuth = (integrationId: string) =>
+  invoke<OAuthStartResult>('start_integration_oauth', { integrationId });
+
+export const connectIntegrationToken = (
+  integrationId: string,
+  accessToken: string,
+  accountLabel?: string,
+) =>
+  invoke<IntegrationConnectionStatus>('connect_integration_token', {
+    integrationId,
+    accessToken,
+    accountLabel,
+  });
+
+export const e2eConnectIntegration = (
+  integrationId: string,
+  accessToken: string,
+  accountLabel?: string,
+) => invoke<IntegrationConnectionStatus>('e2e_connect_integration', {
+  integrationId,
+  accessToken,
+  accountLabel,
+});
+
+export const disconnectIntegration = (integrationId: string) =>
+  invoke<void>('disconnect_integration', { integrationId });
+
 export const getMcpServers = () => invoke<McpServer[]>('get_mcp_servers');
 
 export const saveMcpServer = (input: SaveMcpServerInput) =>
@@ -283,6 +366,9 @@ export const getUsageStatus = () => invoke<UsageStatus>('get_usage_status');
 
 export const prepareFilePreview = (path: string) =>
   invoke<FilePreview>('prepare_file_preview', { path });
+
+export const allowComposerAttachments = (paths: string[]) =>
+  invoke<string[]>('allow_composer_attachments', { paths });
 
 export const openPreviewResource = (target: string) =>
   invoke<void>('open_preview_resource', { target });

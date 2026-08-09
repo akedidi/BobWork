@@ -1,0 +1,18 @@
+{
+  "github": {
+    "clientId": "",
+    "clientSecret": ""
+  },
+  "slack": {
+    "clientId": "",
+    "clientSecret": ""
+  },
+  "monday": {
+    "clientId": "",
+    "clientSecret": ""
+  },
+  "microsoft": {
+    "clientId": "",
+    "clientSecret": ""
+  }
+}

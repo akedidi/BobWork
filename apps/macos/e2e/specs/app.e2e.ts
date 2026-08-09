@@ -78,7 +78,7 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await $('button=Enregistrer dans le coffre').click()
     await success.waitForDisplayed({ timeout: 12_000 })
     await $('button=Continuer').click()
-    await expect($('span=Settings')).toBeDisplayed()
+    await expect($('span=Réglages')).toBeDisplayed()
     await expect($('button=Configurer Bob')).not.toExist()
   })
 
@@ -171,7 +171,7 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
 
     const queueButton = $('button[aria-label="Ajouter le prompt à la file"]')
     await queueButton.waitForDisplayed({ timeout: 8_000 })
-    await expect($('[aria-label="Bob travaille"]')).toBeDisplayed()
+    await expect($('[aria-label="Bob réfléchit"]')).toBeDisplayed()
     await expect($(`//div[contains(@class, "sidebar-item") and contains(@class, "sub-item")][.//span[normalize-space()="${FIRST_TITLE}"]]`)).toBeDisplayed({ wait: 8_000 })
     await composer.setValue(SECOND_PROMPT)
     await queueButton.click()
@@ -536,14 +536,14 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await expect($('div=GitHub')).toBeDisplayed()
     await expect($('div=Slack')).toBeDisplayed()
     await expect($('div=Monday.com')).toBeDisplayed()
-    await $('button=Jetons').click()
-    await expect($('button=Enregistrer un jeton')).toBeDisplayed()
-    await $('button=Connecteurs').click()
-    await expect($('button=Configurer le connecteur')).toBeDisplayed()
+    await $('button=Dev & collab').click()
+    await expect($('button=Connecter avec GitHub')).toBeDisplayed()
+    await $('button=Microsoft 365').click()
+    await expect($('button=Connecter avec Microsoft 365')).toBeDisplayed()
   })
 
   it('enregistre les instructions, permissions, limites, extensions, thème et langue', async () => {
-    await $('span=Settings').click()
+    await $('span=Réglages').click()
     await expect($('h2=Réglages')).toBeDisplayed()
 
     const settingsSearch = $('input[aria-label="Rechercher dans les réglages"]')
@@ -571,7 +571,7 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await $('button[aria-label="Envoyer le prompt"]').click()
     await expect($('p*=Réponse Bob E2E terminée.')).toBeDisplayed()
 
-    await $('span=Settings').click()
+    await $('span=Réglages').click()
     await $('button=IBM Bob Shell').click()
     await $('button=Effacer du coffre').click()
     await expect($('button=Enregistrer dans le coffre')).toBeDisplayed()
@@ -586,7 +586,7 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await labelled('Nombre maximal de tours').setValue('7')
     await labelled('Conserver l’historique').setValue('45')
 
-    await $('button=Extensions et web').click()
+    await $('button=Accès et contrôle').click()
     const webToggle = labelled('Accès web')
     if (!(await webToggle.isSelected())) await webToggle.click()
     const subagentToggle = labelled('Sous-agents / orchestrateur')
@@ -595,8 +595,8 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await $('button=Apparence et langue').click()
     await selectValue(await labelled('Thème', 'select'), 'dark')
     await selectValue(await labelled('Langue', 'select'), 'fr')
-    await $('button=Enregistrer').click()
-    await expect($('div.settings-status=Réglages enregistrés.')).toBeDisplayed()
+    await browser.pause(500)
+    await expect($('div.settings-status=Réglages enregistrés.')).toBeDisplayed({ wait: 8_000 })
     await expect($('html')).toHaveElementClass('dark')
 
     await $('button=Instructions').click()

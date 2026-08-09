@@ -4,6 +4,7 @@ import {
   approveConfirmations,
   clickSidebar,
   ensureHomeReady,
+  invokeTauri,
   labelled,
   openPluginPicker,
   selectValue,
@@ -85,10 +86,14 @@ describe('Bob Work — plugins, skills et intégrations MCP (cas réels)', () =>
     const menu = await openPluginPicker()
     const wordChoice = menu.$(`//button[contains(@class, "attach-plugin-row")][contains(., "Microsoft Word")]`)
     await wordChoice.waitForDisplayed({ timeout: 8_000 })
-    await expect(wordChoice.$('.plugin-icon--word')).toBeDisplayed()
+    // Fresh install: builtin plugin row with the Word icon. Once the Office
+    // bundle deployed its skill, the row is skill-backed with the ✦ icon.
+    const hasWordIcon = await wordChoice.$('.plugin-icon--word').isExisting()
+    const hasSkillIcon = await wordChoice.$('.attach-skill-icon').isExisting()
+    expect(hasWordIcon || hasSkillIcon).toBe(true)
     await wordChoice.click()
 
-    expect(await composer.getValue()).toContain('@plugin:builtin-word')
+    expect(await composer.getValue()).toMatch(/@plugin:builtin-word|@skill:bob-work-microsoft-word/)
     await composer.addValue(` ${USE_WORD_PROMPT}`)
     await $('button[aria-label="Envoyer le prompt"]').click()
 
@@ -148,19 +153,20 @@ describe('Bob Work — plugins, skills et intégrations MCP (cas réels)', () =>
     await expect(skillRow).not.toExist()
   })
 
-  it('connecte GitHub avec un jeton de session et installe le skill intégré', async () => {
+  it('connecte GitHub via OAuth et installe le skill intégré', async () => {
     await clickSidebar('Intégrations et MCP')
     await $('button=Intégrations').click()
-    await $('button=Jetons').click()
+    await $('button=Dev & collab').click()
 
-    const githubCard = $('//div[.//div[normalize-space()="GitHub"]][.//button[contains(., "Enregistrer un jeton")]]')
-    await githubCard.$('button=Enregistrer un jeton').click()
-    await expect($('div=Connecter GitHub')).toBeDisplayed()
+    const githubCard = $('//div[.//div[normalize-space()="GitHub"]]')
+    await githubCard.waitForDisplayed()
     await expect(githubCard.$('.plugin-icon--github')).toBeDisplayed()
 
-    const tokenInput = $('input[type="password"]')
-    await tokenInput.setValue(GITHUB_TOKEN)
-    await $('button=Enregistrer').click()
+    await invokeTauri('e2e_connect_integration', {
+      integrationId: 'github',
+      accessToken: GITHUB_TOKEN,
+      accountLabel: 'e2e-user',
+    })
 
     await expect(githubCard.$('.status-dot.green')).toBeDisplayed({ wait: 8_000 })
     await expect(githubCard.$('button=Déconnecter')).toBeDisplayed()
@@ -170,7 +176,6 @@ describe('Bob Work — plugins, skills et intégrations MCP (cas réels)', () =>
     const githubSkill = $(`//div[contains(@class, "skill-list-row")][contains(., "bob-work-github")]`)
     await githubSkill.$('button.skill-row-main').click()
     await expect($('aside[aria-label="Détails du skill bob-work-github"]')).toBeDisplayed()
-    await expect($('pre*=GH_TOKEN')).toBeDisplayed()
   })
 
   it('injecte le jeton GitHub dans Bob Shell lors d’une tâche réelle', async () => {
@@ -237,12 +242,12 @@ describe('Bob Work — plugins, skills et intégrations MCP (cas réels)', () =>
   it('déconnecte GitHub et supprime le serveur MCP de test', async () => {
     await clickSidebar('Intégrations et MCP')
     await $('button=Intégrations').click()
-    await $('button=Jetons').click()
+    await $('button=Dev & collab').click()
 
     const githubCard = $('//div[.//div[normalize-space()="GitHub"]][.//button[contains(., "Déconnecter")]]')
     await approveConfirmations()
     await githubCard.$('button=Déconnecter').click()
-    await expect(githubCard.$('button=Enregistrer un jeton')).toBeDisplayed({ wait: 8_000 })
+    await expect(githubCard.$('button=Connecter avec GitHub')).toBeDisplayed({ wait: 8_000 })
 
     await $('button=Serveurs MCP').click()
     const serverCard = $(`//article[contains(@class, "extension-card")][contains(., "${MCP_ECHO}")]`)

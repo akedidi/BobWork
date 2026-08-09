@@ -102,11 +102,41 @@ impl PluginService {
                 );
             }
             if existing.install_state == "installed" {
-                PluginDeployService::new().deploy(builtin.id, &existing.manifest)?;
+                let deploy_manifest = if packaged_version == current_version {
+                    &builtin.manifest
+                } else {
+                    &existing.manifest
+                };
+                PluginDeployService::new().deploy(builtin.id, deploy_manifest)?;
             }
             if !self.version_exists(db, builtin.id, &existing.version)? {
                 self.persist_version(db, &existing, None, true)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Register local Office MCP servers for installed built-in document plugins.
+    pub fn sync_installed_office_mcps(&self, db: &Database, bob_path: &str) -> AppResult<()> {
+        for builtin in builtin_document_plugins() {
+            if !PluginMcpService::has_servers(&builtin.manifest) {
+                continue;
+            }
+            let Some(plugin) = self.get_by_id(db, builtin.id)? else {
+                continue;
+            };
+            if plugin.install_state != "installed" {
+                continue;
+            }
+            let manifest = if PluginMcpService::has_servers(&plugin.manifest) {
+                plugin.manifest.clone()
+            } else {
+                builtin.manifest.clone()
+            };
+            let bundle_dir = PluginMcpService::bundle_dir(&manifest)?;
+            PluginMcpService::new()
+                .sync(bob_path, builtin.id, &manifest, &bundle_dir, true)
+                .map(|_| ())?;
         }
         Ok(())
     }
@@ -1337,76 +1367,216 @@ struct BuiltinPlugin {
     manifest: serde_json::Value,
 }
 
+fn office_specialized_mode(
+    label: &str,
+    input_extensions: &[&str],
+    output_formats: &[&str],
+    allowed_tools: &[&str],
+    preferred_libraries: &[&str],
+    workflow: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "label": label,
+        "description": "Mode spécialisé local : consignes, format attendu et outils autorisés (équivalent ChatGPT Work, sans upload serveur).",
+        "inputExtensions": input_extensions,
+        "outputFormats": output_formats,
+        "allowedTools": allowed_tools,
+        "preferredLibraries": preferred_libraries,
+        "workflow": workflow,
+        "sandbox": "python-local"
+    })
+}
+
+fn office_mcp_server(display_name: &str, description: &str, office_kind: &str, tools: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "displayName": display_name,
+        "description": description,
+        "required": false,
+        "command": "python3",
+        "args": ["mcp/server.py"],
+        "cwd": ".",
+        "env": {"BOB_OFFICE_KIND": office_kind},
+        "tools": tools
+    })
+}
+
+fn office_permissions() -> serde_json::Value {
+    serde_json::json!([
+        {"type":"file.read"},
+        {"type":"file.write"},
+        {"type":"mcp.connect"},
+        {"type":"command.execute"}
+    ])
+}
+
 fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
     vec![
         BuiltinPlugin {
             id: "builtin-documents",
             name: "Documents",
-            version: "1.0.0",
+            version: "1.1.0",
             description: "Créer, lire, transformer et contrôler des documents locaux avec aperçu dans Bob Work.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Documents", "slug": "bob-work-documents", "version": "1.0.0",
+                "name": "Documents", "slug": "bob-work-documents", "version": "1.1.0",
                 "description": "Create, read, transform and review local documents.", "category": "recipe",
-                "builtin": true, "icon": "document", "capabilities": ["document.read", "document.create", "document.convert", "preview"],
-                "permissions": [{"type":"file.read"},{"type":"file.write"}],
-                "instructions": "Use this skill for local text, Markdown, PDF, RTF and general document work. Inspect the source before changing it. Preserve headings, links, citations and tables unless asked otherwise. Create outputs in the project folder with an explicit extension. Never overwrite an input without confirmation; prefer a new version. After writing, verify that the file exists and report its absolute path so Bob Work can open it in the right preview panel."
+                "builtin": true, "icon": "document",
+                "fileExtensions": [".txt", ".md", ".markdown", ".pdf", ".rtf", ".docx", ".odt"],
+                "outputFormats": ["md", "txt", "pdf", "docx"],
+                "capabilities": ["document.read", "document.create", "document.convert", "preview"],
+                "permissions": office_permissions(),
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "specializedMode": office_specialized_mode(
+                    "Mode Documents",
+                    &[".txt", ".md", ".markdown", ".pdf", ".rtf", ".docx", ".odt"],
+                    &["md", "txt", "pdf", "docx"],
+                    &["inspect_document", "extract_document_text", "read_file", "write_file", "execute_command", "use_mcp_tool"],
+                    &["pypdf", "python-docx"],
+                    "1) Inspecter le fichier joint localement. 2) Extraire le texte via le MCP Documents ou une commande Python locale. 3) Produire une version modifiée dans le dossier projet avec extension explicite. 4) Valider l’existence du fichier et renvoyer le chemin absolu pour l’aperçu Bob Work."
+                ),
+                "mcpServers": {
+                    "office-tools": office_mcp_server(
+                        "Outils Documents locaux",
+                        "Inspection et extraction de texte locale (sans upload cloud).",
+                        "documents",
+                        &["inspect_document", "extract_document_text"]
+                    )
+                },
+                "instructions": "Mode Documents Bob Work (local). Les pièces jointes restent sur la machine : ne les uploade pas. Commence par inspect_document ou extract_document_text via le MCP office-tools, puis travaille dans une sandbox Python locale si nécessaire. Préserve titres, liens, citations et tableaux. Crée les sorties dans le dossier projet avec une extension explicite. Ne remplace jamais un fichier source sans confirmation ; préfère une nouvelle version. Après écriture, vérifie que le fichier existe et renvoie son chemin absolu pour l’aperçu Quick Look."
             }),
         },
         BuiltinPlugin {
             id: "builtin-word",
             name: "Microsoft Word",
-            version: "1.0.0",
+            version: "1.1.0",
             description: "Créer et modifier des fichiers Word DOCX en conservant autant que possible styles et structure.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft Word", "slug": "bob-work-microsoft-word", "version": "1.0.0",
+                "name": "Microsoft Word", "slug": "bob-work-microsoft-word", "version": "1.1.0",
                 "description": "Create and edit Microsoft Word DOCX files.", "category": "recipe",
-                "builtin": true, "icon": "word", "outputFormats": ["docx"], "capabilities": ["docx.read", "docx.create", "docx.edit", "preview"],
-                "permissions": [{"type":"file.read"},{"type":"file.write"}],
-                "instructions": "Use this skill for Microsoft Word .docx files. When editing, work on a copy unless overwrite was explicitly approved. Preserve section order, headings, lists, tables, hyperlinks, headers, footers and existing styles. Prefer a proven DOCX library available in the workspace; do not create a fake file with a .docx extension. Re-open or inspect the generated package after writing, then return its absolute path for Bob Work Quick Look preview."
+                "builtin": true, "icon": "word",
+                "fileExtensions": [".doc", ".docx"],
+                "outputFormats": ["docx"],
+                "capabilities": ["docx.read", "docx.create", "docx.edit", "preview"],
+                "permissions": office_permissions(),
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "specializedMode": office_specialized_mode(
+                    "Mode Microsoft Word",
+                    &[".doc", ".docx"],
+                    &["docx"],
+                    &["inspect_docx", "extract_docx_text", "validate_docx", "read_file", "write_file", "execute_command", "use_mcp_tool"],
+                    &["python-docx"],
+                    "1) Si un DOCX est joint, appeler inspect_docx puis extract_docx_text via le MCP Word. 2) Modifier dans une sandbox Python locale (python-docx) en préservant styles et structure. 3) Écrire une copie ou nouvelle version .docx. 4) validate_docx puis renvoyer le chemin absolu pour l’aperçu Bob Work."
+                ),
+                "mcpServers": {
+                    "office-tools": office_mcp_server(
+                        "Outils Word locaux",
+                        "Inspection et extraction DOCX via sandbox Python locale (python-docx ou OOXML).",
+                        "word",
+                        &["inspect_docx", "extract_docx_text", "validate_docx"]
+                    )
+                },
+                "instructions": "Mode Microsoft Word Bob Work (local, sans upload OpenAI). Quand un .docx est joint au chat, traite-le comme dans ChatGPT Work : active ce mode spécialisé, inspecte le package avec inspect_docx, extrais le contenu avec extract_docx_text, puis modifie via python-docx dans une commande Python locale. Préserve ordre des sections, titres, listes, tableaux, liens, en-têtes/pieds et styles existants. Travaille sur une copie sauf autorisation explicite d’écrasement. Ne crée jamais un faux .docx (fichier texte renommé). Après écriture, validate_docx et renvoie le chemin absolu pour Quick Look."
             }),
         },
         BuiltinPlugin {
             id: "builtin-powerpoint",
             name: "Microsoft PowerPoint",
-            version: "1.0.0",
+            version: "1.1.0",
             description: "Créer, modifier et vérifier des présentations PowerPoint PPTX avec respect du modèle fourni.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft PowerPoint", "slug": "bob-work-microsoft-powerpoint", "version": "1.0.0",
+                "name": "Microsoft PowerPoint", "slug": "bob-work-microsoft-powerpoint", "version": "1.1.0",
                 "description": "Create, edit and review Microsoft PowerPoint presentations.", "category": "recipe",
-                "builtin": true, "icon": "powerpoint", "outputFormats": ["pptx"], "capabilities": ["pptx.read", "pptx.create", "pptx.edit", "preview"],
-                "permissions": [{"type":"file.read"},{"type":"file.write"}],
-                "instructions": "Use this skill for Microsoft PowerPoint .pptx deliverables. If a template exists, reuse its masters, layouts, fonts, colors and slide dimensions. Keep one clear message per slide, avoid text overflow, add source notes when appropriate and preserve editable shapes. Validate slide count, titles and package integrity after writing. Return the absolute PPTX path so Bob Work can show a Quick Look preview in the right panel."
+                "builtin": true, "icon": "powerpoint",
+                "fileExtensions": [".ppt", ".pptx"],
+                "outputFormats": ["pptx"],
+                "capabilities": ["pptx.read", "pptx.create", "pptx.edit", "preview"],
+                "permissions": office_permissions(),
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "specializedMode": office_specialized_mode(
+                    "Mode Microsoft PowerPoint",
+                    &[".ppt", ".pptx"],
+                    &["pptx"],
+                    &["inspect_pptx", "list_pptx_slides", "validate_pptx", "read_file", "write_file", "execute_command", "use_mcp_tool"],
+                    &["python-pptx"],
+                    "1) inspect_pptx / list_pptx_slides sur le PPTX joint. 2) Modifier via python-pptx en conservant masters et layouts. 3) validate_pptx. 4) Chemin absolu pour aperçu."
+                ),
+                "mcpServers": {
+                    "office-tools": office_mcp_server(
+                        "Outils PowerPoint locaux",
+                        "Inspection de présentations PPTX via sandbox Python locale.",
+                        "ppt",
+                        &["inspect_pptx", "list_pptx_slides", "validate_pptx"]
+                    )
+                },
+                "instructions": "Mode Microsoft PowerPoint Bob Work (local). Si un modèle PPTX est joint, réutilise masters, layouts, polices, couleurs et dimensions. Une idée claire par slide, pas de débordement de texte, notes sources si pertinent. Utilise inspect_pptx et list_pptx_slides avant modification, python-pptx pour éditer, validate_pptx après sauvegarde. Renvoie le chemin absolu PPTX pour Quick Look."
             }),
         },
         BuiltinPlugin {
             id: "builtin-excel",
             name: "Microsoft Excel",
-            version: "1.0.0",
+            version: "1.1.0",
             description: "Créer, analyser et modifier des classeurs Excel XLSX en préservant formules et formats.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft Excel", "slug": "bob-work-microsoft-excel", "version": "1.0.0",
+                "name": "Microsoft Excel", "slug": "bob-work-microsoft-excel", "version": "1.1.0",
                 "description": "Create, analyze and edit Microsoft Excel workbooks.", "category": "recipe",
-                "builtin": true, "icon": "excel", "outputFormats": ["xlsx", "csv"], "capabilities": ["xlsx.read", "xlsx.create", "xlsx.edit", "formula.verify", "preview"],
-                "permissions": [{"type":"file.read"},{"type":"file.write"}],
-                "instructions": "Use this skill for Excel .xlsx, .xls and .csv work. Preserve formulas, number formats, merged cells, named ranges, data validation, charts and sheet order unless a change is requested. Never replace formulas with displayed values. For a new workbook, use explicit headers, appropriate types and readable widths. Re-open the workbook after saving and check formula references and sheet names. Return its absolute path for Bob Work preview."
+                "builtin": true, "icon": "excel",
+                "fileExtensions": [".xls", ".xlsx", ".xlsm", ".csv", ".tsv"],
+                "outputFormats": ["xlsx", "csv"],
+                "capabilities": ["xlsx.read", "xlsx.create", "xlsx.edit", "formula.verify", "preview"],
+                "permissions": office_permissions(),
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "specializedMode": office_specialized_mode(
+                    "Mode Microsoft Excel",
+                    &[".xls", ".xlsx", ".xlsm", ".csv", ".tsv"],
+                    &["xlsx", "csv"],
+                    &["inspect_xlsx", "read_xlsx_sheet", "validate_xlsx", "read_file", "write_file", "execute_command", "use_mcp_tool"],
+                    &["openpyxl", "pandas"],
+                    "1) inspect_xlsx sur le classeur joint. 2) read_xlsx_sheet pour les plages utiles. 3) Modifier via openpyxl en préservant formules et formats. 4) validate_xlsx et chemin absolu."
+                ),
+                "mcpServers": {
+                    "office-tools": office_mcp_server(
+                        "Outils Excel locaux",
+                        "Inspection et lecture XLSX via sandbox Python locale (openpyxl ou OOXML).",
+                        "excel",
+                        &["inspect_xlsx", "read_xlsx_sheet", "validate_xlsx"]
+                    )
+                },
+                "instructions": "Mode Microsoft Excel Bob Work (local). Quand un .xlsx/.csv est joint, inspect_xlsx puis read_xlsx_sheet via le MCP office-tools. Préserve formules, formats numériques, cellules fusionnées, plages nommées, validations et graphiques. Ne remplace jamais une formule par sa valeur affichée. Pour un nouveau classeur : en-têtes explicites, types adaptés, largeurs lisibles. Utilise openpyxl en sandbox Python. Après sauvegarde, validate_xlsx et renvoie le chemin absolu."
             }),
         },
         BuiltinPlugin {
             id: "builtin-onenote",
             name: "Microsoft OneNote",
-            version: "1.0.0",
+            version: "1.1.0",
             description: "Préparer et organiser des pages OneNote via un connecteur Microsoft Graph ou MCP configuré.",
             category: "integration",
             manifest: serde_json::json!({
-                "name": "Microsoft OneNote", "slug": "bob-work-microsoft-onenote", "version": "1.0.0",
+                "name": "Microsoft OneNote", "slug": "bob-work-microsoft-onenote", "version": "1.1.0",
                 "description": "Read and organize Microsoft OneNote through an authorized connector.", "category": "integration",
-                "builtin": true, "icon": "onenote", "requiresIntegration": "microsoft-graph", "capabilities": ["onenote.read", "onenote.prepare", "onenote.write"],
-                "permissions": [{"type":"network.request"}],
-                "instructions": "Use this skill only when a Microsoft Graph or compatible MCP connector is configured and authorized. Resolve notebook, section and page identities before acting. Reading may follow the connector scope. Ask for explicit approval before creating, moving, renaming or deleting a page or section. If no connector exists, prepare a local Markdown or DOCX draft and explain that OneNote publishing remains pending; never simulate a successful upload."
+                "builtin": true, "icon": "onenote",
+                "fileExtensions": [".one", ".onetoc2", ".md"],
+                "requiresIntegration": "microsoft-graph",
+                "capabilities": ["onenote.read", "onenote.prepare", "onenote.write"],
+                "permissions": [{"type":"network.request"}, {"type":"file.read"}, {"type":"file.write"}],
+                "integrations": [{
+                    "provider": "microsoft-graph",
+                    "displayName": "Microsoft 365",
+                    "authType": "oauth",
+                    "scopes": ["Notes.Read", "Notes.ReadWrite"],
+                    "optional": true
+                }],
+                "specializedMode": office_specialized_mode(
+                    "Mode Microsoft OneNote",
+                    &[".one", ".onetoc2", ".md"],
+                    &["md", "docx"],
+                    &["read_file", "write_file", "execute_command", "use_mcp_tool"],
+                    &[],
+                    "Avec Graph connecté : résoudre carnet/section/page avant action. Sinon : brouillon Markdown ou DOCX local en attendant publication."
+                ),
+                "instructions": "Mode OneNote Bob Work. Utilise ce skill uniquement si Microsoft Graph ou un MCP compatible est configuré. Résous les identités carnet/section/page avant d’agir. Lecture selon le scope du connecteur. Demande une approbation explicite avant création, déplacement, renommage ou suppression. Sans connecteur, prépare un brouillon Markdown ou DOCX local et explique que la publication OneNote reste en attente ; ne simule jamais un upload réussi."
             }),
         },
     ]
@@ -1438,6 +1608,33 @@ mod builtin_tests {
         assert!(plugins
             .iter()
             .all(|plugin| plugin.manifest.get("slug").is_some()));
+    }
+
+    #[test]
+    fn office_plugins_expose_specialized_mode_and_local_mcp() {
+        let plugins = builtin_document_plugins();
+        for plugin_id in [
+            "builtin-documents",
+            "builtin-word",
+            "builtin-excel",
+            "builtin-powerpoint",
+        ] {
+            let plugin = plugins
+                .iter()
+                .find(|plugin| plugin.id == plugin_id)
+                .expect("plugin");
+            assert!(
+                plugin.manifest.get("specializedMode").is_some(),
+                "{} missing specializedMode",
+                plugin_id
+            );
+            assert!(
+                PluginMcpService::has_servers(&plugin.manifest),
+                "{} missing mcpServers",
+                plugin_id
+            );
+            assert_eq!(plugin.version, "1.1.0");
+        }
     }
 
     #[test]

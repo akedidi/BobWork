@@ -50,6 +50,38 @@ pub async fn prepare_file_preview(path: String, app: AppHandle) -> Result<FilePr
 }
 
 #[tauri::command]
+pub async fn allow_composer_attachments(
+    paths: Vec<String>,
+    app: AppHandle,
+) -> Result<Vec<String>, AppError> {
+    let mut allowed = Vec::new();
+    for path in paths {
+        let input = PathBuf::from(&path);
+        let canonical = match input.canonicalize() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if is_sensitive_path(&canonical) {
+            continue;
+        }
+        let metadata = match std::fs::metadata(&canonical) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !(metadata.is_file() || metadata.is_dir()) {
+            continue;
+        }
+        app.asset_protocol_scope()
+            .allow_file(canonical.to_string_lossy().as_ref())
+            .map_err(|error| {
+                AppError::Security(format!("Pièce jointe refusée : {error}"))
+            })?;
+        allowed.push(canonical.to_string_lossy().to_string());
+    }
+    Ok(allowed)
+}
+
+#[tauri::command]
 pub async fn open_preview_resource(target: String) -> Result<(), AppError> {
     if target.starts_with("https://") || target.starts_with("http://") {
         return open::that(target).map_err(|error| AppError::Io(error.to_string()));
@@ -241,6 +273,20 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.name == "notes.txt"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allow_composer_attachments_registers_existing_files() {
+        let root = std::env::temp_dir().join(format!("bob-work-attach-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("sample.txt");
+        std::fs::write(&file, "attachment").unwrap();
+
+        let canonical = file.canonicalize().unwrap();
+        assert!(!is_sensitive_path(&canonical));
+        assert!(canonical.is_file());
+
         let _ = std::fs::remove_dir_all(root);
     }
 }

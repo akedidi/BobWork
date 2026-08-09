@@ -249,6 +249,26 @@ impl WorkspaceService {
                 "Use Monday.com GraphQL API with the local Bob Work credential.",
                 "Use the Monday.com GraphQL API with the MONDAY_API_TOKEN environment variable. Never print, echo, log or persist the token. Query schema and board/item identifiers before acting. Ask explicit approval before creating, changing, moving, archiving, or deleting any item, board, update, or automation. Summarize mutations with stable identifiers.",
             ),
+            "outlook-mail" => (
+                "bob-work-outlook-mail",
+                "Use Microsoft Graph for Outlook mail with the Bob Work Microsoft OAuth credential.",
+                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Prefer read/search/draft operations first. Ask explicit approval before sending, moving, deleting or permanently changing mail. Return stable Graph identifiers and web links when available.",
+            ),
+            "outlook-calendar" => (
+                "bob-work-outlook-calendar",
+                "Use Microsoft Graph for Outlook Calendar with the Bob Work Microsoft OAuth credential.",
+                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Read availability and events before proposing changes. Ask explicit approval before creating, updating, cancelling or deleting calendar events. Return event IDs and web links when available.",
+            ),
+            "teams" => (
+                "bob-work-teams",
+                "Use Microsoft Graph for Teams channels and messages with the Bob Work Microsoft OAuth credential.",
+                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Resolve team, channel and message identifiers before acting. Ask explicit approval before posting, editing or deleting Teams messages. Summarize every external mutation with stable identifiers.",
+            ),
+            "onedrive" => (
+                "bob-work-onedrive",
+                "Use Microsoft Graph for OneDrive files with the Bob Work Microsoft OAuth credential.",
+                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Search and inspect files before writing. Ask explicit approval before uploading, overwriting, moving or deleting files. Return drive item IDs, paths and web URLs when available.",
+            ),
             _ => return Err(AppError::ValidationFailed("Cette intégration n’a pas de skill local intégré.".into())),
         };
         self.save_skill(SaveSkillInput {
@@ -507,22 +527,63 @@ impl WorkspaceService {
     }
 
     pub fn usage_status(&self, db: &Database) -> UsageStatus {
-        let conn = db.conn.lock().unwrap();
-        let row = conn.query_row(
-            "SELECT used_amount,remaining_amount,unit,captured_at FROM usage_snapshots ORDER BY captured_at DESC LIMIT 1",
-            [],
-            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<f64>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
-        );
-        match row {
-            Ok((used, remaining, unit, captured_at)) => UsageStatus {
-                available: true, used_amount: used, remaining_amount: remaining, unit,
-                captured_at: Some(captured_at), message: "Dernière consommation communiquée par Bob Shell.".into(),
-            },
-            Err(_) => UsageStatus {
-                available: false, used_amount: None, remaining_amount: None, unit: None, captured_at: None,
-                message: "Bob Shell 2.0.0 n’expose pas la consommation mensuelle en mode headless. Utilisez /status dans Bob Shell pour la consulter.".into(),
+        use crate::services::bob_usage::BobUsageService;
+
+        let service = BobUsageService::new();
+        let latest = service.latest_snapshot(db).ok().flatten();
+        let snapshot = if BobUsageService::should_refresh(latest.as_ref()) {
+            match service.refresh_snapshot(db) {
+                Ok(fresh) => fresh.or(latest),
+                Err(error) => {
+                    if let Some(existing) = latest {
+                        return snapshot_to_status(existing, false, error.to_string());
+                    }
+                    return UsageStatus {
+                        available: false,
+                        used_amount: None,
+                        remaining_amount: None,
+                        total_amount: None,
+                        unit: None,
+                        captured_at: None,
+                        instance_label: None,
+                        message: error.to_string(),
+                    };
+                }
+            }
+        } else {
+            latest
+        };
+
+        match snapshot {
+            Some(data) => snapshot_to_status(data, true, "Consommation Bobcoins synchronisée avec Bob Shell.".into()),
+            None => UsageStatus {
+                available: false,
+                used_amount: None,
+                remaining_amount: None,
+                total_amount: None,
+                unit: None,
+                captured_at: None,
+                instance_label: None,
+                message: "Connectez-vous à Bob Shell (bob chat) pour afficher vos Bobcoins.".into(),
             },
         }
+    }
+}
+
+fn snapshot_to_status(
+    data: crate::services::bob_usage::UsageSnapshotData,
+    available: bool,
+    message: String,
+) -> UsageStatus {
+    UsageStatus {
+        available,
+        used_amount: data.used_amount,
+        remaining_amount: data.remaining_amount,
+        total_amount: data.total_amount,
+        unit: Some(data.unit),
+        captured_at: Some(data.captured_at),
+        instance_label: data.instance_label,
+        message,
     }
 }
 

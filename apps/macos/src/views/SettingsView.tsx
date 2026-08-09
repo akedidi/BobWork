@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openUrl } from '@tauri-apps/plugin-shell'
 import { open as chooseFile, save as chooseSavePath } from '@tauri-apps/plugin-dialog'
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { bobAuthService } from '../services/BobAuthService'
 import { errorMessage } from '../lib/errorMessage'
 import {
   getBobProfile, getPermissionGrants, getSettings, getUsageStatus,
   revokePermissionGrant, updateSettings, importConversations, exportConversations,
+  openMacosPrivacyPane, getChromeControlStatus,
 } from '../lib/ipc'
-import type { AppSettings, PermissionGrant, ShellProfile, UsageStatus } from '@bob-work/shared-types'
+import type { AppSettings, MacosChromeControlStatus, PermissionGrant, ShellProfile, UsageStatus } from '@bob-work/shared-types'
+import { UsageMeter } from '../components/UsageMeter/UsageMeter'
 
 type Tab = 'general' | 'bob' | 'instructions' | 'permissions' | 'tasks' | 'extensions' | 'appearance' | 'data'
 
@@ -20,13 +22,15 @@ const TABS: { id: Tab; label: string; keywords: string }[] = [
   { id: 'instructions', label: 'Instructions', keywords: 'prompt défaut personnalisées consignes projet réponse' },
   { id: 'permissions', label: 'Permissions', keywords: 'autorisations approbation fichiers terminal réseau applications révoquer' },
   { id: 'tasks', label: 'Tâches et planifié', keywords: 'planification historique coût tours limites notification rétention réveil' },
-  { id: 'extensions', label: 'Extensions et web', keywords: 'mcp intégrations plugins skills sous-agents orchestrateur web ordinateur chrome' },
+  { id: 'extensions', label: 'Accès et contrôle', keywords: 'mcp intégrations plugins skills sous-agents orchestrateur web ordinateur chrome accessibilité automatisation' },
   { id: 'appearance', label: 'Apparence et langue', keywords: 'thème clair sombre dark light français english taille texte dictée animations' },
   { id: 'data', label: 'Données locales', keywords: 'import export conversations chatgpt claude cowork télémétrie diagnostic dossier' },
 ]
 
 export default function SettingsView() {
-  const [tab, setTab] = useState<Tab>('general')
+  const location = useLocation()
+  const initialTab = (location.state as { tab?: Tab } | null)?.tab
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'general')
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [profile, setProfile] = useState<ShellProfile | null>(null)
   const [usage, setUsage] = useState<UsageStatus | null>(null)
@@ -34,9 +38,13 @@ export default function SettingsView() {
   const [apiKey, setApiKey] = useState('')
   const [sessionKeyStatus, setSessionKeyStatus] = useState({ active: false, source: 'none' as 'session' | 'environment' | 'none' })
   const [status, setStatus] = useState('')
-  const [saving, setSaving] = useState(false)
   const [settingsSearch, setSettingsSearch] = useState('')
+  const [exportFormat, setExportFormat] = useState<'chatgpt' | 'claude-cowork' | 'bob-work-export-v1'>('chatgpt')
+  const [chromeStatus, setChromeStatus] = useState<MacosChromeControlStatus | null>(null)
   const navigate = useNavigate()
+  const skipNextSaveRef = useRef(true)
+  const saveTimerRef = useRef<number | null>(null)
+  const statusTimerRef = useRef<number | null>(null)
 
   const visibleTabs = useMemo(() => {
     const query = normalizeSettingsSearch(settingsSearch)
@@ -63,27 +71,54 @@ export default function SettingsView() {
     if (visibleTabs[0]) setTab(visibleTabs[0].id)
   }, [settingsSearch, tab, visibleTabs])
 
+  useEffect(() => {
+    if (tab !== 'extensions') return
+    getChromeControlStatus().then(setChromeStatus).catch(() => setChromeStatus(null))
+  }, [tab, settings?.chromeControlEnabled])
+
+  const refreshChromeStatus = async () => {
+    try { setChromeStatus(await getChromeControlStatus()) }
+    catch { setChromeStatus(null) }
+  }
+
+  const showTransientStatus = useCallback((message: string) => {
+    setStatus(message)
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
+    statusTimerRef.current = window.setTimeout(() => setStatus(''), 2500)
+  }, [])
+
+  const persistSettings = useCallback(async (nextSettings: AppSettings) => {
+    try {
+      let toSave = nextSettings
+      if (nextSettings.notificationsEnabled && !(await isPermissionGranted())) {
+        const permission = await requestPermission()
+        if (permission !== 'granted') {
+          toSave = { ...nextSettings, notificationsEnabled: false }
+          setSettings(toSave)
+        }
+      }
+      await updateSettings(toSave)
+      window.dispatchEvent(new CustomEvent('bob-settings-updated', { detail: toSave }))
+      showTransientStatus('Réglages enregistrés.')
+    } catch (error) { setStatus(String(error)) }
+  }, [showTransientStatus])
+
+  useEffect(() => {
+    if (!settings) return
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false
+      return
+    }
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = window.setTimeout(() => { void persistSettings(settings) }, 400)
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [settings, persistSettings])
+
   const change = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(current => current ? { ...current, [key]: value } : current)
     if (key === 'theme') applyTheme(String(value))
-  }
-
-  const save = async () => {
-    if (!settings) return
-    setSaving(true); setStatus('')
-    try {
-      let nextSettings = settings
-      if (settings.notificationsEnabled && !(await isPermissionGranted())) {
-        const permission = await requestPermission()
-        if (permission !== 'granted') {
-          nextSettings = { ...settings, notificationsEnabled: false }
-          setSettings(nextSettings)
-        }
-      }
-      await updateSettings(nextSettings)
-      window.dispatchEvent(new CustomEvent('bob-settings-updated', { detail: nextSettings }))
-      setStatus('Réglages enregistrés.')
-    } catch (error) { setStatus(String(error)) } finally { setSaving(false) }
   }
 
   const install = async () => {
@@ -158,8 +193,12 @@ export default function SettingsView() {
             <button className="link-btn" onClick={() => openUrl('https://bob.ibm.com/')}>Ouvrir bob.ibm.com ↗</button>
           </Card>
           <div className="settings-warning">La clé et les jetons d’intégration restent disponibles après redémarrage de Bob Work tant qu’ils n’ont pas été effacés du coffre. Les planifications peuvent donc réutiliser ces secrets, y compris lorsque l’écran est verrouillé.</div>
-          <Card title="Consommation">
-            {usage?.available ? <StatusRow title="Crédits restants" value={`${usage.remainingAmount ?? '—'} ${usage.unit ?? ''}`} /> : <p className="settings-note">{usage?.message ?? 'Indisponible'}</p>}
+          <Card title="Consommation Bobcoins">
+            <UsageMeter usage={usage} />
+            {!usage?.available && <p className="settings-note">{usage?.message ?? 'Indisponible'}</p>}
+            <div className="settings-actions">
+              <button className="secondary-btn" onClick={() => void refreshProfile()}>Actualiser</button>
+            </div>
           </Card>
         </>}
 
@@ -192,14 +231,41 @@ export default function SettingsView() {
         </>}
 
         {tab === 'extensions' && <>
-          <Heading title="Extensions et accès" description="Activez les capacités que Bob Shell peut utiliser, puis configurez leur portée." />
+          <Heading title="Accès et contrôle" description="Activez ici les capacités Bob Shell. Les skills et serveurs MCP se configurent dans la barre latérale (Skills · Intégrations et MCP)." />
           <Card>
             <ToggleRow title="Serveurs MCP" value={settings.mcpEnabled} onChange={value => change('mcpEnabled', value)} />
             <ToggleRow title="Sous-agents / orchestrateur" value={settings.subagentsEnabled} onChange={value => change('subagentsEnabled', value)} />
             <ToggleRow title="Accès web" description="Soumis aux permissions et aux capacités réellement disponibles dans Bob Shell." value={settings.webEnabled} onChange={value => change('webEnabled', value)} />
-            <ToggleRow title="Contrôle de l’ordinateur" description="Nécessite une extension/MCP compatible et l’autorisation Accessibilité macOS." value={settings.computerUseEnabled} onChange={value => change('computerUseEnabled', value)} />
-            <ToggleRow title="Contrôle de Chrome" description="Nécessite une extension/MCP compatible et une session Chrome locale." value={settings.chromeControlEnabled} onChange={value => change('chromeControlEnabled', value)} />
+            <ToggleRow
+              title="Contrôle de l’ordinateur"
+              description="Active d’abord ce réglage, puis autorisez l’outil MCP dans Réglages Système → Confidentialité et sécurité → Accessibilité."
+              value={settings.computerUseEnabled}
+              onChange={value => change('computerUseEnabled', value)}
+            />
+            <ToggleRow
+              title="Contrôle de Chrome"
+              description="Installe automatiquement le serveur MCP intégré bob-work-chrome-control. Accordez ensuite Automatisation à python3 → Google Chrome."
+              value={settings.chromeControlEnabled}
+              onChange={value => change('chromeControlEnabled', value)}
+            />
           </Card>
+          {settings.chromeControlEnabled && chromeStatus && <Card title="Statut Chrome">
+            <StatusRow title="Google Chrome" value={chromeStatus.chromeInstalled ? 'Installé' : 'Non installé'} ok={chromeStatus.chromeInstalled} />
+            <StatusRow title="Serveur MCP intégré" value={chromeStatus.mcpEnabled ? 'bob-work-chrome-control actif' : chromeStatus.mcpConfigured ? 'Configuré mais désactivé' : 'Non configuré'} ok={chromeStatus.mcpEnabled} />
+            <StatusRow title="Automatisation macOS" value={chromeAutomationLabel(chromeStatus.automation)} ok={chromeStatus.automation === 'granted'} />
+            <p className="settings-note">{chromeStatus.automationMessage}</p>
+            <div className="settings-actions">
+              <button className="secondary-btn" onClick={() => void refreshChromeStatus()}>Revérifier</button>
+            </div>
+          </Card>}
+          <div className="settings-actions">
+            <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('accessibility').catch(error => setStatus(errorMessage(error)))}>
+              Ouvrir Accessibilité (Réglages Système)
+            </button>
+            <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('automation').catch(error => setStatus(errorMessage(error)))}>
+              Ouvrir Automatisation (Réglages Système)
+            </button>
+          </div>
           <div className="settings-actions"><button className="btn-primary" onClick={() => navigate('/extensions')}>Gérer les skills</button><button className="secondary-btn" onClick={() => navigate('/integrations')}>Gérer les intégrations et MCP</button><button className="secondary-btn" onClick={() => navigate('/plugins')}>Gérer les plugins</button></div>
         </>}
 
@@ -218,14 +284,37 @@ export default function SettingsView() {
           <Heading title="Données locales" description="Bob Work stocke projets, conversations, tâches et réglages uniquement sur ce Mac." />
           <Card>
             <ToggleRow title="Télémétrie" description="Désactivée par défaut. Aucun contenu n’est envoyé par Bob Work." value={settings.telemetryEnabled} onChange={value => change('telemetryEnabled', value)} />
+            <SelectRow
+              title="Format d’export des conversations"
+              description="ChatGPT et Claude/Cowork produisent un JSON compatible avec leurs imports respectifs."
+              value={exportFormat}
+              onChange={value => setExportFormat(value as typeof exportFormat)}
+            >
+              <option value="chatgpt">ChatGPT (conversations.json)</option>
+              <option value="claude-cowork">Claude / Cowork</option>
+              <option value="bob-work-export-v1">Bob Work (complet)</option>
+            </SelectRow>
             <div className="settings-actions">
               <button className="secondary-btn" onClick={async () => {
                 const path = await chooseFile({ multiple: false, directory: false, filters: [{ name: 'Export conversations JSON', extensions: ['json'] }] })
                 if (typeof path === 'string') { const result = await importConversations(path); setStatus(`${result.conversations} conversation(s) et ${result.messages} message(s) importés depuis ${result.detectedFormat}.`) }
               }}>Importer ChatGPT / Claude / Cowork</button>
               <button className="secondary-btn" onClick={async () => {
-                const path = await chooseSavePath({ defaultPath: 'bob-work-conversations.json', filters: [{ name: 'JSON', extensions: ['json'] }] })
-                if (path) { const result = await exportConversations(path); setStatus(`${result.conversations} conversation(s) exportées.`) }
+                const defaultPath = exportFormat === 'chatgpt'
+                  ? 'conversations.json'
+                  : exportFormat === 'claude-cowork'
+                    ? 'claude-conversations.json'
+                    : 'bob-work-conversations.json'
+                const path = await chooseSavePath({ defaultPath, filters: [{ name: 'JSON', extensions: ['json'] }] })
+                if (path) {
+                  const result = await exportConversations(path, exportFormat)
+                  const label = exportFormat === 'chatgpt'
+                    ? 'ChatGPT'
+                    : exportFormat === 'claude-cowork'
+                      ? 'Claude / Cowork'
+                      : 'Bob Work'
+                  setStatus(`${result.conversations} conversation(s) et ${result.messages} message(s) exportés au format ${label}.`)
+                }
               }}>Exporter les conversations</button>
               <button className="secondary-btn" onClick={() => invoke('open_data_dir')}>Ouvrir le dossier de données</button>
               <button className="secondary-btn" onClick={async () => setStatus(`Diagnostic exporté : ${await invoke<string>('export_diagnostics')}`)}>Exporter le diagnostic</button>
@@ -234,7 +323,6 @@ export default function SettingsView() {
         </>}
 
         {status && <div className="settings-status">{status}</div>}
-        <div className="settings-save"><button className="btn-primary" disabled={saving} onClick={save}>{saving ? 'Enregistrement…' : 'Enregistrer'}</button></div>
         </div>
         {visibleTabs.length === 0 && <div className="settings-no-results"><span>⌕</span><h1>Aucun réglage trouvé</h1><p>Essayez un autre mot, par exemple « langue », « session » ou « notification ».</p></div>}
       </main>
@@ -250,5 +338,8 @@ function SelectRow({ title, description, value, onChange, children }: { title: s
 function NumberRow({ title, value, min, step, onChange }: { title: string; value: number; min: number; step?: number; onChange: (value: number) => void }) { return <label className="settings-row"><RowText title={title} /><input className="settings-number" type="number" value={value} min={min} step={step} onChange={event => onChange(Number(event.target.value))} /></label> }
 function StatusRow({ title, value, ok }: { title: string; value: string; ok?: boolean }) { return <div className="settings-row"><RowText title={title} /><span className={ok === undefined ? '' : ok ? 'status-ok' : 'status-bad'}>{value}</span></div> }
 function authenticationLabel(method: string) { return ({ api_key_session: 'Clé active pour cette session', api_key_environment: 'Clé fournie par l’environnement', required: 'Clé API requise' }[method] ?? method) }
+function chromeAutomationLabel(automation: MacosChromeControlStatus['automation']) {
+  return ({ granted: 'Accordée', denied: 'Refusée', chrome_missing: 'Chrome absent', unavailable: 'Indisponible', unknown: 'Inconnue' }[automation] ?? automation)
+}
 function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches); document.documentElement.classList.toggle('dark', dark) }
 function normalizeSettingsSearch(value: string) { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().trim() }

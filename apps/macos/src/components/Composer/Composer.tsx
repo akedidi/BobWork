@@ -2,12 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { open } from '@tauri-apps/plugin-dialog'
-import { getBobModes, getPlugins, getProjects, getSkills } from '../../lib/ipc'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { allowComposerAttachments, getBobModes, getPlugins, getProjects, getSkills } from '../../lib/ipc'
 import type { BobMode, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
 import { PluginIcon, resolvePluginIcon } from '../PluginIcon'
-import { File as FileIcon, Folder as FolderIcon, X } from 'lucide-react'
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { stat } from '@tauri-apps/plugin-fs'
+import AttachmentPreview from './AttachmentPreview'
+import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActivePluginMention } from './composerAttachments'
 
 interface Props {
   placeholder?: string
@@ -38,37 +38,18 @@ const BUILTIN_MODES: BobMode[] = [
   { slug: 'ask', name: 'Ask', description: 'Répondre sans modifier', groups: [], builtin: true, source: 'fallback' },
 ]
 
-function AttachmentPreview({ path, onRemove }: { path: string; onRemove: () => void }) {
-  const [isDir, setIsDir] = useState(false)
-  
-  useEffect(() => {
-    stat(path).then(info => {
-      setIsDir(info.isDirectory)
-    }).catch(() => {})
-  }, [path])
-
-  const name = path.split('/').pop() || path
-  const isImage = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name)
-
-  return (
-    <div className="relative group flex flex-col items-center justify-center p-2 rounded-lg bg-[var(--bg-surface)] border border-[var(--border)] shadow-sm" style={{ width: 68, height: 68 }} title={path}>
-      {isImage ? (
-        <img src={convertFileSrc(path)} alt={name} className="w-9 h-9 object-cover rounded shadow-sm mb-1" />
-      ) : isDir ? (
-        <FolderIcon className="w-8 h-8 text-blue-500 mb-1" strokeWidth={1.5} />
-      ) : (
-        <FileIcon className="w-8 h-8 text-gray-400 mb-1" strokeWidth={1.5} />
-      )}
-      <span className="text-[10px] truncate w-full text-center font-medium text-[var(--text-secondary)] leading-tight">{name}</span>
-      <button 
-        aria-label="Retirer"
-        className="absolute -top-2 -right-2 bg-[var(--text-secondary)] text-[var(--bg-surface)] rounded-full w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-[var(--text-primary)]"
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRemove(); }}
-      >
-        <X size={12} strokeWidth={2.5} />
-      </button>
-    </div>
-  )
+async function registerAttachmentPaths(
+  incoming: string[],
+  setAttachments: React.Dispatch<React.SetStateAction<string[]>>,
+) {
+  if (incoming.length === 0) return
+  try {
+    const allowed = await allowComposerAttachments(incoming)
+    if (allowed.length === 0) return
+    setAttachments(prev => mergeAttachmentPaths(prev, allowed))
+  } catch {
+    // Ignore rejected paths (sensitive locations, missing files, etc.)
+  }
 }
 
 export default function Composer({
@@ -85,6 +66,7 @@ export default function Composer({
   const [attachments, setAttachments] = useState<string[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
   const [pluginSearch, setPluginSearch] = useState('')
+  const [skillSearch, setSkillSearch] = useState('')
   const [modeMenu, setModeMenu] = useState(false)
   const [modeSearch, setModeSearch] = useState('')
   const [projectMenu, setProjectMenu] = useState(false)
@@ -97,6 +79,76 @@ export default function Composer({
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
   const [isDragging, setIsDragging] = useState(false)
+  const dragDepthRef = useRef(0)
+
+  const insertPluginMention = useCallback((pluginId: string) => {
+    const mentionValue = `@plugin:${pluginId}`
+    setText(current => {
+      if (current.includes(mentionValue)) return current
+      const separator = current.length > 0 && !current.endsWith(' ') ? ' ' : ''
+      return `${current}${separator}${mentionValue} `
+    })
+    window.requestAnimationFrame(() => taRef.current?.focus())
+  }, [])
+
+  const insertSkillMention = useCallback((skillSlug: string) => {
+    const mentionValue = `@skill:${skillSlug}`
+    setText(current => {
+      if (current.includes(mentionValue)) return current
+      const separator = current.length > 0 && !current.endsWith(' ') ? ' ' : ''
+      return `${current}${separator}${mentionValue} `
+    })
+    window.requestAnimationFrame(() => taRef.current?.focus())
+  }, [])
+
+  const suggestPluginForPaths = useCallback((paths: string[]) => {
+    const pluginIds = Array.from(new Set(
+      paths.map(getSuggestedBuiltinPluginId).filter((id): id is string => Boolean(id)),
+    ))
+    if (pluginIds.length !== 1) return
+    const pluginId = pluginIds[0]
+    if (!plugins.some(item => item.id === pluginId)) return
+    insertPluginMention(pluginId)
+  }, [insertPluginMention, plugins])
+
+  const addAttachmentPaths = useCallback((paths: string[]) => {
+    void registerAttachmentPaths(paths, setAttachments)
+    suggestPluginForPaths(paths)
+  }, [suggestPluginForPaths])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    getCurrentWindow()
+      .onDragDropEvent(event => {
+        if (cancelled) return
+        const payload = event.payload
+        if (payload.type === 'enter' || payload.type === 'over') {
+          setIsDragging(true)
+        } else if (payload.type === 'drop') {
+          setIsDragging(false)
+          dragDepthRef.current = 0
+          addAttachmentPaths(payload.paths)
+        } else {
+          setIsDragging(false)
+          dragDepthRef.current = 0
+        }
+      })
+      .then(fn => {
+        if (cancelled) {
+          fn()
+          return
+        }
+        unlisten = fn
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [addAttachmentPaths])
 
   useEffect(() => {
     Promise.all([
@@ -122,6 +174,7 @@ export default function Composer({
   const closeMenus = useCallback(() => {
     setAttachMenu(false)
     setPluginSearch('')
+    setSkillSearch('')
     setProjectMenu(false)
     setModeMenu(false)
     setModeSearch('')
@@ -170,13 +223,13 @@ export default function Composer({
     const selected = await open({ multiple: true, directory: false, title: 'Joindre des fichiers' })
     if (!selected) return
     const paths = Array.isArray(selected) ? selected : [selected]
-    setAttachments(current => Array.from(new Set([...current, ...paths])))
+    addAttachmentPaths(paths)
   }
 
   const chooseFolder = async () => {
     setAttachMenu(false)
     const selected = await open({ multiple: false, directory: true, title: 'Joindre un dossier' })
-    if (typeof selected === 'string') setAttachments(current => Array.from(new Set([...current, selected])))
+    if (typeof selected === 'string') addAttachmentPaths([selected])
   }
 
   const toggleDictation = () => {
@@ -229,16 +282,26 @@ export default function Composer({
   }
 
   const selectPlugin = (plugin: Plugin) => {
-    const mentionValue = `@plugin:${plugin.id}`
-    setText(current => {
-      if (current.includes(mentionValue)) return current
-      const separator = current.length > 0 && !current.endsWith(' ') ? ' ' : ''
-      return `${current}${separator}${mentionValue} `
-    })
+    insertPluginMention(plugin.id)
     setAttachMenu(false)
     setPluginSearch('')
-    window.requestAnimationFrame(() => taRef.current?.focus())
+    setSkillSearch('')
   }
+
+  const selectSkill = (skill: WorkspaceSkill) => {
+    insertSkillMention(skill.slug)
+    setAttachMenu(false)
+    setPluginSearch('')
+    setSkillSearch('')
+  }
+
+  const visibleSkills = useMemo(() => {
+    const query = skillSearch.trim().toLocaleLowerCase()
+    if (!query) return allowedSkills
+    return allowedSkills.filter(skill =>
+      `${skill.name} ${skill.description ?? ''} ${skill.slug}`.toLocaleLowerCase().includes(query),
+    )
+  }, [allowedSkills, skillSearch])
 
   const visiblePlugins = useMemo(() => {
     const query = pluginSearch.trim().toLocaleLowerCase()
@@ -252,9 +315,21 @@ export default function Composer({
     return modes.filter(item => item.name.toLowerCase().includes(query) || item.slug.includes(query) || item.description?.toLowerCase().includes(query))
   }, [modeSearch, modes])
   const selectedMode = modes.find(item => item.slug === mode) ?? BUILTIN_MODES[0]
+  const activePluginId = getActivePluginMention(text)
+  const activePlugin = plugins.find(plugin => plugin.id === activePluginId)
 
   return (
     <div ref={rootRef} className="composer-root">
+      {isDragging && createPortal(
+        <div className="composer-drag-overlay" aria-hidden="true">
+          <div className="composer-drag-overlay-inner">
+            <span className="composer-drag-overlay-icon">+</span>
+            <strong>Déposer les fichiers ici</strong>
+            <span>Images, documents, dossiers…</span>
+          </div>
+        </div>,
+        document.body,
+      )}
       {mentionItems.length > 0 && (
         <div className="composer-popover" style={{ left: 16, right: 16, bottom: 'calc(100% + 8px)' }}>
           <div className="composer-popover-title">Ajouter au prompt</div>
@@ -266,26 +341,47 @@ export default function Composer({
         </div>
       )}
 
-      <div 
-        className={`composer ${isDragging ? 'ring-2 ring-indigo-500/50 bg-indigo-50/50 dark:bg-indigo-900/20' : ''}`}
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-        onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
-        onDrop={(e) => {
-          e.preventDefault();
-          setIsDragging(false);
-          const files = Array.from(e.dataTransfer.files);
-          // @ts-expect-error path is injected by Tauri Webview
-          const paths = files.map(f => f.path).filter(Boolean);
+      <div
+        className={`composer ${isDragging ? 'composer-dragging' : ''}`}
+        onDragEnter={event => {
+          event.preventDefault()
+          dragDepthRef.current += 1
+          setIsDragging(true)
+        }}
+        onDragOver={event => {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+          setIsDragging(true)
+        }}
+        onDragLeave={event => {
+          event.preventDefault()
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+          if (dragDepthRef.current === 0) setIsDragging(false)
+        }}
+        onDrop={event => {
+          event.preventDefault()
+          dragDepthRef.current = 0
+          setIsDragging(false)
+          const files = Array.from(event.dataTransfer.files)
+          const paths = files
+            .map(file => (file as File & { path?: string }).path)
+            .filter((path): path is string => Boolean(path))
           if (paths.length > 0) {
-            setAttachments(current => Array.from(new Set([...current, ...paths])));
-          } else {
-             const names = files.map(f => f.name).filter(Boolean);
-             if (names.length > 0) setAttachments(current => Array.from(new Set([...current, ...names])));
+            addAttachmentPaths(paths)
           }
         }}
       >
+        {activePlugin && (
+          <div className="composer-active-plugin" aria-label={`Mode spécialisé ${activePlugin.name}`}>
+            <PluginIcon icon={resolvePluginIcon(activePlugin)} size="sm" className="composer-active-plugin-icon" />
+            <span className="composer-active-plugin-copy">
+              <strong>{activePlugin.name}</strong>
+              <small>Mode spécialisé · analyse locale</small>
+            </span>
+          </div>
+        )}
         {attachments.length > 0 && (
-          <div className="composer-attachments flex flex-wrap gap-3 p-3">
+          <div className="composer-attachments">
             {attachments.map(path => (
               <AttachmentPreview key={path} path={path} onRemove={() => setAttachments(items => items.filter(item => item !== path))} />
             ))}
@@ -318,6 +414,27 @@ export default function Composer({
                 <div className="composer-popover-title">Ajouter</div>
                 <button className="composer-popover-row" onClick={chooseFiles}>📄 Fichier(s)</button>
                 <button className="composer-popover-row" onClick={chooseFolder}>📁 Dossier</button>
+                <div className="composer-popover-separator" />
+                <div className="composer-popover-title">Skills</div>
+                {allowedSkills.length > 0 ? <>
+                  <input
+                    value={skillSearch}
+                    onChange={event => setSkillSearch(event.target.value)}
+                    placeholder="Rechercher un skill…"
+                    aria-label="Rechercher un skill à ajouter"
+                    className="popover-search"
+                  />
+                  <div className="attach-plugin-list">
+                    {visibleSkills.length > 0 ? visibleSkills.map(skill => (
+                      <button className="composer-popover-row attach-plugin-row" key={`${skill.scope}:${skill.slug}`} onClick={() => selectSkill(skill)}>
+                        <span className="attach-skill-icon" aria-hidden="true">✦</span>
+                        <span className="attach-plugin-copy"><strong>{skill.name}</strong><small>{skill.description || 'Skill activé'}</small></span>
+                        <span aria-hidden="true">+</span>
+                      </button>
+                    )) : <p className="composer-popover-empty">Aucun skill correspondant.</p>}
+                  </div>
+                </> : <p className="composer-popover-empty">Aucun skill activé{selectedProject ? ' pour ce projet' : ''}.</p>}
+                <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/extensions') }}>Gérer les skills</button>
                 <div className="composer-popover-separator" />
                 <div className="composer-popover-title">Plugins</div>
                 {allowedPlugins.length > 0 ? <>

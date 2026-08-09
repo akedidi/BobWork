@@ -17,6 +17,11 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    onDragDropEvent: () => Promise.resolve(() => {}),
+  }),
+}))
 vi.mock('../lib/ipc', () => ({
   sendMessage: mocks.sendMessage,
   stopTask: vi.fn().mockResolvedValue(undefined),

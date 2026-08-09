@@ -5,6 +5,7 @@ use crate::models::plugin::{
     PluginScheduleTemplate,
 };
 use crate::services::bob::BobService;
+use crate::services::chrome_mcp::ChromeMcpService;
 use crate::services::plugin_mcp::PluginMcpService;
 use crate::services::settings::SettingsService;
 use serde_json::Value;
@@ -337,11 +338,14 @@ impl PluginExtensionService {
                     "chrome" => settings.chrome_control_enabled,
                     _ => settings.web_enabled,
                 };
-                let mcp_ready = extension
-                    .get("mcpServer")
-                    .and_then(Value::as_str)
-                    .map(|server_id| mcp.get(server_id).is_some_and(|status| status.enabled))
-                    .unwrap_or(true);
+                let mcp_ready = match capability.as_str() {
+                    "chrome" => ChromeMcpService::new().is_enabled(),
+                    _ => extension
+                        .get("mcpServer")
+                        .and_then(Value::as_str)
+                        .map(|server_id| mcp.get(server_id).is_some_and(|status| status.enabled))
+                        .unwrap_or(true),
+                };
                 let (state, message) = if !enabled_in_settings {
                     (
                         "disabled".into(),
@@ -350,16 +354,27 @@ impl PluginExtensionService {
                 } else if !mcp_ready {
                     (
                         "disconnected".into(),
-                        "L’extension ou le serveur MCP compatible n’est pas actif.".into(),
+                        if capability == "chrome" {
+                            "Activez le contrôle Chrome dans les réglages pour installer le serveur MCP intégré.".into()
+                        } else {
+                            "L’extension ou le serveur MCP compatible n’est pas actif.".into()
+                        },
+                    )
+                } else if capability == "chrome" {
+                    let (_, automation_message) = ChromeMcpService::probe_chrome_automation();
+                    (
+                        "ready".into(),
+                        automation_message,
+                    )
+                } else if capability == "computer_use" {
+                    (
+                        "ready".into(),
+                        "Bob Work et l’outil compatible sont actifs. Autorisez ensuite l’outil dans Réglages Système → Confidentialité et sécurité → Accessibilité.".into(),
                     )
                 } else {
                     (
                         "ready".into(),
-                        if matches!(capability.as_str(), "computer_use" | "chrome") {
-                            "Bob Work et l’outil compatible sont actifs. macOS confirme Accessibilité/Automation lors de la première action.".into()
-                        } else {
-                            "Accès web activé et outil compatible actif.".into()
-                        },
+                        "Accès web activé et outil compatible actif.".into(),
                     )
                 };
                 PluginBrowserStatus {
@@ -656,5 +671,109 @@ mod tests {
             "scheduledTaskTemplates": [{"id":"weekly-review","name":"Revue cloud","instructions":"Analyse les changements.","cronOrEvent":"every week"}]
         });
         assert!(PluginExtensionService::validate_schema(&manifest).is_empty());
+    }
+
+    fn temp_db() -> crate::db::Database {
+        let db = crate::db::Database::new_in_memory().expect("in-memory db");
+        db.run_migrations().expect("migrations");
+        db
+    }
+
+    fn temp_bob() -> (std::path::PathBuf, crate::services::bob::BobService) {
+        let root = std::env::temp_dir().join(format!("bob-work-browser-ext-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        (root.clone(), crate::services::bob::BobService::new(&root))
+    }
+
+    fn browser_manifest(capability: &str, required: bool) -> serde_json::Value {
+        serde_json::json!({
+            "permissions": [{"type":"browser.control"}],
+            "browserExtensions": [{
+                "id": "desktop-control",
+                "displayName": "Contrôle bureau",
+                "capability": capability,
+                "required": required
+            }]
+        })
+    }
+
+    fn set_computer_use_enabled(db: &crate::db::Database, enabled: bool) {
+        crate::services::settings::SettingsService::new()
+            .update_key(db, "computer_use_enabled", if enabled { "true" } else { "false" })
+            .expect("update computer_use_enabled");
+    }
+
+    fn set_chrome_control_enabled(db: &crate::db::Database, enabled: bool) {
+        crate::services::settings::SettingsService::new()
+            .update_key(db, "chrome_control_enabled", if enabled { "true" } else { "false" })
+            .expect("update chrome_control_enabled");
+    }
+
+    fn set_web_enabled(db: &crate::db::Database, enabled: bool) {
+        crate::services::settings::SettingsService::new()
+            .update_key(db, "web_enabled", if enabled { "true" } else { "false" })
+            .expect("update web_enabled");
+    }
+
+    #[test]
+    fn browser_extension_requires_computer_use_setting() {
+        let db = temp_db();
+        let (_root, bob) = temp_bob();
+        let manifest = browser_manifest("computer_use", true);
+        set_computer_use_enabled(&db, false);
+
+        let status = PluginExtensionService::new()
+            .status("plugin-desktop", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions.len(), 1);
+        assert_eq!(status.browser_extensions[0].state, "disabled");
+        assert!(status.browser_extensions[0]
+            .message
+            .to_lowercase()
+            .contains("réglages"));
+
+        set_computer_use_enabled(&db, true);
+        let status = PluginExtensionService::new()
+            .status("plugin-desktop", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions[0].state, "ready");
+    }
+
+    #[test]
+    fn browser_extension_requires_chrome_control_setting() {
+        let db = temp_db();
+        let (_root, bob) = temp_bob();
+        let manifest = browser_manifest("chrome", true);
+        set_chrome_control_enabled(&db, false);
+
+        let status = PluginExtensionService::new()
+            .status("plugin-chrome", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions[0].state, "disabled");
+
+        set_chrome_control_enabled(&db, true);
+        let status = PluginExtensionService::new()
+            .status("plugin-chrome", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions[0].state, "disconnected");
+    }
+
+    #[test]
+    fn generic_browser_extension_follows_web_setting() {
+        let db = temp_db();
+        let (_root, bob) = temp_bob();
+        let manifest = browser_manifest("browser", false);
+        set_web_enabled(&db, false);
+
+        let status = PluginExtensionService::new()
+            .status("plugin-browser", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions[0].state, "disabled");
+
+        set_web_enabled(&db, true);
+        let status = PluginExtensionService::new()
+            .status("plugin-browser", &manifest, &db, &bob)
+            .expect("status");
+        assert_eq!(status.browser_extensions[0].state, "ready");
     }
 }

@@ -7,6 +7,7 @@ use crate::error::AppError;
 use crate::models::conversation::{
     AddMessageInput, Conversation, CreateConversationInput, Message,
 };
+use crate::services::bob::BobService;
 use crate::services::conversation::ConversationService;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,6 +95,37 @@ pub async fn add_message(
     ConversationService::new().add_message(&db, input)
 }
 
+#[tauri::command]
+pub async fn truncate_messages_from(
+    conversation_id: String,
+    message_id: String,
+    db: State<'_, Database>,
+) -> Result<usize, AppError> {
+    ConversationService::new().truncate_messages_from(&db, &conversation_id, &message_id)
+}
+
+#[tauri::command]
+pub async fn rewind_conversation_from_message(
+    conversation_id: String,
+    message_id: String,
+    db: State<'_, Database>,
+    bob_service: State<'_, BobService>,
+    app_handle: tauri::AppHandle,
+) -> Result<crate::services::conversation::RewindConversationResult, AppError> {
+    use tauri::Emitter;
+    let result = ConversationService::new().rewind_conversation_from_message(
+        &db,
+        &bob_service,
+        &conversation_id,
+        &message_id,
+    )?;
+    let _ = app_handle.emit("conversation-messages-changed", &conversation_id);
+    if result.title_reset {
+        let _ = app_handle.emit("conversation-updated", &conversation_id);
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationTransferSummary {
@@ -106,30 +138,212 @@ pub struct ConversationTransferSummary {
 #[tauri::command]
 pub async fn export_conversations(
     path: String,
+    format: Option<String>,
     db: State<'_, Database>,
 ) -> Result<ConversationTransferSummary, AppError> {
+    let export_format = format.unwrap_or_else(|| "bob-work-export-v1".into());
     let service = ConversationService::new();
     let conversations = service.get_all(&db, None)?;
-    let mut exported = vec![];
     let mut message_count = 0usize;
+    let mut records = Vec::with_capacity(conversations.len());
+
     for conversation in &conversations {
         let messages = service.get_messages(&db, &conversation.id)?;
         message_count += messages.len();
-        exported.push(serde_json::json!({ "conversation": conversation, "messages": messages }));
+        records.push((conversation.clone(), messages));
     }
-    let document = serde_json::json!({
-        "format": "bob-work-export-v1",
-        "exportedAt": chrono::Utc::now().to_rfc3339(),
-        "conversations": exported,
-    });
+
+    let (document, detected_format) = match export_format.as_str() {
+        "chatgpt" => (build_chatgpt_export(&records), "chatgpt"),
+        "claude-cowork" => (build_claude_export(&records), "claude-cowork"),
+        "bob-work-export-v1" => (build_bob_work_export(&records), "bob-work-export-v1"),
+        other => {
+            return Err(AppError::ValidationFailed(format!(
+                "Format d’export inconnu : {other}. Utilisez chatgpt, claude-cowork ou bob-work-export-v1."
+            )));
+        }
+    };
+
     let data = serde_json::to_vec_pretty(&document)?;
     std::fs::write(path, data)?;
     Ok(ConversationTransferSummary {
         conversations: conversations.len(),
         messages: message_count,
         skipped: 0,
-        detected_format: "bob-work-export-v1".into(),
+        detected_format: detected_format.into(),
     })
+}
+
+fn build_bob_work_export(records: &[(Conversation, Vec<Message>)]) -> Value {
+    let exported = records
+        .iter()
+        .map(|(conversation, messages)| {
+            serde_json::json!({ "conversation": conversation, "messages": messages })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "format": "bob-work-export-v1",
+        "exportedAt": chrono::Utc::now().to_rfc3339(),
+        "conversations": exported,
+    })
+}
+
+fn build_chatgpt_export(records: &[(Conversation, Vec<Message>)]) -> Value {
+    Value::Array(
+        records
+            .iter()
+            .map(|(conversation, messages)| export_chatgpt_conversation(conversation, messages))
+            .collect(),
+    )
+}
+
+fn build_claude_export(records: &[(Conversation, Vec<Message>)]) -> Value {
+    serde_json::json!({
+        "conversations": records
+            .iter()
+            .map(|(conversation, messages)| export_claude_conversation(conversation, messages))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn export_chatgpt_conversation(conversation: &Conversation, messages: &[Message]) -> Value {
+    let mut mapping = serde_json::Map::new();
+    let mut previous_id: Option<String> = None;
+    let mut first_time = None::<f64>;
+    let mut last_time = None::<f64>;
+    let mut current_node = None::<String>;
+
+    for (index, message) in messages.iter().enumerate() {
+        if message.author == "system" {
+            continue;
+        }
+        let create_time = message_timestamp(message, index);
+        first_time.get_or_insert(create_time);
+        last_time = Some(create_time);
+        current_node = Some(message.id.clone());
+
+        let role = export_chatgpt_role(&message.author);
+        let node = serde_json::json!({
+            "id": message.id,
+            "message": {
+                "id": message.id,
+                "author": { "role": role, "metadata": {} },
+                "create_time": create_time,
+                "update_time": null,
+                "content": {
+                    "content_type": "text",
+                    "parts": [message.content]
+                },
+                "status": "finished_successfully",
+                "end_turn": true,
+                "weight": 1.0,
+                "metadata": {},
+                "recipient": "all"
+            },
+            "parent": previous_id,
+            "children": []
+        });
+        mapping.insert(message.id.clone(), node);
+        if let Some(parent_id) = previous_id.as_ref() {
+            if let Some(parent) = mapping.get_mut(parent_id) {
+                if let Some(children) = parent.get_mut("children").and_then(Value::as_array_mut) {
+                    children.push(Value::String(message.id.clone()));
+                }
+            }
+        }
+        previous_id = Some(message.id.clone());
+    }
+
+    serde_json::json!({
+        "title": conversation.title,
+        "create_time": first_time,
+        "update_time": last_time,
+        "mapping": mapping,
+        "moderation_results": [],
+        "current_node": current_node,
+        "conversation_id": conversation.id,
+        "is_archived": conversation.archived,
+    })
+}
+
+fn export_claude_conversation(conversation: &Conversation, messages: &[Message]) -> Value {
+    let chat_messages = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.author != "system")
+        .map(|(index, message)| {
+            let mut payload = serde_json::json!({
+                "uuid": message.id,
+                "text": message.content,
+                "sender": export_claude_sender(&message.author),
+                "created_at": message.created_at,
+                "updated_at": message.created_at,
+            });
+            if let Some(attachments) = export_claude_attachments(&message.attachments) {
+                payload["attachments"] = attachments;
+            }
+            let _ = index;
+            payload
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "uuid": conversation.id,
+        "name": conversation.title,
+        "created_at": conversation.date,
+        "updated_at": conversation.date,
+        "chat_messages": chat_messages,
+    })
+}
+
+fn export_chatgpt_role(author: &str) -> &str {
+    match author {
+        "user" => "user",
+        "system" => "system",
+        _ => "assistant",
+    }
+}
+
+fn export_claude_sender(author: &str) -> &str {
+    match author {
+        "user" => "human",
+        "system" => "system",
+        _ => "assistant",
+    }
+}
+
+fn export_claude_attachments(attachments: &Value) -> Option<Value> {
+    let items = attachments.as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+    let exported = items
+        .iter()
+        .filter_map(|item| {
+            if let Some(path) = item.as_str() {
+                let file_name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(path);
+                return Some(serde_json::json!({ "file_name": file_name, "file_path": path }));
+            }
+            if item.get("file_name").is_some() {
+                return Some(item.clone());
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    if exported.is_empty() {
+        None
+    } else {
+        Some(Value::Array(exported))
+    }
+}
+
+fn message_timestamp(message: &Message, index: usize) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(&message.created_at)
+        .map(|value| value.timestamp() as f64)
+        .unwrap_or(index as f64)
 }
 
 #[tauri::command]
@@ -420,7 +634,8 @@ fn value_to_text(value: &Value) -> String {
 
 #[cfg(test)]
 mod import_tests {
-    use super::normalized_conversations;
+    use super::{build_chatgpt_export, build_claude_export, normalized_conversations};
+    use crate::models::conversation::{Conversation, Message};
 
     #[test]
     fn normalizes_chatgpt_export_in_chronological_order() {
@@ -473,5 +688,107 @@ mod import_tests {
             .err()
             .expect("un format inconnu doit être refusé");
         assert!(error.to_string().contains("Format JSON non reconnu"));
+    }
+
+    #[test]
+    fn exports_and_reimports_chatgpt_format() {
+        let conversation = Conversation {
+            id: "conv-1".into(),
+            project_id: None,
+            title: "Export ChatGPT".into(),
+            conversation_type: "chat".into(),
+            business_mode: None,
+            bob_mode: None,
+            date: "2026-08-09T10:00:00Z".into(),
+            pinned: false,
+            local_only: true,
+            summary: None,
+            bob_context_state: serde_json::json!({}),
+            archived: false,
+        };
+        let messages = vec![
+            Message {
+                id: "msg-1".into(),
+                conversation_id: "conv-1".into(),
+                author: "user".into(),
+                content: "Question".into(),
+                attachments: serde_json::json!([]),
+                sources: serde_json::json!([]),
+                citations: serde_json::json!([]),
+                tools_used: serde_json::json!([]),
+                send_state: "sent".into(),
+                errors: serde_json::json!([]),
+                associated_artifacts: serde_json::json!([]),
+                associated_approvals: serde_json::json!([]),
+                created_at: "2026-08-09T10:00:01Z".into(),
+            },
+            Message {
+                id: "msg-2".into(),
+                conversation_id: "conv-1".into(),
+                author: "assistant".into(),
+                content: "Réponse".into(),
+                attachments: serde_json::json!([]),
+                sources: serde_json::json!([]),
+                citations: serde_json::json!([]),
+                tools_used: serde_json::json!([]),
+                send_state: "done".into(),
+                errors: serde_json::json!([]),
+                associated_artifacts: serde_json::json!([]),
+                associated_approvals: serde_json::json!([]),
+                created_at: "2026-08-09T10:00:02Z".into(),
+            },
+        ];
+        let exported = build_chatgpt_export(&[(conversation, messages)]);
+        let (format, conversations) = normalized_conversations(&exported).unwrap();
+        assert_eq!(format, "chatgpt");
+        assert_eq!(conversations[0].title, "Export ChatGPT");
+        assert_eq!(conversations[0].messages.len(), 2);
+        assert_eq!(conversations[0].messages[0].content, "Question");
+        assert_eq!(conversations[0].messages[1].content, "Réponse");
+    }
+
+    #[test]
+    fn exports_and_reimports_claude_format_with_attachments() {
+        let conversation = Conversation {
+            id: "conv-2".into(),
+            project_id: None,
+            title: "Export Claude".into(),
+            conversation_type: "chat".into(),
+            business_mode: None,
+            bob_mode: None,
+            date: "2026-08-09T11:00:00Z".into(),
+            pinned: false,
+            local_only: true,
+            summary: None,
+            bob_context_state: serde_json::json!({}),
+            archived: false,
+        };
+        let messages = vec![Message {
+            id: "msg-3".into(),
+            conversation_id: "conv-2".into(),
+            author: "user".into(),
+            content: "Analyse ce fichier".into(),
+            attachments: serde_json::json!(["/tmp/rapport.pdf"]),
+            sources: serde_json::json!([]),
+            citations: serde_json::json!([]),
+            tools_used: serde_json::json!([]),
+            send_state: "sent".into(),
+            errors: serde_json::json!([]),
+            associated_artifacts: serde_json::json!([]),
+            associated_approvals: serde_json::json!([]),
+            created_at: "2026-08-09T11:00:01Z".into(),
+        }];
+        let exported = build_claude_export(&[(conversation, messages)]);
+        let (format, conversations) = normalized_conversations(&exported).unwrap();
+        assert_eq!(format, "claude-cowork");
+        assert_eq!(conversations[0].messages[0].author, "user");
+        assert_eq!(
+            conversations[0].messages[0]
+                .attachments
+                .as_ref()
+                .and_then(|value| value.pointer("/0/file_name"))
+                .and_then(serde_json::Value::as_str),
+            Some("rapport.pdf")
+        );
     }
 }

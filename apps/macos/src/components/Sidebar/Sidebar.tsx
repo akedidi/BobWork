@@ -7,9 +7,10 @@ import { useEffect, useState, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Archive, FolderTree } from 'lucide-react'
 import { useAppStore } from '../../stores/appStore'
-import { getProjects, getConversations, getTasks, detectBob, searchWorkspace, updateConversation, updateTaskPinned } from '../../lib/ipc'
+import { getProjects, getConversations, getTasks, detectBob, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus } from '../../lib/ipc'
 import { listen } from '@tauri-apps/api/event'
-import type { SearchResult } from '@bob-work/shared-types'
+import type { SearchResult, UsageStatus } from '@bob-work/shared-types'
+import { UsageMeter } from '../UsageMeter/UsageMeter'
 
 export default function Sidebar() {
   const navigate = useNavigate()
@@ -29,6 +30,27 @@ export default function Sidebar() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [projectPicker, setProjectPicker] = useState<{ conversationId: string } | null>(null)
+  const [usage, setUsage] = useState<UsageStatus | null>(null)
+
+  const refreshUsage = () => {
+    getUsageStatus().then(setUsage).catch(() => setUsage(null))
+  }
+
+  useEffect(() => {
+    refreshUsage()
+  }, [])
+
+  useEffect(() => {
+    if (bobStatus !== 'ready') return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen<string>('task-updated', () => {
+      if (!disposed) refreshUsage()
+    }).then(fn => {
+      if (disposed) fn(); else unlisten = fn
+    })
+    return () => { disposed = true; unlisten?.() }
+  }, [bobStatus])
 
   useEffect(() => {
     let disposed = false
@@ -196,39 +218,38 @@ export default function Sidebar() {
         </button>
       </div>
 
-      <div className="sidebar-content" style={{ flex: 1, overflowY: 'auto', padding: '0 12px' }}>
-        
-        {/* Top actions */}
-        <div style={{ marginTop: 12, marginBottom: 20 }}>
-          <div className="sidebar-item" onClick={() => navigate('/')} style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            Nouveau chat
-          </div>
-          <div className="sidebar-item" onClick={() => navigate('/schedules')} style={{ color: 'var(--text-secondary)' }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            Planifié
-          </div>
-          <div className="sidebar-item" onClick={() => navigate('/tasks')} style={{ color: 'var(--text-secondary)' }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-            Tâches
-          </div>
-          <div className="sidebar-item" onClick={() => navigate('/plugins')} style={{ color: 'var(--text-secondary)' }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}>
-              <rect x="3" y="3" width="7" height="7" rx="1" />
-              <rect x="14" y="3" width="7" height="7" rx="1" />
-              <rect x="14" y="14" width="7" height="7" rx="1" />
-              <rect x="3" y="14" width="7" height="7" rx="1" />
-            </svg>
-            Plugins
-          </div>
-          <div className="sidebar-item" onClick={() => navigate('/extensions')} style={{ color: 'var(--text-secondary)' }}>
-            <span style={{ width: 16, textAlign: 'center' }}>✦</span> Skills
-          </div>
-          <div className="sidebar-item" onClick={() => navigate('/integrations')} style={{ color: 'var(--text-secondary)' }}>
-            <span style={{ width: 16, textAlign: 'center' }}>↗</span> Intégrations et MCP
-          </div>
+      <div className="sidebar-nav">
+        <div className="sidebar-item" onClick={() => navigate('/')} style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Nouveau chat
         </div>
+        <div className="sidebar-item" onClick={() => navigate('/schedules')} style={{ color: 'var(--text-secondary)' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Planifié
+        </div>
+        <div className="sidebar-item" onClick={() => navigate('/tasks')} style={{ color: 'var(--text-secondary)' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          Tâches
+        </div>
+        <div className="sidebar-item" onClick={() => navigate('/plugins')} style={{ color: 'var(--text-secondary)' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}>
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="7" height="7" rx="1" />
+            <rect x="3" y="14" width="7" height="7" rx="1" />
+          </svg>
+          Plugins
+        </div>
+        <div className="sidebar-item" onClick={() => navigate('/extensions')} style={{ color: 'var(--text-secondary)' }}>
+          <span style={{ width: 16, textAlign: 'center' }}>✦</span> Skills
+        </div>
+        <div className="sidebar-item" onClick={() => navigate('/integrations')} style={{ color: 'var(--text-secondary)' }}>
+          <span style={{ width: 16, textAlign: 'center' }}>↗</span> Intégrations et MCP
+        </div>
+      </div>
 
+      <div className="sidebar-content">
+        
         {/* Pinned */}
         <div className="sidebar-section-label" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'none', paddingLeft: 8 }}>Épinglés</div>
         {pinnedConversations.length === 0 && pinnedTasks.length === 0 ? <div style={{ padding: '7px 10px 16px', color: 'var(--text-muted)', fontSize: 11.5 }}>Aucun élément épinglé</div> : <>
@@ -350,13 +371,20 @@ export default function Sidebar() {
 
 
       {/* Footer / User Profile */}
-      <div style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, marginBottom: 8 }}>
+      <div className="sidebar-footer" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0, marginBottom: 8 }}>
         {bobStatus === 'ready' ? (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '4px 8px', borderRadius: 6 }} onClick={() => navigate('/settings')} className="hover:bg-[var(--bg-hover)]">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Settings</span>
+            <UsageMeter
+              usage={usage}
+              compact
+              onClick={() => navigate('/settings', { state: { tab: 'bob' } })}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '4px 8px', borderRadius: 6 }} onClick={() => navigate('/settings')} className="hover:bg-[var(--bg-hover)]" aria-label="Réglages" role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate('/settings') } }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Réglages</span>
+                </div>
               </div>
             </div>
           </>

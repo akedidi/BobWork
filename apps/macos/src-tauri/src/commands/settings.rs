@@ -1,6 +1,8 @@
 use crate::db::Database;
 use crate::error::AppError;
 use crate::models::settings::AppSettings;
+use crate::services::bob::BobService;
+use crate::services::chrome_mcp::ChromeMcpService;
 use crate::services::settings::SettingsService;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -15,7 +17,9 @@ pub async fn update_settings(
     settings: AppSettings,
     db: State<'_, Database>,
     app_handle: AppHandle,
+    bob: State<'_, BobService>,
 ) -> Result<(), AppError> {
+    let previous = SettingsService::new().get(&db)?;
     let autostart = app_handle.autolaunch();
     let result = if settings.launch_at_login {
         autostart.enable()
@@ -37,5 +41,11 @@ pub async fn update_settings(
                 ))
             })?;
     }
-    SettingsService::new().update_all(&db, &settings)
+    SettingsService::new().update_all(&db, &settings)?;
+    if previous.chrome_control_enabled != settings.chrome_control_enabled {
+        if let Some(bob_path) = bob.get_binary_path() {
+            ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;
+        }
+    }
+    Ok(())
 }

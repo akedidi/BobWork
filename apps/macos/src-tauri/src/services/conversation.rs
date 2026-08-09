@@ -7,9 +7,20 @@ use crate::error::{AppError, AppResult};
 use crate::models::conversation::{
     AddMessageInput, Conversation, CreateConversationInput, Message,
 };
+use crate::services::bob::BobService;
+use crate::services::task::TaskService;
 use chrono::Utc;
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindConversationResult {
+    pub deleted_messages: usize,
+    pub cancelled_tasks: usize,
+    pub title_reset: bool,
+}
 
 pub struct ConversationService;
 
@@ -264,6 +275,106 @@ impl ConversationService {
             associated_approvals: serde_json::Value::Array(vec![]),
             created_at: now,
         })
+    }
+
+    /// Delete a user message and every message after it, cancel in-flight work,
+    /// and reset conversation context (ChatGPT-style branch rewind).
+    pub fn rewind_conversation_from_message(
+        &self,
+        db: &Database,
+        bob: &BobService,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> AppResult<RewindConversationResult> {
+        let conn = db.conn.lock().unwrap();
+        let (author, created_at): (String, String) = conn
+            .query_row(
+                "SELECT author, created_at FROM messages WHERE id = ?1 AND conversation_id = ?2",
+                params![message_id, conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    AppError::NotFound("Message introuvable".into())
+                }
+                _ => AppError::Database(error.to_string()),
+            })?;
+
+        if author != "user" {
+            return Err(AppError::ValidationFailed(
+                "Seuls les messages utilisateur peuvent être modifiés.".into(),
+            ));
+        }
+
+        let earlier_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND created_at < ?2",
+            params![conversation_id, created_at],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+
+        let cancelled_tasks =
+            TaskService::new().cancel_active_for_conversation(db, conversation_id, bob)?;
+        TaskService::new().clear_resumable_for_conversation(db, conversation_id)?;
+
+        let conn = db.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND created_at >= ?2",
+            params![conversation_id, created_at],
+        )?;
+
+        let title_reset = earlier_count == 0;
+        if title_reset {
+            conn.execute(
+                "UPDATE conversations SET title = 'Nouvelle conversation', bob_context_state = '{}', summary = NULL WHERE id = ?1",
+                params![conversation_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE conversations SET bob_context_state = '{}', summary = NULL WHERE id = ?1",
+                params![conversation_id],
+            )?;
+        }
+
+        Ok(RewindConversationResult {
+            deleted_messages: deleted,
+            cancelled_tasks,
+            title_reset,
+        })
+    }
+
+    /// Backward-compatible helper used in tests.
+    pub fn truncate_messages_from(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> AppResult<usize> {
+        let conn = db.conn.lock().unwrap();
+        let (author, created_at): (String, String) = conn
+            .query_row(
+                "SELECT author, created_at FROM messages WHERE id = ?1 AND conversation_id = ?2",
+                params![message_id, conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    AppError::NotFound("Message introuvable".into())
+                }
+                _ => AppError::Database(error.to_string()),
+            })?;
+
+        if author != "user" {
+            return Err(AppError::ValidationFailed(
+                "Seuls les messages utilisateur peuvent être modifiés.".into(),
+            ));
+        }
+
+        let deleted = conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND created_at >= ?2",
+            params![conversation_id, created_at],
+        )?;
+        Ok(deleted)
     }
 
     fn row_to_conversation(row: &rusqlite::Row) -> rusqlite::Result<Conversation> {

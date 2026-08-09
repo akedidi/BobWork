@@ -30,6 +30,9 @@ pub fn run() {
 
     info!("Starting Bob Work...");
 
+    let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env");
+    let _ = dotenvy::from_path(env_path);
+
     let builder = tauri::Builder::default();
     #[cfg(feature = "e2e")]
     let builder = builder
@@ -109,6 +112,30 @@ pub fn run() {
             if let Err(error) = plugin_service.ensure_builtin_plugins(&app_handle.state::<db::Database>()) {
                 tracing::warn!("Unable to refresh built-in document plugins: {:?}", error);
             }
+            if let Some(bob_path) = app_handle.state::<services::bob::BobService>().get_binary_path() {
+                if let Err(error) = plugin_service.sync_installed_office_mcps(
+                    &app_handle.state::<db::Database>(),
+                    &bob_path,
+                ) {
+                    tracing::warn!("Unable to sync built-in Office MCP tools: {:?}", error);
+                }
+                if let Ok(settings) =
+                    services::settings::SettingsService::new().get(&app_handle.state::<db::Database>())
+                {
+                    if settings.chrome_control_enabled {
+                        if let Err(error) =
+                            services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
+                        {
+                            tracing::warn!("Unable to sync built-in Chrome MCP tools: {:?}", error);
+                        }
+                    }
+                }
+                if let Err(error) = services::integration_mcp::IntegrationMcpService::new()
+                    .sync_all_connected(&bob_path, &app_handle.state::<services::bob::BobService>())
+                {
+                    tracing::warn!("Unable to sync integration MCP connectors: {:?}", error);
+                }
+            }
             if let Err(error) = plugin_service.sync_agentic_bundles(&app_handle.state::<db::Database>()) {
                 tracing::warn!("Unable to import Bob-created plugin bundles: {:?}", error);
             }
@@ -159,7 +186,11 @@ pub fn run() {
                         } else {
                             done.error.clone().unwrap_or_else(|| done.full_output.clone())
                         };
-                        if !content.trim().is_empty() {
+                        let task_service = services::task::TaskService::new();
+                        let task_cancelled = done.task_id.as_deref().and_then(|task_id| {
+                            task_service.get_by_id(&db, task_id).ok().flatten()
+                        }).is_some_and(|task| task.state == "cancelled");
+                        if !content.trim().is_empty() && !task_cancelled {
                             let _ = conv_service.add_message(
                                 &db,
                                 AddMessageInput {
@@ -172,7 +203,9 @@ pub fn run() {
                             );
                         }
                         if let Some(task_id) = done.task_id.as_deref() {
-                            let task_service = services::task::TaskService::new();
+                            if task_cancelled {
+                                return;
+                            }
                             let _ = task_service.finish_run(
                                 &db,
                                 task_id,
@@ -292,6 +325,8 @@ pub fn run() {
             commands::conversation::delete_conversation,
             commands::conversation::get_messages,
             commands::conversation::add_message,
+            commands::conversation::truncate_messages_from,
+            commands::conversation::rewind_conversation_from_message,
             commands::conversation::import_conversations,
             commands::conversation::export_conversations,
             // Task commands
@@ -319,6 +354,7 @@ pub fn run() {
             commands::plugin::get_plugin_extension_status,
             commands::plugin::validate_plugin,
             commands::preview::prepare_file_preview,
+            commands::preview::allow_composer_attachments,
             commands::preview::open_preview_resource,
             // Approval commands
             commands::approval::get_pending_approvals,
@@ -338,6 +374,16 @@ pub fn run() {
             commands::workspace::set_skill_enabled,
             commands::workspace::delete_skill,
             commands::workspace::install_builtin_integration,
+            commands::integration::get_integration_statuses,
+            commands::integration::get_oauth_client_config,
+            commands::integration::set_oauth_client_config,
+            commands::integration::start_integration_oauth,
+            commands::integration::connect_integration_token,
+            commands::integration::disconnect_integration,
+            #[cfg(feature = "e2e")]
+            commands::integration::e2e_connect_integration,
+            #[cfg(feature = "e2e")]
+            commands::integration::e2e_seed_oauth_token,
             commands::workspace::get_mcp_servers,
             commands::workspace::save_mcp_server,
             commands::workspace::set_mcp_server_enabled,
@@ -349,7 +395,11 @@ pub fn run() {
             // System commands
             commands::system::get_app_info,
             commands::system::open_data_dir,
+            commands::system::open_macos_privacy_pane,
+            commands::system::get_chrome_control_status,
             commands::system::export_diagnostics,
+            #[cfg(feature = "e2e")]
+            commands::system::e2e_ack_macos_automation,
             // Schedule commands
             commands::schedule::get_schedules,
             commands::schedule::create_schedule,

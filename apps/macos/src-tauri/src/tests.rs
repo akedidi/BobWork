@@ -507,6 +507,167 @@ mod tests {
         }
 
         #[test]
+        fn test_rewind_conversation_from_message_cancels_tasks() {
+            use crate::services::bob::BobService;
+            use std::path::PathBuf;
+
+            let db = temp_db();
+            let conv_svc = ConversationService::new();
+            let task_svc = crate::services::task::TaskService::new();
+            let bob = BobService::new(&PathBuf::from("/tmp/bob-work-test"));
+
+            let conv = conv_svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: None,
+                        title: "RewindTest".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create");
+
+            let first = conv_svc
+                .add_message(
+                    &db,
+                    AddMessageInput {
+                        conversation_id: conv.id.clone(),
+                        author: "user".to_string(),
+                        content: "First".to_string(),
+                        attachments: None,
+                        sources: None,
+                    },
+                )
+                .expect("first user");
+            conv_svc
+                .add_message(
+                    &db,
+                    AddMessageInput {
+                        conversation_id: conv.id.clone(),
+                        author: "assistant".to_string(),
+                        content: "Reply one".to_string(),
+                        attachments: None,
+                        sources: None,
+                    },
+                )
+                .expect("first assistant");
+
+            let task = task_svc
+                .create(
+                    &db,
+                    crate::models::task::CreateTaskInput {
+                        objective: "Follow up".to_string(),
+                        project_id: None,
+                        conversation_id: Some(conv.id.clone()),
+                        mode: Some("agent".to_string()),
+                        permission_policy: Some("always_ask".to_string()),
+                        budget: None,
+                        max_time: None,
+                        schedule_id: None,
+                    },
+                )
+                .expect("create task");
+            task_svc
+                .update_state(&db, &task.id, "running")
+                .expect("running task");
+
+            let result = conv_svc
+                .rewind_conversation_from_message(&db, &bob, &conv.id, &first.id)
+                .expect("rewind");
+            assert_eq!(result.deleted_messages, 2);
+            assert_eq!(result.cancelled_tasks, 1);
+            assert!(result.title_reset);
+
+            let remaining = conv_svc.get_messages(&db, &conv.id).expect("get_messages");
+            assert!(remaining.is_empty());
+
+            let updated_task = task_svc.get_by_id(&db, &task.id).expect("get task").expect("task");
+            assert_eq!(updated_task.state, "cancelled");
+            assert!(!updated_task.resumable);
+        }
+
+        #[test]
+        fn test_truncate_messages_from_user_message() {
+            let db = temp_db();
+            let svc = ConversationService::new();
+
+            let conv = svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: None,
+                        title: "TruncateTest".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create");
+
+            let first = svc
+                .add_message(
+                    &db,
+                    AddMessageInput {
+                        conversation_id: conv.id.clone(),
+                        author: "user".to_string(),
+                        content: "First".to_string(),
+                        attachments: None,
+                        sources: None,
+                    },
+                )
+                .expect("first user");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: conv.id.clone(),
+                    author: "assistant".to_string(),
+                    content: "Reply one".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("first assistant");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: conv.id.clone(),
+                    author: "user".to_string(),
+                    content: "Second".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("second user");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: conv.id.clone(),
+                    author: "assistant".to_string(),
+                    content: "Reply two".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("second assistant");
+
+            let deleted = svc
+                .truncate_messages_from(&db, &conv.id, &first.id)
+                .expect("truncate");
+            assert_eq!(deleted, 4);
+
+            let remaining = svc.get_messages(&db, &conv.id).expect("get_messages");
+            assert!(remaining.is_empty());
+
+            let err = svc
+                .truncate_messages_from(&db, &conv.id, &first.id)
+                .err()
+                .expect("missing message");
+            assert!(err.to_string().contains("introuvable"));
+        }
+
+        #[test]
         fn test_filter_by_project() {
             let db = temp_db();
             let p_svc = crate::services::project::ProjectService::new();

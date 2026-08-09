@@ -5,6 +5,7 @@
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::task::{CreateTaskInput, Task, TaskDetail, TaskEvent, TaskIo, TaskRun};
+use crate::services::bob::BobService;
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
@@ -402,6 +403,62 @@ impl TaskService {
 
     pub fn cancel(&self, db: &Database, id: &str) -> AppResult<()> {
         self.update_state(db, id, "cancelled")
+    }
+
+    pub fn list_for_conversation(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+    ) -> AppResult<Vec<Task>> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, objective, project_id, conversation_id, mode, permission_policy,
+             budget, max_time, bob_process_id, start_date, end_date, summary, progress,
+             errors, resumable, schedule_id, shell_task_id, last_event_at,
+             state, created_at, updated_at, pinned
+             FROM tasks WHERE conversation_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let tasks = stmt
+            .query_map(params![conversation_id], Self::row_to_task)?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(tasks)
+    }
+
+    pub fn cancel_active_for_conversation(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+        bob: &BobService,
+    ) -> AppResult<usize> {
+        let mut cancelled = 0usize;
+        for task in self.list_for_conversation(db, conversation_id)? {
+            if !matches!(
+                task.state.as_str(),
+                "starting" | "running" | "queued" | "paused"
+            ) {
+                continue;
+            }
+            if let Some(session_id) = task.bob_process_id.as_deref() {
+                let _ = bob.cancel_session(session_id);
+            }
+            self.cancel(db, &task.id)?;
+            cancelled += 1;
+        }
+        Ok(cancelled)
+    }
+
+    pub fn clear_resumable_for_conversation(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+    ) -> AppResult<()> {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET resumable = 0 WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        Ok(())
     }
 
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {

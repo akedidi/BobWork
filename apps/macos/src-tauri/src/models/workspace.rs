@@ -85,7 +85,9 @@ pub struct UsageStatus {
     pub available: bool,
     pub used_amount: Option<f64>,
     pub remaining_amount: Option<f64>,
+    pub total_amount: Option<f64>,
     pub unit: Option<String>,
     pub captured_at: Option<String>,
+    pub instance_label: Option<String>,
     pub message: String,
 }

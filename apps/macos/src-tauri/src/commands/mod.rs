@@ -14,4 +14,5 @@ pub mod schedule;
 pub mod settings;
 pub mod system;
 pub mod task;
+pub mod integration;
 pub mod workspace;

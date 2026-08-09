@@ -5,6 +5,7 @@
 // ============================================================
 
 use crate::error::{AppError, AppResult};
+use crate::services::office_plugin_bundle::OfficePluginBundle;
 use serde_json::Value;
 use std::path::PathBuf;
 use tracing::info;
@@ -61,6 +62,8 @@ impl PluginDeployService {
         // Remove backup on success
         let _ = std::fs::remove_file(&backup_path);
         let _ = std::fs::write(skill_dir.join(".bob-work-plugin-id"), plugin_id);
+
+        OfficePluginBundle::write_bundle(&skill_dir, plugin_id, manifest)?;
 
         info!(
             "Deployed plugin {} as Bob skill {} to {:?}",

@@ -234,31 +234,71 @@ impl BobService {
     }
 
     pub fn has_integration_credential(&self, integration_id: &str) -> bool {
+        let oauth = crate::services::integration_oauth::IntegrationOAuthService::new();
+        if let Some(provider) = crate::services::integration_oauth::IntegrationOAuthService::provider_for(integration_id) {
+            if oauth.has_oauth_tokens(provider) {
+                return true;
+            }
+        }
         let (account, variables): (&str, &[&str]) = match integration_id {
             "github" => (SECRET_GITHUB, &["GH_TOKEN", "GITHUB_TOKEN"]),
             "slack" => (SECRET_SLACK, &["SLACK_BOT_TOKEN"]),
             "monday" => (SECRET_MONDAY, &["MONDAY_API_TOKEN"]),
+            "outlook-mail" | "teams" | "outlook-calendar" | "onedrive" => {
+                return oauth.has_oauth_tokens("microsoft");
+            }
             _ => return false,
         };
         self.session_secret(account).is_some() || Self::environment_secret(variables).is_some()
     }
 
+    pub fn integration_access_token(&self, integration_id: &str) -> Option<zeroize::Zeroizing<String>> {
+        use zeroize::Zeroizing;
+        let oauth = crate::services::integration_oauth::IntegrationOAuthService::new();
+        if let Some(provider) =
+            crate::services::integration_oauth::IntegrationOAuthService::provider_for(integration_id)
+        {
+            if let Ok(Some(token)) = oauth.access_token_for_provider(provider) {
+                return Some(Zeroizing::new(token));
+            }
+        }
+        let (account, variables): (&str, &[&str]) = match integration_id {
+            "github" => (SECRET_GITHUB, &["GH_TOKEN", "GITHUB_TOKEN"]),
+            "slack" => (SECRET_SLACK, &["SLACK_BOT_TOKEN"]),
+            "monday" => (SECRET_MONDAY, &["MONDAY_API_TOKEN"]),
+            _ => return None,
+        };
+        self.session_secret(account)
+            .or_else(|| Self::environment_secret(variables))
+    }
+
     fn integration_process_environment(
         &self,
         integration_ids: &[String],
-    ) -> Vec<(String, Zeroizing<String>)> {
+    ) -> Vec<(String, zeroize::Zeroizing<String>)> {
         let mut environment = vec![];
+        let mut microsoft_injected = false;
         for id in integration_ids {
-            let (account, variables): (&str, &[&str]) = match id.as_str() {
-                "github" => (SECRET_GITHUB, &["GH_TOKEN", "GITHUB_TOKEN"]),
-                "slack" => (SECRET_SLACK, &["SLACK_BOT_TOKEN"]),
-                "monday" => (SECRET_MONDAY, &["MONDAY_API_TOKEN"]),
+            if matches!(
+                id.as_str(),
+                "outlook-mail" | "teams" | "outlook-calendar" | "onedrive"
+            ) {
+                if microsoft_injected {
+                    continue;
+                }
+                if let Some(secret) = self.integration_access_token("outlook-mail") {
+                    environment.push(("MICROSOFT_GRAPH_ACCESS_TOKEN".to_string(), secret));
+                    microsoft_injected = true;
+                }
+                continue;
+            }
+            let variables: &[&str] = match id.as_str() {
+                "github" => &["GH_TOKEN", "GITHUB_TOKEN"],
+                "slack" => &["SLACK_BOT_TOKEN"],
+                "monday" => &["MONDAY_API_TOKEN"],
                 _ => continue,
             };
-            let Some(secret) = self
-                .session_secret(account)
-                .or_else(|| Self::environment_secret(variables))
-            else {
+            let Some(secret) = self.integration_access_token(id) else {
                 continue;
             };
             environment.extend(
