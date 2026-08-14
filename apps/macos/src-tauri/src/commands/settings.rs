@@ -47,7 +47,7 @@ pub async fn update_settings(
         if let Some(bob_path) = bob.get_binary_path() {
             ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         if settings.chrome_control_enabled {
             // Register Bob Work under Automation (Bob Work → Google Chrome).
             let _ = crate::macos_permissions::request_chrome_automation();
@@ -57,7 +57,7 @@ pub async fn update_settings(
         if let Some(bob_path) = bob.get_binary_path() {
             ComputerUseMcpService::new().sync(&bob_path, settings.computer_use_enabled)?;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         if settings.computer_use_enabled {
             // Register Bob Work under Accessibility (system prompt if needed).
             let _ = crate::macos_permissions::request_accessibility();
