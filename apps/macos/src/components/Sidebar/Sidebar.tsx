@@ -656,7 +656,7 @@ export default function Sidebar() {
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{t('nav.settings')}</span>
                 {bobStatus === 'unauthenticated' && (
-                  <span style={{ fontSize: 11, color: 'var(--warning, #c47b1a)' }}>Authentification requise</span>
+                  <span style={{ fontSize: 11, color: 'var(--warning, #c47b1a)' }}>{t('nav.authRequired')}</span>
                 )}
               </div>
             </div>
@@ -667,7 +667,7 @@ export default function Sidebar() {
             style={{ width: '100%', padding: '10px 12px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '8px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
             onClick={() => navigate('/settings', { state: { tab: 'bob' } })}
           >
-            Configurer Bob
+            {t('nav.configureBob')}
           </button>
         ) : (
           <button
@@ -675,7 +675,7 @@ export default function Sidebar() {
             style={{ width: '100%', padding: '10px 12px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '8px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
             onClick={() => navigate('/onboarding')}
           >
-            Configurer Bob
+            {t('nav.configureBob')}
           </button>
         )}
       </div>
@@ -749,31 +749,31 @@ export default function Sidebar() {
         <div
           className="conversation-context-menu"
           role="menu"
-          aria-label="Actions de la conversation"
+          aria-label={t('nav.conversationActions')}
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onMouseDown={e => e.stopPropagation()}
         >
           <button role="menuitem" className="conversation-context-menu__item" onClick={() => { setConversationPinned(contextMenu.conversationId, !conversations.find(c => c.id === contextMenu.conversationId)?.pinned); setContextMenu(null) }}>
-             <PinIcon /> Épingler le chat
+             <PinIcon /> {t('nav.pinChat')}
           </button>
           <button role="menuitem" className="conversation-context-menu__item" onClick={() => { startEdit(contextMenu.conversationId, conversations.find(c => c.id === contextMenu.conversationId)?.title || ''); }}>
-             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Renommer le chat
+             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> {t('nav.renameChat')}
           </button>
           <button role="menuitem" className="conversation-context-menu__item" onClick={() => { setProjectPicker({ conversationId: contextMenu.conversationId }); setContextMenu(null) }}>
-             <FolderTree size={14} strokeWidth={2} /> Déplacer vers un projet
+             <FolderTree size={14} strokeWidth={2} /> {t('nav.moveToProject')}
           </button>
           <div className="conversation-context-menu__separator" />
           <button role="menuitem" className="conversation-context-menu__item conversation-context-menu__item--danger" onClick={() => { handleArchive(contextMenu.conversationId); setContextMenu(null) }}>
-             <Archive size={14} strokeWidth={2} /> Archiver le chat
+             <Archive size={14} strokeWidth={2} /> {t('nav.archiveChat')}
           </button>
         </div>,
         document.body,
       )}
 
       {projectPicker && createPortal(
-        <div className="search-overlay flex items-center justify-center" onMouseDown={() => setProjectPicker(null)}>
-          <div className="search-dialog bg-[var(--bg-surface)] p-4 rounded-xl shadow-xl w-[400px]" onMouseDown={event => event.stopPropagation()}>
-            <h3 className="text-sm font-semibold mb-3">Déplacer vers un projet</h3>
+        <ModalOverlay onClose={() => setProjectPicker(null)}>
+          <ModalPanel className="search-dialog bg-[var(--bg-surface)] p-4 rounded-xl shadow-xl w-[400px]" aria-labelledby="project-picker-title">
+            <h3 id="project-picker-title" className="text-sm font-semibold mb-3">{t('nav.moveToProject')}</h3>
             <div className="flex flex-col gap-1 max-h-[300px] overflow-y-auto">
               <button
                 className="text-left px-3 py-2 text-sm rounded hover:bg-[var(--bg-hover)]"
@@ -783,7 +783,7 @@ export default function Sidebar() {
                   setProjectPicker(null)
                 }}
               >
-                Aucun projet (Conversations)
+                {t('nav.noProjectConversations')}
               </button>
               {projects.filter(p => !p.archived).map(p => (
                 <button
@@ -799,8 +799,8 @@ export default function Sidebar() {
                 </button>
               ))}
             </div>
-          </div>
-        </div>,
+          </ModalPanel>
+        </ModalOverlay>,
         document.body,
       )}
     </div>

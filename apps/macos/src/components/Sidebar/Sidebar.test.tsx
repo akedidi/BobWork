@@ -273,6 +273,25 @@ describe('Sidebar', () => {
     expect(screen.getByRole('menuitem', { name: /Épingler le chat/i })).toBeVisible()
   })
 
+  it('opens the project picker as an accessible modal and closes it with Escape', async () => {
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+
+    fireEvent.contextMenu(await screen.findByText('Conversation locale'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Déplacer vers un projet' }))
+
+    const picker = await screen.findByRole('dialog', { name: 'Déplacer vers un projet' })
+    expect(picker).toBeVisible()
+    expect(picker.closest('.sidebar')).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Aucun projet (Conversations)' })).toHaveFocus())
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Déplacer vers un projet' })).not.toBeInTheDocument()
+  })
+
   it('clamps the context menu inside the viewport', () => {
     expect(clampContextMenuPosition(10, 20, 1280, 800)).toEqual({ x: 10, y: 20 })
     expect(clampContextMenuPosition(1200, 780, 1280, 800)).toEqual({ x: 1052, y: 624 })
