@@ -82,7 +82,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
       const mode = await installBobMode(slug)
       await load()
       window.dispatchEvent(new Event('bob-modes-updated'))
-      setStatus(`Mode « ${mode.name} » installé. Disponible dans le sélecteur du composer.`)
+      setStatus(t('modes.installSuccess', { name: mode.name }))
     } catch (error) {
       setStatus(errorMessage(error))
     } finally {
@@ -99,7 +99,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
       await uninstallBobMode(mode.slug)
       await load()
       window.dispatchEvent(new Event('bob-modes-updated'))
-      setStatus(`Mode « ${mode.name} » retiré.`)
+      setStatus(t('modes.uninstallSuccess', { name: mode.name }))
     } catch (error) {
       setStatus(errorMessage(error))
     } finally {
@@ -116,7 +116,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
       setImportYaml('')
       await load()
       window.dispatchEvent(new Event('bob-modes-updated'))
-      setStatus(`Mode « ${mode.name} » importé.`)
+      setStatus(t('modes.importSuccess', { name: mode.name }))
     } catch (error) {
       setStatus(errorMessage(error))
     } finally {
@@ -131,10 +131,10 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
         <div className="mode-card-main">
           <strong>{mode.name}</strong>
           <small>{mode.slug}</small>
-          <p>{mode.description || 'Aucune description.'}</p>
+          <p>{mode.description || t('modes.noDescription')}</p>
           <div className="mode-card-meta">
-            {mode.builtin ? <span className="skill-builtin-badge">Intégré</span> : null}
-            {mode.catalog ? <span className="mode-catalog-badge">Catalogue</span> : null}
+            {mode.builtin ? <span className="skill-builtin-badge">{t('modes.builtin')}</span> : null}
+            {mode.catalog ? <span className="mode-catalog-badge">{t('modes.catalogBadge')}</span> : null}
             {mode.groups.map(group => (
               <span key={group} className="mode-group-chip">{group}</span>
             ))}
@@ -143,7 +143,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
         <div className="mode-card-actions">
           {mode.installed ? (
             mode.builtin ? (
-              <span className="mode-card-hint">Toujours disponible</span>
+              <span className="mode-card-hint">{t('modes.alwaysAvailable')}</span>
             ) : (
               <button
                 type="button"
@@ -151,7 +151,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
                 disabled={busy}
                 onClick={() => void uninstall(mode)}
               >
-                Retirer
+                {t('modes.uninstall')}
               </button>
             )
           ) : (
@@ -161,7 +161,7 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
               disabled={busy}
               onClick={() => void install(mode.slug)}
             >
-              {busy ? '…' : 'Télécharger'}
+              {busy ? '…' : t('modes.download')}
             </button>
           )}
         </div>
@@ -188,20 +188,20 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
               <div>
                 {embedded ? null : <h2>{t('modes.title')}</h2>}
                 <small>
-                  {modes.filter(m => m.installed && !m.builtin).length} personnalisés ·{' '}
-                  {modes.filter(m => m.catalog && !m.installed).length} à installer
+                  {t('modes.installedCount', { count: modes.filter(m => m.installed && !m.builtin).length })} ·{' '}
+                  {t('modes.availableCount', { count: modes.filter(m => m.catalog && !m.installed).length })}
                 </small>
               </div>
               <div className="modes-toolbar-actions">
                 <button className="secondary-btn" type="button" onClick={() => setImportOpen(true)}>
-                  Importer YAML
+                  {t('modes.importYaml')}
                 </button>
                 <button
                   className="btn-primary"
                   type="button"
                   onClick={() => navigate('/chat', { state: { initialPrompt: CREATE_MODE_PROMPT } })}
                 >
-                  + Créer avec Bob
+                  {t('modes.createWithBob')}
                 </button>
               </div>
             </div>
@@ -215,11 +215,8 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
               />
             </div>
             <p className="skills-help">
-              Les modes IBM Bob Shell sont des profils YAML (`customModes`) : outils autorisés + consignes.
-              Bob Work propose un catalogue local (exemples docs IBM) à écrire dans{' '}
-              <code>~/.bob/settings/custom_modes.yaml</code>. Il n’existe pas d’API marketplace distante IBM —
-              télécharger = installer le YAML localement.{' '}
-              <a href={DOCS_URL} target="_blank" rel="noreferrer">Documentation custom modes</a>
+              {t('modes.help')}{' '}
+              <a href={DOCS_URL} target="_blank" rel="noreferrer">{t('modes.documentation')}</a>
             </p>
 
             {loadError ? null : loading ? (
@@ -256,16 +253,16 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
       {importOpen && (
         <ModalOverlay onClose={() => setImportOpen(false)}>
           <ModalPanel className="plugin-editor-modal" aria-labelledby="mode-import-title">
-            <h2 id="mode-import-title">Importer un mode YAML</h2>
+            <h2 id="mode-import-title">{t('modes.importTitle')}</h2>
             <p className="skills-help">
-              Collez un objet mode (`slug`, `name`, …) ou un bloc <code>customModes:</code>.
+              {t('modes.importHint')}
             </p>
             <textarea
               rows={14}
               value={importYaml}
               onChange={event => setImportYaml(event.target.value)}
-              placeholder={"slug: mon-mode\nname: Mon mode\ngroups:\n  - read"}
-              aria-label="YAML du mode"
+              placeholder={t('modes.yamlPlaceholder')}
+              aria-label={t('modes.yamlLabel')}
             />
             <div className="skill-panel-actions">
               <button
@@ -274,10 +271,10 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
                 disabled={!importYaml.trim() || busySlug === 'import'}
                 onClick={() => void importYamlMode()}
               >
-                Installer
+                {t('modes.install')}
               </button>
               <button className="secondary-btn" type="button" onClick={() => setImportOpen(false)}>
-                Annuler
+                {t('common.cancel')}
               </button>
             </div>
           </ModalPanel>

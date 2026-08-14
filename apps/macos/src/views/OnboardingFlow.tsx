@@ -32,10 +32,10 @@ export default function OnboardingFlow() {
         void requestStartupPermissions()
       }
     }).catch(error => {
-      setErrorMsg(errorMessage(error, 'Impossible de vérifier la configuration locale.'))
+      setErrorMsg(errorMessage(error, t('onboarding.checkFailed')))
       setStep('ERROR')
     })
-  }, [setBobStatus])
+  }, [setBobStatus, t])
 
   const installBob = async () => {
     setStep('INSTALLING')
@@ -45,7 +45,7 @@ export default function OnboardingFlow() {
       setInstallation('BOB_READY')
       setStep('SETUP')
     } catch (error) {
-      setErrorMsg(errorMessage(error, 'L’installation de Bob Shell a échoué.'))
+      setErrorMsg(errorMessage(error, t('onboarding.installFailed')))
       setStep('ERROR')
     }
   }
@@ -70,16 +70,16 @@ export default function OnboardingFlow() {
       <div style={{ padding: 48, maxWidth: 600, margin: '0 auto', fontFamily: 'system-ui, sans-serif', flex: 1, overflow: 'auto' }}>
       {step === 'SETUP' && (
         <div className="onboarding-step">
-          <h1 style={{ fontSize: 24, marginBottom: 16 }}>Configurer IBM Bob</h1>
+          <h1 style={{ fontSize: 24, marginBottom: 16 }}>{t('onboarding.setupTitle')}</h1>
           <p style={{ color: '#555', marginBottom: 18, lineHeight: 1.6 }}>
-            Bob Work utilise <code>bob run</code> pour les conversations, projets, tâches et planifications. La clé est enregistrée dans un coffre local chiffré sur ce Mac, sans Trousseau macOS.
+            {t('onboarding.setupDescription')}
           </p>
 
-          {installation === null && <p style={{ color: '#6f6f6f' }}>Vérification de Bob Shell…</p>}
+          {installation === null && <p style={{ color: '#6f6f6f' }}>{t('onboarding.checking')}</p>}
 
           {installation === 'BOB_NOT_INSTALLED' && <>
-            <p style={{ color: '#555', marginBottom: 16 }}>Bob Shell doit d’abord être installé sur ce Mac.</p>
-            <button style={primaryButtonStyle} onClick={installBob}>Installer Bob Shell</button>
+            <p style={{ color: '#555', marginBottom: 16 }}>{t('onboarding.shellRequired')}</p>
+            <button style={primaryButtonStyle} onClick={installBob}>{t('onboarding.installShell')}</button>
           </>}
 
           {installation === 'BOB_READY' && <>
@@ -97,10 +97,10 @@ export default function OnboardingFlow() {
               onClick={activateApiKey}
               disabled={!apiKey.trim()}
             >
-              Enregistrer dans le coffre
+              {t('onboarding.saveToVault')}
             </button>
             <p style={{ color: '#6f6f6f', fontSize: 12, marginTop: 12 }}>
-              Aucun login SSO et aucun Trousseau macOS. La clé reste chiffrée localement et disponible après redémarrage de Bob Work.
+              {t('onboarding.vaultHint')}
             </p>
           </>}
 
@@ -110,24 +110,24 @@ export default function OnboardingFlow() {
 
       {step === 'INSTALLING' && (
         <div className="onboarding-step">
-          <h1 style={{ fontSize: 24, marginBottom: 16 }}>Installation de Bob Shell</h1>
-          <p style={{ color: '#555' }}>Téléchargement de la version officielle et vérification de son intégrité…</p>
+          <h1 style={{ fontSize: 24, marginBottom: 16 }}>{t('onboarding.installingTitle')}</h1>
+          <p style={{ color: '#555' }}>{t('onboarding.installingDescription')}</p>
         </div>
       )}
 
       {step === 'SUCCESS' && (
         <div className="onboarding-step">
-          <h1 style={{ fontSize: 24, marginBottom: 16 }}>IBM Bob est prêt</h1>
+          <h1 style={{ fontSize: 24, marginBottom: 16 }}>{t('onboarding.readyTitle')}</h1>
           <p style={{ color: '#555', marginBottom: 24 }}>
-            Bob Work peut maintenant exécuter les conversations, projets, tâches et planifications avec <code>bob run</code>.
+            {t('onboarding.readyDescription')}
           </p>
           <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 10, fontSize: 13, color: '#333' }}>
             <input type="checkbox" checked={enableComputerUse} onChange={event => setEnableComputerUse(event.target.checked)} />
-            Activer Computer Use (MCP bob-work-computer-use + Accessibilité)
+            {t('onboarding.enableComputerUse')}
           </label>
           <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 18, fontSize: 13, color: '#333' }}>
             <input type="checkbox" checked={enableChrome} onChange={event => setEnableChrome(event.target.checked)} />
-            Activer le contrôle Chrome (MCP + Automatisation)
+            {t('onboarding.enableChrome')}
           </label>
           <button style={primaryButtonStyle} onClick={() => {
             void (async () => {
@@ -145,15 +145,15 @@ export default function OnboardingFlow() {
               }
               navigate('/')
             })()
-          }}>Continuer</button>
+          }}>{t('onboarding.continue')}</button>
         </div>
       )}
 
       {step === 'ERROR' && (
         <div className="onboarding-step">
-          <h1 style={{ fontSize: 24, marginBottom: 16, color: '#da1e28' }}>Configuration impossible</h1>
+          <h1 style={{ fontSize: 24, marginBottom: 16, color: '#da1e28' }}>{t('onboarding.errorTitle')}</h1>
           <p style={{ color: '#555', marginBottom: 24 }}>{errorMsg}</p>
-          <button style={primaryButtonStyle} onClick={() => setStep('SETUP')}>Réessayer</button>
+          <button style={primaryButtonStyle} onClick={() => setStep('SETUP')}>{t('onboarding.retry')}</button>
         </div>
       )}
       </div>
