@@ -21,6 +21,7 @@ interface I18nContextValue {
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null)
+const fallbackContexts = new Map<AppLocale, I18nContextValue>()
 
 function applyDocumentLang(locale: AppLocale) {
   document.documentElement.lang = locale
@@ -79,11 +80,15 @@ export function useI18n(): I18nContextValue {
   if (!ctx) {
     // Safe fallback for tests that forget the provider
     const locale = testLocaleOverride ?? resolveLocale('auto')
-    return {
+    const cached = fallbackContexts.get(locale)
+    if (cached) return cached
+    const fallback: I18nContextValue = {
       locale,
       t: (key, params) => translate(locale, key, params),
       setLocalePreference: () => {},
     }
+    fallbackContexts.set(locale, fallback)
+    return fallback
   }
   return ctx
 }

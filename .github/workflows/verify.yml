@@ -79,10 +79,6 @@ jobs:
 
       - name: Typecheck + Vitest coverage + Vite build
         run: pnpm --filter macos run verify
-        env:
-          # Coverage instrumentation can exceed Node's ~2 GiB default heap on
-          # GitHub's arm64 macOS runners even though every test has passed.
-          NODE_OPTIONS: --max-old-space-size=4096
 
       - name: Upload coverage report
         if: always()
