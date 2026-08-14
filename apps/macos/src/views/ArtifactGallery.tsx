@@ -22,11 +22,6 @@ const TYPE_ICON: Record<string, string> = {
   pptx: '📊', docx: '📄', xlsx: '📈', pdf: '📕',
   markdown: '📝', text: '📋', html: '🌐',
 }
-const TYPE_LABEL: Record<string, string> = {
-  pptx: 'Présentation', docx: 'Document', xlsx: 'Tableur', pdf: 'PDF',
-  markdown: 'Markdown', text: 'Texte', html: 'Page HTML',
-}
-
 type SortKey = 'date' | 'name' | 'size'
 type SortDir = 'asc' | 'desc'
 
@@ -47,6 +42,7 @@ function fmtDate(iso: string) {
 // ── Generate modal ────────────────────────────────────────────
 
 function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const t = useT()
   const [type, setType] = useState('pptx')
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
@@ -61,7 +57,7 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
       await generateArtifact({ artifactType: type, title: title.trim(), content })
       onDone()
     } catch (e) {
-      setError(errorMessage(e, 'Génération impossible.'))
+      setError(errorMessage(e, t('artifacts.generateFailed')))
     } finally {
       setLoading(false)
     }
@@ -73,31 +69,31 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         background: 'var(--bg-base)', borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)', padding: 28, width: 520, maxWidth: '90vw',
       }}>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20 }}>Générer un artefact</div>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20 }}>{t('artifacts.generateTitle')}</div>
 
         <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          Type
+          {t('artifacts.type')}
         </label>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-          {['pptx','docx','xlsx','pdf','markdown'].map(t => (
-            <button key={t} onClick={() => setType(t)} style={{
+          {['pptx','docx','xlsx','pdf','markdown'].map(artifactType => (
+            <button key={artifactType} onClick={() => setType(artifactType)} style={{
               padding: '5px 14px', borderRadius: 99, fontSize: 12, fontWeight: 500, cursor: 'pointer',
               border: '1px solid var(--border)',
-              background: type === t ? 'var(--accent)' : 'var(--bg-surface)',
-              color: type === t ? '#fff' : 'var(--text-secondary)',
+              background: type === artifactType ? 'var(--accent)' : 'var(--bg-surface)',
+              color: type === artifactType ? '#fff' : 'var(--text-secondary)',
             }}>
-              {TYPE_ICON[t]} {TYPE_LABEL[t]}
+              {TYPE_ICON[artifactType]} {artifactType === 'pptx' ? t('artifacts.presentation') : artifactType === 'docx' ? t('artifacts.document') : artifactType === 'xlsx' ? t('artifacts.spreadsheet') : artifactType === 'pdf' ? 'PDF' : 'Markdown'}
             </button>
           ))}
         </div>
 
         <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          Titre
+          {t('artifacts.titleField')}
         </label>
         <input
           value={title}
           onChange={e => setTitle(e.target.value)}
-          placeholder="Ex : Rapport Q2 2024"
+          placeholder={t('artifacts.titlePlaceholder')}
           style={{
             width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-sm)',
             border: '1px solid var(--border)', background: 'var(--bg-surface)',
@@ -106,7 +102,7 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         />
 
         <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          Contenu (Markdown)
+          {t('artifacts.contentMarkdown')}
         </label>
         <textarea
           value={content}
@@ -128,13 +124,13 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-          <button onClick={onClose} className="btn-secondary" disabled={loading}>Annuler</button>
+          <button onClick={onClose} className="btn-secondary" disabled={loading}>{t('common.cancel')}</button>
           <button
             onClick={handleGenerate}
             disabled={loading || !title.trim() || !content.trim()}
             className="btn-primary"
           >
-            {loading ? 'Génération…' : 'Générer'}
+            {loading ? t('artifacts.generating') : t('artifacts.generate').replace(/^\+\s*/, '')}
           </button>
         </div>
       </ModalPanel>
@@ -146,6 +142,14 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
 export default function ArtifactGallery() {
   const t = useT()
+  const typeLabel = (artifactType: string) => artifactType === 'pptx' ? t('artifacts.presentation')
+    : artifactType === 'docx' ? t('artifacts.document')
+    : artifactType === 'xlsx' ? t('artifacts.spreadsheet')
+    : artifactType === 'text' ? t('artifacts.text')
+    : artifactType === 'html' ? t('artifacts.htmlPage')
+    : artifactType === 'pdf' ? 'PDF'
+    : artifactType === 'markdown' ? 'Markdown'
+    : artifactType
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
   const [conversationTitles, setConversationTitles] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
@@ -296,14 +300,14 @@ export default function ArtifactGallery() {
             background: filter === typeKey ? 'var(--accent)' : 'var(--bg-surface)',
             color: filter === typeKey ? '#fff' : 'var(--text-secondary)',
           }}>
-            {typeKey === 'all' ? 'Tous' : `${TYPE_ICON[typeKey] ?? ''} ${TYPE_LABEL[typeKey] ?? typeKey}`}
+            {typeKey === 'all' ? t('artifacts.all') : `${TYPE_ICON[typeKey] ?? ''} ${typeLabel(typeKey)}`}
           </button>
         ))}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
           {([
-            ['date', 'Date'],
-            ['name', 'Nom'],
-            ['size', 'Taille'],
+            ['date', t('artifacts.date')],
+            ['name', t('artifacts.name')],
+            ['size', t('artifacts.size')],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -461,7 +465,16 @@ function ArtifactCard({
   onDelete: () => void
   deleting: boolean
 }) {
+  const t = useT()
   const icon = TYPE_ICON[artifact.artifactType] ?? '📄'
+  const typeLabel = artifact.artifactType === 'pptx' ? t('artifacts.presentation')
+    : artifact.artifactType === 'docx' ? t('artifacts.document')
+    : artifact.artifactType === 'xlsx' ? t('artifacts.spreadsheet')
+    : artifact.artifactType === 'text' ? t('artifacts.text')
+    : artifact.artifactType === 'html' ? t('artifacts.htmlPage')
+    : artifact.artifactType === 'pdf' ? 'PDF'
+    : artifact.artifactType === 'markdown' ? 'Markdown'
+    : artifact.artifactType
   const showIssue = artifact.validationStatus === 'warning' || artifact.validationStatus === 'invalid'
 
   return (
@@ -488,14 +501,14 @@ function ArtifactCard({
             {artifact.title}
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>
-            {TYPE_LABEL[artifact.artifactType] ?? artifact.artifactType} · {fmt(artifact.size)}
+            {typeLabel} · {fmt(artifact.size)}
           </div>
         </div>
         <button
           onClick={e => { e.stopPropagation(); onDelete() }}
           disabled={deleting}
-          title="Supprimer"
-          aria-label={`Supprimer ${artifact.title}`}
+          title={t('common.delete')}
+          aria-label={t('artifacts.deleteNamed', { name: artifact.title })}
           style={{
             background: 'none', border: 'none', cursor: 'pointer',
             color: 'var(--text-muted)', padding: 4, borderRadius: 4, flexShrink: 0,

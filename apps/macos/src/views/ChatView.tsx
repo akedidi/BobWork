@@ -962,10 +962,10 @@ export default function ChatView() {
               <PinIcon filled={conversationPinned} />
             </button>
           )}
-          <button className="icon-btn" title="Navigateur intégré (⌘⇧B)" onClick={() => openPreview('about:blank', 'Nouvel onglet', 'web')}>
+          <button className="icon-btn" title={t('chat.embeddedBrowser')} onClick={() => openPreview('about:blank', t('chat.newTab'), 'web')}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
           </button>
-          <button className={`icon-btn ${panelOpen ? 'active' : ''}`} title="Activité, sources et fichiers" onClick={() => setPanelOpen(value => !value)}>
+          <button className={`icon-btn ${panelOpen ? 'active' : ''}`} title={t('chat.activitySourcesFiles')} onClick={() => setPanelOpen(value => !value)}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
               <polyline points="14 2 14 8 20 8"/>
@@ -1175,6 +1175,7 @@ export function MessageBubble({
   onCancelEdit?: () => void
   onSubmitEdit?: (content: string) => void
 }) {
+  const t = useT()
   const [copied, setCopied] = useState(false)
   const [draft, setDraft] = useState(msg.content)
   const editRef = useRef<HTMLTextAreaElement>(null)
@@ -1212,14 +1213,14 @@ export function MessageBubble({
             <button
               onClick={onStartEdit}
               className="msg-action-btn"
-              title="Modifier"
+              title={t('chat.edit')}
               style={{ cursor: 'pointer' }}
             >
               <Pencil size={14} />
             </button>
           )}
           {!isEditing && (
-            <button onClick={handleCopy} className="msg-action-btn" title="Copier" type="button">
+            <button onClick={handleCopy} className="msg-action-btn" title={t('chat.copy')} type="button">
               {copied ? <Check size={14} /> : <Copy size={14} />}
             </button>
           )}
@@ -1244,8 +1245,8 @@ export function MessageBubble({
                 rows={Math.min(12, Math.max(2, draft.split('\n').length))}
               />
               <div className="msg-edit-actions">
-                <button type="button" className="msg-edit-cancel" onClick={onCancelEdit}>Annuler</button>
-                <button type="button" className="msg-edit-save" onClick={submitEdit} disabled={!draft.trim()}>Envoyer</button>
+                <button type="button" className="msg-edit-cancel" onClick={onCancelEdit}>{t('common.cancel')}</button>
+                <button type="button" className="msg-edit-save" onClick={submitEdit} disabled={!draft.trim()}>{t('chat.send')}</button>
               </div>
             </div>
           ) : (
@@ -1294,7 +1295,7 @@ export function MessageBubble({
           }} />
         )}
       </div>
-      <button onClick={handleCopy} className="msg-action-btn msg-action-btn--assistant" title="Copier" type="button">
+      <button onClick={handleCopy} className="msg-action-btn msg-action-btn--assistant" title={t('chat.copy')} type="button">
          {copied ? <Check size={14} /> : <Copy size={14} />}
       </button>
     </div>
@@ -1355,11 +1356,12 @@ function PromptQueuePanel({ items, onRemove, onMove, onClear }: {
   onMove: (id: string, direction: -1 | 1) => void
   onClear: () => void
 }) {
+  const t = useT()
   return (
-    <section className="prompt-queue" aria-label={`File d’attente, ${items.length} prompt${items.length > 1 ? 's' : ''}`}>
+    <section className="prompt-queue" aria-label={t('chat.queueLabel', { count: items.length })}>
       <header className="prompt-queue-header">
-        <div><span className="prompt-queue-icon">≡</span><strong>File d’attente</strong><span className="prompt-queue-count">{items.length}</span></div>
-        <button onClick={onClear}>Tout retirer</button>
+        <div><span className="prompt-queue-icon">≡</span><strong>{t('chat.queue')}</strong><span className="prompt-queue-count">{items.length}</span></div>
+        <button onClick={onClear}>{t('chat.clearQueue')}</button>
       </header>
       <div className="prompt-queue-list">
         {items.map((item, index) => (
@@ -1367,12 +1369,12 @@ function PromptQueuePanel({ items, onRemove, onMove, onClear }: {
             <span className="prompt-queue-position">{index + 1}</span>
             <div className="prompt-queue-content">
               <strong title={item.text}>{item.text}</strong>
-              <small>{item.mode}{item.attachmentPaths.length ? ` · ${item.attachmentPaths.length} pièce${item.attachmentPaths.length > 1 ? 's' : ''} jointe${item.attachmentPaths.length > 1 ? 's' : ''}` : ''}</small>
+              <small>{item.mode}{item.attachmentPaths.length ? ` · ${t(item.attachmentPaths.length > 1 ? 'chat.attachments' : 'chat.attachment', { count: item.attachmentPaths.length })}` : ''}</small>
             </div>
             <div className="prompt-queue-actions">
-              <button disabled={index === 0} onClick={() => onMove(item.id, -1)} title="Monter" aria-label={`Monter le prompt ${index + 1}`}>↑</button>
-              <button disabled={index === items.length - 1} onClick={() => onMove(item.id, 1)} title="Descendre" aria-label={`Descendre le prompt ${index + 1}`}>↓</button>
-              <button className="prompt-queue-remove" onClick={() => onRemove(item.id)} title="Retirer" aria-label={`Retirer le prompt ${index + 1}`}>×</button>
+              <button disabled={index === 0} onClick={() => onMove(item.id, -1)} title={t('chat.moveUp')} aria-label={t('chat.movePromptUp', { index: index + 1 })}>↑</button>
+              <button disabled={index === items.length - 1} onClick={() => onMove(item.id, 1)} title={t('chat.moveDown')} aria-label={t('chat.movePromptDown', { index: index + 1 })}>↓</button>
+              <button className="prompt-queue-remove" onClick={() => onRemove(item.id)} title={t('chat.remove')} aria-label={t('chat.removePrompt', { index: index + 1 })}>×</button>
             </div>
           </article>
         ))}

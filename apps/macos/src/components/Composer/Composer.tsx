@@ -626,7 +626,7 @@ export default function Composer({
     <div ref={rootRef} className="composer-root">
       {mentionItems.length > 0 && (
         <div className="composer-popover" style={{ left: 16, right: 16, bottom: 'calc(100% + 8px)' }}>
-          <div className="composer-popover-title">Ajouter au prompt</div>
+          <div className="composer-popover-title">{t('composer.addToPrompt')}</div>
           {mentionItems.map(item => (
             <button key={item.id} className="composer-popover-row" onMouseDown={event => event.preventDefault()} onClick={() => insertMention(item.insert)}>
               <span>{item.label}</span><small>{item.subtitle}</small>
@@ -667,11 +667,11 @@ export default function Composer({
       >
         {isDragging && (
           <div className="composer-drop-hint" aria-hidden="true">
-            <span>Déposer pour joindre au prompt</span>
+            <span>{t('composer.dropToAttach')}</span>
           </div>
         )}
         {mentionChips.length > 0 && (
-          <div className="composer-mention-chips" aria-label="Composants du prompt">
+          <div className="composer-mention-chips" aria-label={t('composer.promptComponents')}>
             {mentionChips.map(chip => (
               <div key={chip.key} className="composer-mention-chip" aria-label={`${chip.subtitle} ${chip.name}`}>
                 <PluginIcon icon={chip.icon} size="sm" className="composer-mention-chip-icon" />
@@ -717,29 +717,29 @@ export default function Composer({
 
         <div className="composer-toolbar">
           <div>
-            <button ref={attachButtonRef} className="icon-btn" title="Joindre un fichier ou un dossier" aria-haspopup="menu" aria-expanded={attachMenu} onClick={() => toggleMenu('attach')}>
+            <button ref={attachButtonRef} className="icon-btn" title={t('composer.attachFileOrFolder')} aria-haspopup="menu" aria-expanded={attachMenu} onClick={() => toggleMenu('attach')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
             {attachMenu && (
               <ComposerPopover anchorRef={attachButtonRef} ariaLabel="Ajouter une pièce jointe" className="attach-popover">
                 <div className="attach-popover-header">
-                  <div className="composer-popover-title">Ajouter</div>
+                  <div className="composer-popover-title">{t('composer.add')}</div>
                   <button type="button" className="composer-popover-row attach-plugin-row" onClick={chooseFiles}>
                     <span className="attach-row-icon" aria-hidden="true">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                     </span>
-                    <span className="attach-plugin-copy"><strong>Fichier(s)</strong></span>
+                    <span className="attach-plugin-copy"><strong>{t('composer.files')}</strong></span>
                   </button>
                   <button type="button" className="composer-popover-row attach-plugin-row" onClick={chooseFolder}>
                     <span className="attach-row-icon" aria-hidden="true">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                     </span>
-                    <span className="attach-plugin-copy"><strong>Dossier</strong></span>
+                    <span className="attach-plugin-copy"><strong>{t('composer.folder')}</strong></span>
                   </button>
                 </div>
                 <div className="attach-popover-scroll">
                   <div className="composer-popover-separator" />
-                  <div className="composer-popover-title">Plugins & modes de travail</div>
+                  <div className="composer-popover-title">{t('composer.pluginsAndModes')}</div>
                   {catalogError && allowedPlugins.length === 0 ? (
                     <p className="composer-popover-empty">{catalogError}</p>
                   ) : allowedPlugins.length > 0 ? <>
@@ -761,19 +761,19 @@ export default function Composer({
                             <span className="attach-plugin-copy">
                               <span className="attach-plugin-title">
                                 <strong>{plugin.name}</strong>
-                                {isBuiltinPlugin(plugin) ? <span className="skill-builtin-badge">Intégré</span> : null}
+                                {isBuiltinPlugin(plugin) ? <span className="skill-builtin-badge">{t('composer.builtin')}</span> : null}
                               </span>
                               <small>{isWorkMode ? 'Mode de travail' : (plugin.description || 'Plugin activé')}</small>
                             </span>
                             <span className="attach-row-action" aria-hidden="true">+</span>
                           </button>
                         )
-                      }) : <p className="composer-popover-empty">Aucun plugin correspondant.</p>}
+                      }) : <p className="composer-popover-empty">{t('composer.noPluginMatch')}</p>}
                     </div>
                   </> : <p className="composer-popover-empty">{t('composer.noPlugins')}</p>}
-                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/plugins') }}>Gérer les plugins</button>
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/plugins') }}>{t('composer.managePlugins')}</button>
                   <div className="composer-popover-separator" />
-                  <div className="composer-popover-title">Skills (instructions)</div>
+                  <div className="composer-popover-title">{t('composer.skillsInstructions')}</div>
                   {catalogError && allowedSkills.length === 0 ? (
                     <p className="composer-popover-empty">{catalogError}</p>
                   ) : allowedSkills.length > 0 ? <>
@@ -793,18 +793,18 @@ export default function Composer({
                           <span className="attach-plugin-copy">
                             <span className="attach-plugin-title">
                               <strong>{skill.name}</strong>
-                              {isBuiltinSkill(skill) ? <span className="skill-builtin-badge">Intégré</span> : null}
+                              {isBuiltinSkill(skill) ? <span className="skill-builtin-badge">{t('composer.builtin')}</span> : null}
                             </span>
                             <small>{skill.description || 'Skill activé'}</small>
                           </span>
                           <span className="attach-row-action" aria-hidden="true">+</span>
                         </button>
-                      )) : <p className="composer-popover-empty">Aucun skill correspondant.</p>}
+                      )) : <p className="composer-popover-empty">{t('composer.noSkillMatch')}</p>}
                     </div>
                   </> : <p className="composer-popover-empty">{t('composer.noSkills')}</p>}
-                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>Gérer les skills</button>
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>{t('composer.manageSkills')}</button>
                   <div className="composer-popover-separator" />
-                  <div className="composer-popover-title">Intégrations MCP</div>
+                  <div className="composer-popover-title">{t('composer.mcpIntegrations')}</div>
                   {mcpPickerItems.length > 0 ? <>
                     <input
                       value={mcpSearch}
@@ -827,10 +827,10 @@ export default function Composer({
                           </span>
                           <span className="attach-row-action" aria-hidden="true">+</span>
                         </button>
-                      )) : <p className="composer-popover-empty">Aucune intégration MCP correspondante.</p>}
+                      )) : <p className="composer-popover-empty">{t('composer.noMcpMatch')}</p>}
                     </div>
                   </> : <p className="composer-popover-empty">Aucune intégration MCP connectée{selectedProject ? ' pour ce projet' : ''}.</p>}
-                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>Gérer les intégrations</button>
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>{t('composer.manageIntegrations')}</button>
                 </div>
               </ComposerPopover>
             )}
@@ -856,7 +856,7 @@ export default function Composer({
               </button>
               {projectMenu && (
                 <ComposerPopover anchorRef={projectButtonRef} ariaLabel="Choisir un projet" className="project-popover">
-                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); setProjectMenu(false) }}>Sans projet</button>
+                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); setProjectMenu(false) }}>{t('composer.noProject')}</button>
                   {projects.map(project => <button className="composer-popover-row" key={project.id} onClick={() => { setProjectId(project.id); if (project.defaultMode) setMode(project.defaultMode); setProjectMenu(false) }}>{project.name}</button>)}
                 </ComposerPopover>
               )}
@@ -870,7 +870,7 @@ export default function Composer({
               <button ref={modeButtonRef} className="composer-pill" aria-label={`Mode Bob : ${selectedMode.name}`} aria-haspopup="menu" aria-expanded={modeMenu} onClick={() => toggleMenu('mode')}>{selectedMode.name}<span aria-hidden="true">⌄</span></button>
               {modeMenu && (
                 <ComposerPopover anchorRef={modeButtonRef} align="end" ariaLabel="Modes Bob" className="mode-popover">
-                  <div className="composer-popover-title">Modes Bob</div>
+                  <div className="composer-popover-title">{t('composer.bobModes')}</div>
                   <input autoFocus value={modeSearch} onChange={event => setModeSearch(event.target.value)} placeholder={t('composer.searchMode')} className="popover-search" />
                   <div className="mode-popover-list">
                     {filteredModes.map(item => (
@@ -886,7 +886,7 @@ export default function Composer({
           )}
 
           {busy && onStop && (
-            <button className="composer-stop-btn" onClick={onStop} title="Arrêter l’exécution active" aria-label="Arrêter l’exécution active"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
+            <button className="composer-stop-btn" onClick={onStop} title={t('composer.stopActive')} aria-label={t('composer.stopActive')}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
           )}
           <button
             className={`send-btn ${busy ? 'queue-send-btn' : ''}`}

@@ -1,4 +1,5 @@
 import type { UsageStatus } from '@bob-work/shared-types'
+import { useT } from '../../i18n'
 
 function formatAmount(value?: number) {
   if (value == null || Number.isNaN(value)) return '—'
@@ -43,6 +44,7 @@ export function UsageMeter({
   compact?: boolean
   onClick?: () => void
 }) {
+  const t = useT()
   if (!usage) return null
 
   const percent = usagePercent(usage)
@@ -61,9 +63,9 @@ export function UsageMeter({
         {totalLabel != null ? (
           <span className="usage-meter-value">{usedLabel} / {totalLabel}</span>
         ) : usage.available && usage.usedAmount != null ? (
-          <span className="usage-meter-value">{usedLabel} utilisés</span>
+          <span className="usage-meter-value">{t('usage.used', { amount: usedLabel })}</span>
         ) : (
-          <span className="usage-meter-value usage-meter-value-muted">Indisponible</span>
+          <span className="usage-meter-value usage-meter-value-muted">{t('usage.unavailable')}</span>
         )}
       </div>
       {percent != null && (
@@ -83,7 +85,7 @@ export function UsageMeter({
         <div className="usage-meter-meta">
           {usage.instanceLabel && <span>{usage.instanceLabel}</span>}
           {usage.remainingAmount != null && totalLabel != null && (
-            <span>{remainingLabel} restants</span>
+            <span>{t('usage.remaining', { amount: remainingLabel })}</span>
           )}
           {!usage.available && usage.message && <span>{usage.message}</span>}
         </div>

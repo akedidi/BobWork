@@ -4,8 +4,10 @@
 // ============================================================
 
 import { useAppStore } from '../../stores/appStore';
+import { useT } from '../../i18n';
 
 export function Inspector() {
+  const t = useT();
   const { inspectorWidth, tasks } = useAppStore();
   const activeTasks = tasks.filter(t => t.state === 'running' || t.state === 'awaiting_approval');
 
@@ -35,7 +37,7 @@ export function Inspector() {
               color: 'var(--text-muted)',
               marginBottom: 10,
             }}>
-              Tâches actives
+              {t('inspector.activeTasks')}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {activeTasks.map(task => (
@@ -54,7 +56,7 @@ export function Inspector() {
                       : task.objective}
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>
-                    <span>{task.state === 'running' ? 'En cours…' : "En attente d'approbation"}</span>
+                    <span>{task.state === 'running' ? t('inspector.running') : t('inspector.awaitingApproval')}</span>
                     <span>{Math.round(task.progress)}%</span>
                   </div>
                   <div style={{
@@ -90,7 +92,7 @@ export function Inspector() {
               <circle cx="12" cy="12" r="10"/>
               <polyline points="12 6 12 12 16 14"/>
             </svg>
-            <span style={{ fontSize: 12 }}>Aucune activité en cours</span>
+            <span style={{ fontSize: 12 }}>{t('inspector.noActivity')}</span>
           </div>
         )}
       </div>

@@ -1,30 +1,32 @@
 import { useState } from 'react'
+import { useT } from '../../i18n'
 
 type PanelContext = { type: 'file' | 'link' | 'sources' | 'task'; data?: unknown }
-const TABS = ['Aperçu', 'Sources', 'Historique'] as const
+const TABS = ['preview', 'sources', 'history'] as const
 
 export default function RightPanel({ context, onClose }: {
   context: PanelContext
   onClose: () => void
 }) {
-  const [tab, setTab] = useState<typeof TABS[number]>('Aperçu')
+  const t = useT()
+  const [tab, setTab] = useState<typeof TABS[number]>('preview')
 
-  const title = context.type === 'file' ? 'Fichier'
-    : context.type === 'link' ? 'Page web'
-    : context.type === 'sources' ? 'Sources'
-    : 'Tâche'
+  const title = context.type === 'file' ? t('inspector.file')
+    : context.type === 'link' ? t('inspector.webPage')
+    : context.type === 'sources' ? t('inspector.sources')
+    : t('inspector.task')
 
   return (
     <div className="inspector-panel">
       {/* Tabs header */}
       <div className="inspector-tabs">
-        {TABS.map(t => (
+        {TABS.map(tabKey => (
           <button
-            key={t}
-            className={`inspector-tab ${tab === t ? 'active' : ''}`}
-            onClick={() => setTab(t)}
+            key={tabKey}
+            className={`inspector-tab ${tab === tabKey ? 'active' : ''}`}
+            onClick={() => setTab(tabKey)}
           >
-            {t}
+            {t(`inspector.${tabKey}`)}
           </button>
         ))}
         <div style={{ flex: 1 }} />
@@ -32,7 +34,7 @@ export default function RightPanel({ context, onClose }: {
           className="icon-btn"
           style={{ marginTop: 'auto', marginBottom: 2 }}
           onClick={onClose}
-          title="Fermer"
+          title={t('common.close')}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -42,7 +44,7 @@ export default function RightPanel({ context, onClose }: {
 
       {/* Tab content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-        {tab === 'Aperçu' && (
+        {tab === 'preview' && (
           <div>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 10,
@@ -56,23 +58,23 @@ export default function RightPanel({ context, onClose }: {
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{title}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {context.type === 'link' ? 'Page web' : 'Document local'}
+                  {context.type === 'link' ? t('inspector.webPage') : t('inspector.localDocument')}
                 </div>
               </div>
             </div>
             <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-              L'aperçu du contenu s'affichera ici une fois que Bob aura analysé le fichier ou la page.
+              {t('inspector.previewHint')}
             </p>
           </div>
         )}
-        {tab === 'Sources' && (
+        {tab === 'sources' && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', paddingTop: 40 }}>
-            Aucune source associée pour l'instant.
+            {t('inspector.noSources')}
           </div>
         )}
-        {tab === 'Historique' && (
+        {tab === 'history' && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', paddingTop: 40 }}>
-            Aucun historique disponible.
+            {t('inspector.noHistory')}
           </div>
         )}
       </div>

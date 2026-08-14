@@ -1,5 +1,6 @@
 import type { ChromeSnapshot } from '../../lib/chromeSnapshot'
 import { isLocalDevelopmentBrowserUrl, isTrustedEmbeddedBrowserUrl } from '../../lib/browserNavigation'
+import { useT } from '../../i18n'
 
 export function ChromeSnapshotCard({
   snapshot,
@@ -8,6 +9,7 @@ export function ChromeSnapshotCard({
   snapshot: ChromeSnapshot
   onOpen?: (url: string, title?: string) => void
 }) {
+  const t = useT()
   const hostname = (() => {
     try { return snapshot.url ? new URL(snapshot.url).hostname : '' } catch { return '' }
   })()
@@ -23,8 +25,8 @@ export function ChromeSnapshotCard({
         <span className="chrome-snapshot-url" title={snapshot.url || undefined}>
           {hostname || snapshot.url || 'Chrome'}
         </span>
-        {snapshot.pending ? <span className="chrome-snapshot-state">Lecture…</span> : null}
-        {snapshot.failed ? <span className="chrome-snapshot-state is-failed">Échec</span> : null}
+        {snapshot.pending ? <span className="chrome-snapshot-state">{t('chromeSnapshot.reading')}</span> : null}
+        {snapshot.failed ? <span className="chrome-snapshot-state is-failed">{t('chromeSnapshot.failed')}</span> : null}
       </header>
       <div className="chrome-snapshot-preview">
         {trustedForEmbedding ? (
@@ -39,7 +41,7 @@ export function ChromeSnapshotCard({
           />
         ) : (
           <span className="chrome-snapshot-empty">
-            {snapshot.url ? 'Aperçu externe protégé' : 'En attente de l’onglet Chrome…'}
+            {snapshot.url ? t('chromeSnapshot.externalProtected') : t('chromeSnapshot.waitingTab')}
           </span>
         )}
       </div>
@@ -50,11 +52,11 @@ export function ChromeSnapshotCard({
         ) : snapshot.text ? (
           <p className="chrome-snapshot-outline">{snapshot.text.slice(0, 160)}</p>
         ) : (
-          <p className="chrome-snapshot-outline">Aperçu de l’onglet Chrome utilisé par Bob.</p>
+          <p className="chrome-snapshot-outline">{t('chromeSnapshot.previewOutline')}</p>
         )}
         {snapshot.url ? (
           <button type="button" className="chrome-snapshot-open" onClick={open}>
-            Ouvrir dans le panneau
+            {t('chromeSnapshot.openPanel')}
           </button>
         ) : null}
       </div>

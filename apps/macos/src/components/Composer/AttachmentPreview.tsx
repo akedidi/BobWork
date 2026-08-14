@@ -9,6 +9,7 @@ import {
   getFileVisualKind,
   isImagePath,
 } from './composerAttachments'
+import { useT } from '../../i18n'
 
 interface Props {
   path: string
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export default function AttachmentPreview({ path, onRemove }: Props) {
+  const t = useT()
   const [isDir, setIsDir] = useState(false)
   const [size, setSize] = useState<number | null>(null)
   const [previewFailed, setPreviewFailed] = useState(false)
@@ -63,7 +65,7 @@ export default function AttachmentPreview({ path, onRemove }: Props) {
           </span>
           <div className="composer-attachment-meta">
             <span className="composer-attachment-name">{name}</span>
-            <span className="composer-attachment-size">Dossier</span>
+            <span className="composer-attachment-size">{t('composer.folder')}</span>
           </div>
         </div>
       ) : (
@@ -77,7 +79,7 @@ export default function AttachmentPreview({ path, onRemove }: Props) {
       )}
       <button
         type="button"
-        aria-label="Retirer"
+        aria-label={t('chat.remove')}
         className="composer-attachment-remove"
         onClick={event => {
           event.preventDefault()
