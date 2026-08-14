@@ -4,8 +4,6 @@ import {
   ensureHomeReady,
   expectNoLoadErrorBanner,
   openSettingsTab,
-  waitForHomeChatIdle,
-  waitForVisible,
 } from '../helpers'
 
 const IMPORT_YAML = [
@@ -86,7 +84,10 @@ describe('Bob Work — modes Bob Shell', () => {
   it('ouvre le chat pour créer un mode avec Bob', async () => {
     await openSettingsTab('Modes')
     await $('button=+ Créer avec Bob').click()
-    await waitForVisible('div.msg-user*=mode Bob Shell personnalisé')
-    await waitForHomeChatIdle()
+    // The mode helper pre-fills a new chat so the user can refine the request
+    // before sending it; it no longer submits a message automatically.
+    const composer = $('textarea[placeholder="Sur quoi travailler ?"]')
+    await composer.waitForDisplayed({ timeout: 8_000 })
+    await expect(composer).toHaveValue(expect.stringContaining('mode Bob Shell personnalisé'))
   })
 })
