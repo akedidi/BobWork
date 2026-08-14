@@ -29,6 +29,7 @@ mod tests {
     mod scheduler_tests {
         use crate::db::Database;
         use crate::services::scheduler::{CreateScheduleInput, SchedulerService};
+        use chrono::Timelike;
 
         fn temp_db() -> Database {
             // Use an in-memory SQLite for tests
@@ -48,6 +49,7 @@ mod tests {
                 project_id: None,
                 plugin_or_mode: None,
                 cron_or_event: "every day".to_string(),
+                run_at: None,
                 timezone: Some("UTC".to_string()),
                 offline_behavior: Some("skip".to_string()),
                 overlap_policy: Some("queue".to_string()),
@@ -74,6 +76,7 @@ mod tests {
                 project_id: None,
                 plugin_or_mode: None,
                 cron_or_event: "every week".to_string(),
+                run_at: None,
                 timezone: None,
                 offline_behavior: None,
                 overlap_policy: None,
@@ -97,6 +100,7 @@ mod tests {
                 project_id: None,
                 plugin_or_mode: None,
                 cron_or_event: "hourly".to_string(),
+                run_at: None,
                 timezone: None,
                 offline_behavior: None,
                 overlap_policy: None,
@@ -119,6 +123,7 @@ mod tests {
                 project_id: None,
                 plugin_or_mode: None,
                 cron_or_event: "every day".to_string(),
+                run_at: None,
                 timezone: None,
                 offline_behavior: None,
                 overlap_policy: None,
@@ -145,6 +150,7 @@ mod tests {
                 project_id: None,
                 plugin_or_mode: None,
                 cron_or_event: "in 5 minutes".to_string(),
+                run_at: None,
                 timezone: None,
                 offline_behavior: None,
                 overlap_policy: None,
@@ -158,6 +164,57 @@ mod tests {
                 "should be ~5 min from now, got {}min",
                 diff
             );
+        }
+
+        #[test]
+        fn test_compute_next_run_daily_at_time() {
+            let db = temp_db();
+            let svc = SchedulerService::new();
+
+            let input = CreateScheduleInput {
+                name: "Morning".to_string(),
+                instructions: "daily".to_string(),
+                project_id: None,
+                plugin_or_mode: None,
+                cron_or_event: "every day".to_string(),
+                run_at: Some("09:00".to_string()),
+                timezone: Some("UTC".to_string()),
+                offline_behavior: None,
+                overlap_policy: None,
+            };
+            let s = svc.create(&db, input).expect("create");
+            let next = s.next_run.expect("next_run");
+            let dt = chrono::DateTime::parse_from_rfc3339(&next).expect("valid RFC3339");
+            assert_eq!(dt.hour(), 9);
+            assert_eq!(dt.minute(), 0);
+            assert!(dt > chrono::Utc::now());
+        }
+
+        #[test]
+        fn test_create_schedule_with_project() {
+            let db = temp_db();
+            let svc = SchedulerService::new();
+            let project_id = uuid::Uuid::new_v4().to_string();
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO projects (id,name,description,objective,local_path,allowed_integrations,custom_instructions,created_at,updated_at)
+                 VALUES (?1,'Demo','','','/tmp/demo','[]','',datetime('now'),datetime('now'))",
+                rusqlite::params![project_id],
+            ).expect("insert project");
+
+            let input = CreateScheduleInput {
+                name: "Project task".to_string(),
+                instructions: "Run in project".to_string(),
+                project_id: Some(project_id.clone()),
+                plugin_or_mode: None,
+                cron_or_event: "every day".to_string(),
+                run_at: Some("10:30".to_string()),
+                timezone: Some("UTC".to_string()),
+                offline_behavior: None,
+                overlap_policy: None,
+            };
+            let created = svc.create(&db, input).expect("create");
+            assert_eq!(created.project_id.as_deref(), Some(project_id.as_str()));
+            assert_eq!(created.run_at.as_deref(), Some("10:30"));
         }
     }
 
@@ -255,6 +312,13 @@ mod tests {
             let text = "Hello, this is a normal log message without secrets";
             let redacted = redact_secrets(text);
             assert_eq!(redacted, text);
+        }
+
+        #[test]
+        fn test_redact_quoted_json_token() {
+            let text = r#"{"token":"mySecretToken12345"}"#;
+            let redacted = redact_secrets(text);
+            assert!(!redacted.contains("mySecretToken12345"));
         }
 
         #[test]
@@ -395,31 +459,67 @@ mod tests {
 
             let svc = ArtifactGeneratorService::new();
             let result = svc.generate(&db, input, &tmp_dir);
-
-            let file_path = if let Ok(ref art) = result {
-                Some(std::path::PathBuf::from(&art.file_path))
-            } else {
-                None
-            };
-
-            let _ = std::fs::remove_dir_all(&tmp_dir);
             assert!(
                 result.is_ok(),
                 "docx generation should succeed: {:?}",
                 result
             );
+            let art = result.unwrap();
+            assert_eq!(art.artifact_type, "docx");
+            assert_eq!(art.validation_status, "valid");
+            let path = std::path::PathBuf::from(&art.file_path);
+            assert!(path.exists(), "docx file should exist at {:?}", path);
+            let bytes = std::fs::read(&path).unwrap();
+            // PK\x03\x04 is the ZIP magic number
+            assert!(
+                bytes.starts_with(b"PK\x03\x04"),
+                "DOCX should be a valid ZIP"
+            );
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("open docx as zip");
+            assert!(
+                archive.len() >= 3,
+                "docx package should contain several parts"
+            );
+            assert!(
+                archive.by_name("word/document.xml").is_ok(),
+                "docx must contain word/document.xml"
+            );
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
 
-            // Verify it was a ZIP by checking magic bytes
-            if let Some(path) = file_path {
-                if path.exists() {
-                    let bytes = std::fs::read(&path).unwrap();
-                    // PK\x03\x04 is the ZIP magic number
-                    assert!(
-                        bytes.starts_with(b"PK\x03\x04"),
-                        "DOCX should be a valid ZIP"
-                    );
-                }
+        /// Writes a real DOCX into Bob Work app data so the Artefacts UI can show it.
+        /// Run: `LIVE_ARTIFACT_TEST=1 cargo test live_generate_docx_into_app_data -- --ignored --nocapture`
+        #[test]
+        #[ignore]
+        fn live_generate_docx_into_app_data() {
+            if std::env::var_os("LIVE_ARTIFACT_TEST").is_none() {
+                return;
             }
+            let data_dir = dirs::data_dir()
+                .expect("data dir")
+                .join("com.bobwork.desktop");
+            let db_path = data_dir.join("database.sqlite");
+            let artifacts_dir = data_dir.join("artifacts");
+            assert!(db_path.exists(), "Bob Work DB missing at {:?}", db_path);
+            std::fs::create_dir_all(&artifacts_dir).unwrap();
+
+            let db = Database::new(&db_path).expect("open db");
+            let input = CreateArtifactInput {
+                artifact_type: "docx".to_string(),
+                title: "Test Artefact Doc".to_string(),
+                content: "## Intro\nDocument de test généré automatiquement.\n- Point A\n- Point B"
+                    .to_string(),
+                conversation_id: None,
+            };
+            let art = ArtifactGeneratorService::new()
+                .generate(&db, input, &artifacts_dir)
+                .expect("live generate");
+            println!(
+                "LIVE_ARTIFACT id={} path={} size={:?}",
+                art.id, art.file_path, art.size
+            );
+            assert!(std::path::Path::new(&art.file_path).exists());
         }
     }
 
@@ -451,6 +551,22 @@ mod tests {
             let conv = svc.create(&db, input).expect("create");
             assert_eq!(conv.title, "Test Conv");
             assert_eq!(conv.conversation_type, "chat");
+
+            // Drafts without a user prompt stay out of the conversation list.
+            let empty = svc.get_all(&db, None).expect("get_all");
+            assert!(empty.is_empty());
+
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: conv.id.clone(),
+                    author: "user".to_string(),
+                    content: "Premier prompt".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("prompt");
 
             let all = svc.get_all(&db, None).expect("get_all");
             assert_eq!(all.len(), 1);
@@ -583,7 +699,10 @@ mod tests {
             let remaining = conv_svc.get_messages(&db, &conv.id).expect("get_messages");
             assert!(remaining.is_empty());
 
-            let updated_task = task_svc.get_by_id(&db, &task.id).expect("get task").expect("task");
+            let updated_task = task_svc
+                .get_by_id(&db, &task.id)
+                .expect("get task")
+                .expect("task");
             assert_eq!(updated_task.state, "cancelled");
             assert!(!updated_task.resumable);
         }
@@ -689,28 +808,66 @@ mod tests {
 
             let svc = ConversationService::new();
 
-            svc.create(
+            let proj_conv = svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: Some(proj_id.clone()),
+                        title: "Proj Conv".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create");
+            svc.add_message(
                 &db,
-                crate::models::conversation::CreateConversationInput {
-                    project_id: Some(proj_id.clone()),
-                    title: "Proj Conv".to_string(),
-                    conversation_type: None,
-                    business_mode: None,
-                    bob_mode: None,
+                AddMessageInput {
+                    conversation_id: proj_conv.id.clone(),
+                    author: "user".to_string(),
+                    content: "Prompt projet".to_string(),
+                    attachments: None,
+                    sources: None,
                 },
             )
-            .expect("create");
+            .expect("prompt");
+
+            let global_conv = svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: None,
+                        title: "Global Conv".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: global_conv.id.clone(),
+                    author: "user".to_string(),
+                    content: "Prompt global".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("prompt");
+
+            // Promptless draft must never appear in the list.
             svc.create(
                 &db,
                 crate::models::conversation::CreateConversationInput {
                     project_id: None,
-                    title: "Global Conv".to_string(),
+                    title: "Nouvelle conversation".to_string(),
                     conversation_type: None,
                     business_mode: None,
                     bob_mode: None,
                 },
             )
-            .expect("create");
+            .expect("empty draft");
 
             let proj_convs = svc.get_all(&db, Some(&proj_id)).expect("filtered");
             assert_eq!(proj_convs.len(), 1);
@@ -718,6 +875,63 @@ mod tests {
 
             let all_convs = svc.get_all(&db, None).expect("all");
             assert_eq!(all_convs.len(), 2);
+        }
+
+        #[test]
+        fn test_purge_promptless_conversations() {
+            let db = temp_db();
+            let svc = ConversationService::new();
+
+            let stale = svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: None,
+                        title: "Nouvelle conversation".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create stale");
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE conversations SET date = ?1 WHERE id = ?2",
+                    rusqlite::params!["2020-01-01T00:00:00Z", stale.id],
+                )
+                .expect("backdate");
+            }
+
+            let kept = svc
+                .create(
+                    &db,
+                    crate::models::conversation::CreateConversationInput {
+                        project_id: None,
+                        title: "Avec prompt".to_string(),
+                        conversation_type: None,
+                        business_mode: None,
+                        bob_mode: None,
+                    },
+                )
+                .expect("create kept");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: kept.id.clone(),
+                    author: "user".to_string(),
+                    content: "Bonjour".to_string(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("prompt");
+
+            let purged = svc.purge_promptless(&db).expect("purge");
+            assert_eq!(purged, 1);
+            assert!(svc.get_by_id(&db, &stale.id).unwrap().is_none());
+            assert!(svc.get_by_id(&db, &kept.id).unwrap().is_some());
+            assert_eq!(svc.get_all(&db, None).unwrap().len(), 1);
         }
 
         #[test]
@@ -912,6 +1126,7 @@ mod tests {
             // Should return sensible defaults even with empty DB
             assert_eq!(settings.language, "auto");
             assert_eq!(settings.theme, "system");
+            assert_eq!(settings.permission_policy, "ask_for_important");
             assert!(settings.font_size >= 12 && settings.font_size <= 20);
         }
 

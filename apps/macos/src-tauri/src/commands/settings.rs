@@ -3,6 +3,7 @@ use crate::error::AppError;
 use crate::models::settings::AppSettings;
 use crate::services::bob::BobService;
 use crate::services::chrome_mcp::ChromeMcpService;
+use crate::services::computer_use_mcp::ComputerUseMcpService;
 use crate::services::settings::SettingsService;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -45,6 +46,21 @@ pub async fn update_settings(
     if previous.chrome_control_enabled != settings.chrome_control_enabled {
         if let Some(bob_path) = bob.get_binary_path() {
             ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;
+        }
+        #[cfg(target_os = "macos")]
+        if settings.chrome_control_enabled {
+            // Register Bob Work under Automation (Bob Work → Google Chrome).
+            let _ = crate::macos_permissions::request_chrome_automation();
+        }
+    }
+    if previous.computer_use_enabled != settings.computer_use_enabled {
+        if let Some(bob_path) = bob.get_binary_path() {
+            ComputerUseMcpService::new().sync(&bob_path, settings.computer_use_enabled)?;
+        }
+        #[cfg(target_os = "macos")]
+        if settings.computer_use_enabled {
+            // Register Bob Work under Accessibility (system prompt if needed).
+            let _ = crate::macos_permissions::request_accessibility();
         }
     }
     Ok(())

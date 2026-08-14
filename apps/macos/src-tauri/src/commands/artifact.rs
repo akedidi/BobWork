@@ -2,7 +2,7 @@ use crate::db::Database;
 use crate::error::AppError;
 use crate::models::artifact::Artifact;
 use crate::services::artifact::ArtifactService;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub async fn get_artifacts(db: State<'_, Database>) -> Result<Vec<Artifact>, AppError> {
@@ -20,6 +20,22 @@ pub async fn get_artifact(
 #[tauri::command]
 pub async fn delete_artifact(id: String, db: State<'_, Database>) -> Result<(), AppError> {
     ArtifactService::new().delete(&db, &id)
+}
+
+/// Register a file Bob Shell wrote outside the app artifacts folder (Desktop, …).
+#[tauri::command]
+pub async fn register_external_artifact(
+    path: String,
+    conversation_id: Option<String>,
+    db: State<'_, Database>,
+    app: AppHandle,
+) -> Result<Option<Artifact>, AppError> {
+    let artifact =
+        ArtifactService::new().register_external(&db, &path, conversation_id.as_deref())?;
+    if let Some(ref artifact) = artifact {
+        let _ = app.emit("artifacts-updated", vec![artifact.id.clone()]);
+    }
+    Ok(artifact)
 }
 
 #[tauri::command]

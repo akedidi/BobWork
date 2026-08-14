@@ -12,6 +12,8 @@ use tracing::info;
 
 pub struct PluginDeployService;
 
+const DEPLOYED_VERSION_MARKER: &str = ".bob-work-deployed-version";
+
 impl PluginDeployService {
     pub fn new() -> Self {
         Self
@@ -20,19 +22,58 @@ impl PluginDeployService {
     /// Deploy a plugin manifest using Bob Shell 2's canonical
     /// `~/.bob/skills/<slug>/SKILL.md` layout.
     pub fn deploy(&self, plugin_id: &str, manifest: &Value) -> AppResult<PathBuf> {
+        self.deploy_with_options(plugin_id, manifest, true)
+    }
+
+    /// Like [`deploy`](Self::deploy), but keep existing Office/CTO Python files
+    /// when present (used when the active version is ahead of the packaged one).
+    pub fn deploy_preserving_embedded(
+        &self,
+        plugin_id: &str,
+        manifest: &Value,
+    ) -> AppResult<PathBuf> {
+        self.deploy_with_options(plugin_id, manifest, false)
+    }
+
+    /// True when `~/.bob/skills/<slug>` already matches this plugin id + version.
+    pub fn is_current_deploy(&self, plugin_id: &str, version: &str, manifest: &Value) -> bool {
+        let Ok(skill_dir) = self.skill_dir_for(plugin_id, manifest) else {
+            return false;
+        };
+        if !skill_dir.join("SKILL.md").is_file() {
+            return false;
+        }
+        let owned_by = std::fs::read_to_string(skill_dir.join(".bob-work-plugin-id"))
+            .ok()
+            .map(|value| value.trim().to_string());
+        if owned_by.as_deref() != Some(plugin_id) {
+            return false;
+        }
+        let marker = std::fs::read_to_string(skill_dir.join(DEPLOYED_VERSION_MARKER))
+            .ok()
+            .map(|value| value.trim().to_string());
+        marker.as_deref() == Some(&format!("{plugin_id}\n{version}"))
+    }
+
+    fn deploy_with_options(
+        &self,
+        plugin_id: &str,
+        manifest: &Value,
+        overwrite_embedded: bool,
+    ) -> AppResult<PathBuf> {
         let skills_dir = Self::bob_skills_dir()?;
         std::fs::create_dir_all(&skills_dir)?;
 
+        let skill_dir = self.skill_dir_for(plugin_id, manifest)?;
+        std::fs::create_dir_all(&skill_dir)?;
+        let skill_path = skill_dir.join("SKILL.md");
+        let backup_path = skill_dir.join("SKILL.md.bak");
         let requested_name = manifest
             .get("slug")
             .and_then(|v| v.as_str())
             .or_else(|| manifest.get("name").and_then(|v| v.as_str()))
             .unwrap_or(plugin_id);
         let slug = Self::safe_slug(requested_name, plugin_id);
-        let skill_dir = skills_dir.join(&slug);
-        std::fs::create_dir_all(&skill_dir)?;
-        let skill_path = skill_dir.join("SKILL.md");
-        let backup_path = skill_dir.join("SKILL.md.bak");
 
         // Backup existing skill if any. A manual enable/disable choice made in
         // Bob Work must survive the automatic refresh of built-in plugins.
@@ -63,13 +104,33 @@ impl PluginDeployService {
         let _ = std::fs::remove_file(&backup_path);
         let _ = std::fs::write(skill_dir.join(".bob-work-plugin-id"), plugin_id);
 
-        OfficePluginBundle::write_bundle(&skill_dir, plugin_id, manifest)?;
+        OfficePluginBundle::write_bundle(&skill_dir, plugin_id, manifest, overwrite_embedded)?;
+
+        let version = manifest
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("0.0.0");
+        let _ = std::fs::write(
+            skill_dir.join(DEPLOYED_VERSION_MARKER),
+            format!("{plugin_id}\n{version}"),
+        );
 
         info!(
             "Deployed plugin {} as Bob skill {} to {:?}",
             plugin_id, slug, skill_path
         );
         Ok(skill_path)
+    }
+
+    fn skill_dir_for(&self, plugin_id: &str, manifest: &Value) -> AppResult<PathBuf> {
+        let skills_dir = Self::bob_skills_dir()?;
+        let requested_name = manifest
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .or_else(|| manifest.get("name").and_then(|v| v.as_str()))
+            .unwrap_or(plugin_id);
+        let slug = Self::safe_slug(requested_name, plugin_id);
+        Ok(skills_dir.join(slug))
     }
 
     /// Remove a plugin from Bob's skills directory

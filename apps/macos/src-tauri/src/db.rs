@@ -3,13 +3,26 @@
 // ============================================================
 
 use crate::error::{AppError, AppResult};
-use rusqlite::{params, Connection};
-use std::path::Path;
+use chrono::Utc;
+use rusqlite::{backup::Backup, params, Connection};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 use tracing::info;
 
 pub struct Database {
     pub conn: Mutex<Connection>,
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseBackup {
+    pub name: String,
+    pub path: String,
+    pub created_at: String,
+    pub size_bytes: u64,
 }
 
 impl Database {
@@ -24,6 +37,7 @@ impl Database {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            path: Some(path.to_path_buf()),
         })
     }
 
@@ -35,7 +49,90 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            path: None,
         })
+    }
+
+    pub fn create_backup(&self, backup_dir: &Path, automatic: bool) -> AppResult<DatabaseBackup> {
+        std::fs::create_dir_all(backup_dir)?;
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let prefix = if automatic { "automatic" } else { "manual" };
+        let name = format!("bob-work-{prefix}-{timestamp}.sqlite");
+        let final_path = backup_dir.join(&name);
+        let temporary_path = backup_dir.join(format!(".{name}.partial"));
+
+        let source = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Database("Database lock poisoned".into()))?;
+        let mut destination = Connection::open(&temporary_path)?;
+        {
+            let backup = Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        }
+        ensure_integrity(&destination)?;
+        drop(destination);
+        std::fs::rename(&temporary_path, &final_path)?;
+        set_private_permissions(&final_path)?;
+
+        backup_metadata(&final_path)
+    }
+
+    pub fn restore_backup(&self, backup_path: &Path) -> AppResult<()> {
+        if self.path.is_none() {
+            return Err(AppError::ValidationFailed(
+                "An in-memory database cannot be restored".into(),
+            ));
+        }
+        // FTS5's integrity hook may use a temporary write transaction, so the
+        // validation connection cannot be opened SQLITE_OPEN_READ_ONLY.
+        let source = Connection::open(backup_path)?;
+        ensure_integrity(&source)?;
+
+        let mut destination = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Database("Database lock poisoned".into()))?;
+        {
+            let backup = Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        }
+        ensure_integrity(&destination)?;
+        destination.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+        )?;
+        Ok(())
+    }
+
+    pub fn list_backups(backup_dir: &Path) -> AppResult<Vec<DatabaseBackup>> {
+        if !backup_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut backups = std::fs::read_dir(backup_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().and_then(|value| value.to_str()) == Some("sqlite")
+                    && path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|name| name.starts_with("bob-work-"))
+            })
+            .filter_map(|path| backup_metadata(&path).ok())
+            .collect::<Vec<_>>();
+        backups.sort_by(|left, right| right.name.cmp(&left.name));
+        Ok(backups)
+    }
+
+    pub fn prune_backups(backup_dir: &Path, keep_automatic: usize) -> AppResult<()> {
+        let automatic = Self::list_backups(backup_dir)?
+            .into_iter()
+            .filter(|backup| backup.name.starts_with("bob-work-automatic-"))
+            .collect::<Vec<_>>();
+        for expired in automatic.into_iter().skip(keep_automatic) {
+            std::fs::remove_file(expired.path)?;
+        }
+        Ok(())
     }
 
     pub fn run_migrations(&self) -> AppResult<()> {
@@ -60,6 +157,10 @@ impl Database {
             ("006", MIGRATION_006_PLUGIN_VERSIONS),
             ("007", MIGRATION_007_REMOVE_LEGACY_KEYCHAIN_COLUMN),
             ("008", MIGRATION_008_ARCHIVED_CONVERSATIONS),
+            ("009", MIGRATION_009_SANDBOX_MODE),
+            ("010", MIGRATION_010_CROSS_CONVERSATION_CONTEXT),
+            ("011", MIGRATION_011_SESSION_START_DEFAULT_ALLOW),
+            ("012", MIGRATION_012_SCHEDULE_RUN_AT),
         ];
 
         for (version, sql) in migrations {
@@ -88,6 +189,128 @@ impl Database {
         }
 
         Ok(())
+    }
+}
+
+fn ensure_integrity(connection: &Connection) -> AppResult<()> {
+    let result: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(AppError::Database(format!(
+            "SQLite integrity check failed: {result}"
+        )))
+    }
+}
+
+fn backup_metadata(path: &Path) -> AppResult<DatabaseBackup> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::ValidationFailed("Invalid backup filename".into()))?
+        .to_string();
+    let created_at = name
+        .strip_prefix("bob-work-automatic-")
+        .or_else(|| name.strip_prefix("bob-work-manual-"))
+        .and_then(|value| value.strip_suffix(".sqlite"))
+        .unwrap_or_default()
+        .to_string();
+    Ok(DatabaseBackup {
+        name,
+        path: path.to_string_lossy().into_owned(),
+        created_at,
+        size_bytes: std::fs::metadata(path)?.len(),
+    })
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> AppResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    #[test]
+    fn backup_restore_round_trip_and_migrations() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database_path = temporary.path().join("database.sqlite");
+        let backup_dir = temporary.path().join("backups");
+        let database = Database::new(&database_path).expect("database");
+        database.run_migrations().expect("migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('before', 'Before', 'now', 'now')",
+                    [],
+                )
+                .expect("insert initial row");
+        }
+
+        let backup = database.create_backup(&backup_dir, false).expect("backup");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute("DELETE FROM projects WHERE id = 'before'", [])
+                .expect("delete row");
+        }
+
+        database
+            .restore_backup(Path::new(&backup.path))
+            .expect("restore");
+        database.run_migrations().expect("migrations after restore");
+        let count: i64 = database
+            .conn
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = 'before'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("restored row");
+        assert_eq!(count, 1);
+        assert_eq!(Database::list_backups(&backup_dir).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn corrupted_backup_is_rejected_without_changing_live_data() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = Database::new(&temporary.path().join("database.sqlite")).expect("database");
+        database.run_migrations().expect("migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('safe', 'Safe', 'now', 'now')",
+                    [],
+                )
+                .expect("insert");
+        }
+        let corrupt = temporary.path().join("corrupt.sqlite");
+        std::fs::write(&corrupt, b"not a sqlite database").expect("corrupt file");
+
+        assert!(database.restore_backup(&corrupt).is_err());
+        let count: i64 = database
+            .conn
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = 'safe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("live row");
+        assert_eq!(count, 1);
     }
 }
 
@@ -613,4 +836,41 @@ ALTER TABLE integrations DROP COLUMN keychain_secret_ref;
 
 const MIGRATION_008_ARCHIVED_CONVERSATIONS: &str = r#"
 ALTER TABLE conversations ADD COLUMN archived INTEGER DEFAULT 0;
+"#;
+
+const MIGRATION_009_SANDBOX_MODE: &str = r#"
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('sandbox_mode', 'false', datetime('now'));
+"#;
+
+const MIGRATION_010_CROSS_CONVERSATION_CONTEXT: &str = r#"
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('cross_conversation_context', 'false', datetime('now'));
+"#;
+
+/// Starting `bob run` is default-allow: persist a workspace-wide grant so
+/// existing installs stop prompting, and move the factory policy off
+/// `always_ask` (which used to require a session-start popup).
+const MIGRATION_011_SESSION_START_DEFAULT_ALLOW: &str = r#"
+INSERT OR IGNORE INTO permission_grants (
+    id, action_type, resource, scope, scope_id, decision, expires_at, revoked_at, created_at
+) VALUES (
+    'grant_bob_session_start_default',
+    'bob.session_start',
+    '*',
+    'always',
+    NULL,
+    'allow',
+    NULL,
+    NULL,
+    datetime('now')
+);
+
+UPDATE settings
+SET value = '"ask_for_important"', updated_at = datetime('now')
+WHERE key = 'permission_policy' AND value = '"always_ask"';
+"#;
+
+const MIGRATION_012_SCHEDULE_RUN_AT: &str = r#"
+ALTER TABLE schedules ADD COLUMN run_at TEXT;
 "#;

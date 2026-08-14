@@ -33,7 +33,10 @@ impl IntegrationMcpService {
     pub fn ensure_bundle() -> AppResult<PathBuf> {
         let bundle_dir = Self::bundle_dir()?;
         std::fs::create_dir_all(&bundle_dir).map_err(|error| {
-            AppError::Io(format!("Failed to create integration MCP directory: {}", error))
+            AppError::Io(format!(
+                "Failed to create integration MCP directory: {}",
+                error
+            ))
         })?;
         Self::write_script(&bundle_dir, "integration_mcp_base.py", BASE_SCRIPT)?;
         Self::write_script(&bundle_dir, "github_server.py", GITHUB_SCRIPT)?;
@@ -46,7 +49,9 @@ impl IntegrationMcpService {
     fn write_script(bundle_dir: &Path, filename: &str, contents: &str) -> AppResult<()> {
         let script_path = bundle_dir.join(filename);
         std::fs::write(&script_path, contents).map_err(|error| {
-            AppError::Io(format!("Failed to write integration MCP script {filename}: {error}"))
+            AppError::Io(format!(
+                "Failed to write integration MCP script {filename}: {error}"
+            ))
         })?;
         #[cfg(unix)]
         {
@@ -111,11 +116,21 @@ impl IntegrationMcpService {
         };
         let bundle_dir = Self::ensure_bundle()?;
         let config = Self::mcp_config(&bundle_dir, provider)?;
+        // `--scope global`: the connector belongs to the user (their OAuth
+        // token), not to whatever workspace the app was launched from. The
+        // trailing position keeps positional args stable for the E2E fake bob.
         run_bob(
             bob_path,
-            &["mcp", "add-json", name, &config.to_string()],
+            &[
+                "mcp",
+                "add-json",
+                name,
+                &config.to_string(),
+                "--scope",
+                "global",
+            ],
         )?;
-        run_bob(bob_path, &["mcp", "enable", name])?;
+        run_bob(bob_path, &["mcp", "enable", name, "--scope", "global"])?;
         Ok(())
     }
 
@@ -124,7 +139,7 @@ impl IntegrationMcpService {
             return Ok(());
         };
         if self.is_configured(name) {
-            run_bob(bob_path, &["mcp", "disable", name])?;
+            run_bob(bob_path, &["mcp", "disable", name, "--scope", "global"])?;
         }
         Ok(())
     }
@@ -142,7 +157,12 @@ impl IntegrationMcpService {
         if oauth.has_connection(integration_id, legacy_secret_exists) {
             self.sync_provider(bob_path, provider)
         } else {
-            self.maybe_disable_after_disconnect(bob_path, integration_id, oauth, legacy_secret_exists)
+            self.maybe_disable_after_disconnect(
+                bob_path,
+                integration_id,
+                oauth,
+                legacy_secret_exists,
+            )
         }
     }
 
@@ -174,9 +194,15 @@ impl IntegrationMcpService {
         let oauth = IntegrationOAuthService::new();
         for provider in ["github", "slack", "monday", "microsoft"] {
             let connected = match provider {
-                "github" => oauth.has_connection("github", legacy_secret_exists(bob_service, "github")),
-                "slack" => oauth.has_connection("slack", legacy_secret_exists(bob_service, "slack")),
-                "monday" => oauth.has_connection("monday", legacy_secret_exists(bob_service, "monday")),
+                "github" => {
+                    oauth.has_connection("github", legacy_secret_exists(bob_service, "github"))
+                }
+                "slack" => {
+                    oauth.has_connection("slack", legacy_secret_exists(bob_service, "slack"))
+                }
+                "monday" => {
+                    oauth.has_connection("monday", legacy_secret_exists(bob_service, "monday"))
+                }
                 "microsoft" => IntegrationOAuthService::microsoft_integrations()
                     .iter()
                     .any(|id| oauth.has_connection(id, false)),

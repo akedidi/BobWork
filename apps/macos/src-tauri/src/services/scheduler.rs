@@ -10,7 +10,7 @@ use crate::services::plugin_mcp::PluginMcpService;
 use crate::services::project::ProjectService;
 use crate::services::settings::SettingsService;
 use crate::services::task::TaskService;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use cron::Schedule as CronSchedule;
 use rusqlite::params;
@@ -29,6 +29,8 @@ pub struct Schedule {
     pub project_id: Option<String>,
     pub plugin_or_mode: Option<String>,
     pub cron_or_event: String,
+    /// Local time of day (`HH:MM`) in `timezone` for recurring schedules.
+    pub run_at: Option<String>,
     pub timezone: String,
     pub next_run: Option<String>,
     pub last_run: Option<String>,
@@ -62,6 +64,7 @@ pub struct CreateScheduleInput {
     pub project_id: Option<String>,
     pub plugin_or_mode: Option<String>,
     pub cron_or_event: String,
+    pub run_at: Option<String>,
     pub timezone: Option<String>,
     pub offline_behavior: Option<String>,
     pub overlap_policy: Option<String>,
@@ -77,7 +80,7 @@ impl SchedulerService {
     pub fn get_all(&self, db: &Database) -> AppResult<Vec<Schedule>> {
         let conn = db.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,timezone,next_run,last_run,
+            "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,last_run,
              offline_behavior,overlap_policy,state,created_at,updated_at FROM schedules ORDER BY created_at DESC"
         )?;
         let rows = stmt
@@ -90,7 +93,7 @@ impl SchedulerService {
     pub fn get_by_id(&self, db: &Database, id: &str) -> AppResult<Option<Schedule>> {
         let conn = db.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,timezone,next_run,last_run,
+            "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,last_run,
              offline_behavior,overlap_policy,state,created_at,updated_at FROM schedules WHERE id=?1",
             params![id], Self::row_to_schedule,
         );
@@ -137,10 +140,23 @@ impl SchedulerService {
             .timezone
             .clone()
             .unwrap_or_else(|| Self::system_timezone());
-        let next_run =
-            Self::compute_next_run(&input.cron_or_event, &timezone).ok_or_else(|| {
-                AppError::ValidationFailed("Fréquence ou expression cron invalide.".into())
+        let run_at = input
+            .run_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(ref value) = run_at {
+            Self::parse_run_at(value).ok_or_else(|| {
+                AppError::ValidationFailed(
+                    "L’heure d’exécution doit être au format HH:MM (ex. 09:00).".into(),
+                )
             })?;
+        }
+        let next_run = Self::compute_next_run(&input.cron_or_event, &timezone, run_at.as_deref())
+            .ok_or_else(|| {
+            AppError::ValidationFailed("Fréquence ou expression cron invalide.".into())
+        })?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let offline_behavior = input
@@ -152,11 +168,11 @@ impl SchedulerService {
             .clone()
             .unwrap_or_else(|| "queue".into());
         db.conn.lock().unwrap().execute(
-            "INSERT INTO schedules (id,name,instructions,project_id,plugin_or_mode,cron_or_event,timezone,next_run,
+            "INSERT INTO schedules (id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,
              offline_behavior,overlap_policy,state,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'active',?11,?11)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'active',?12,?12)",
             params![id,input.name,input.instructions,input.project_id,input.plugin_or_mode,input.cron_or_event,
-                    timezone,next_run,offline_behavior,overlap_policy,now],
+                    run_at,timezone,next_run,offline_behavior,overlap_policy,now],
         )?;
         self.get_by_id(db, &id)?
             .ok_or_else(|| AppError::NotFound(id))
@@ -300,7 +316,7 @@ impl SchedulerService {
         }
         if !detection.authenticated {
             let error = AppError::BobAuthFailed(
-                "Aucune clé IBM Bob n’est active pour cette session. Saisissez-la dans Bob Work avant l’exécution planifiée.".into(),
+                "Aucune clé IBM Bob dans le coffre local. Saisissez-la dans Réglages → IBM Bob Shell avant l’exécution planifiée.".into(),
             );
             self.record_failed_launch(db, schedule, &error.to_string())?;
             return Err(error);
@@ -355,6 +371,7 @@ impl SchedulerService {
                 sources: None,
             },
         )?;
+        let settings = SettingsService::new().get(db)?;
         let task = TaskService::new().create(
             db,
             CreateTaskInput {
@@ -362,7 +379,7 @@ impl SchedulerService {
                 project_id: schedule.project_id.clone(),
                 conversation_id: Some(conversation.id.clone()),
                 mode: Some(mode.clone()),
-                permission_policy: Some("always_ask".into()),
+                permission_policy: Some(settings.permission_policy.clone()),
                 budget: None,
                 max_time: None,
                 schedule_id: Some(schedule.id.clone()),
@@ -377,7 +394,6 @@ impl SchedulerService {
              VALUES (?1,?2,?3,?4,'running',?4,?4)", params![schedule_run_id,schedule.id,task.id,now]
         )?;
 
-        let settings = SettingsService::new().get(db)?;
         let project = schedule
             .project_id
             .as_deref()
@@ -469,19 +485,70 @@ impl SchedulerService {
         let prompt = [
             (!settings.global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", settings.global_instructions.trim())),
             project.as_ref().and_then(|p| p.custom_instructions.as_ref()).filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
-            (!settings.web_enabled).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette tâche.".to_string()),
+            (!settings.web_enabled || settings.sandbox_mode).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette tâche.".to_string()),
+            settings.sandbox_mode.then(|| "Mode sandbox Bob Work : reste strictement dans le workspace. Pas de contrôle bureau/Chrome ni de chemins hors workspace.".to_string()),
             (!integrations.is_empty()).then(|| format!("Intégrations locales disponibles, sans jamais afficher leurs secrets :\n{}", integrations.join("\n"))),
             plugin_invocation,
             Some(format!("Tâche planifiée « {} » :\n{}", schedule.name, schedule.instructions)),
         ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
 
+        let workspace = project.and_then(|p| p.local_path);
+        let risk = crate::services::permission_governance::RiskContext {
+            computer_use: settings.computer_use_enabled,
+            chrome: settings.chrome_control_enabled,
+            mcp: settings.mcp_enabled,
+            web: settings.web_enabled,
+        }
+        .with_sandbox(settings.sandbox_mode);
+        let resource = workspace.clone().unwrap_or_else(|| "*".into());
+        let has_grant = crate::services::permission_governance::has_allow_grant(
+            db,
+            crate::services::permission_governance::ACTION_SESSION_START,
+            &resource,
+            Some(task.id.as_str()),
+        )?;
+        let has_user_grant = crate::services::permission_governance::has_user_allow_grant(
+            db,
+            crate::services::permission_governance::ACTION_SESSION_START,
+            &resource,
+            Some(task.id.as_str()),
+        )?;
+        if crate::services::permission_governance::needs_unattended_preflight(
+            &settings.permission_policy,
+            &risk,
+            has_user_grant,
+        ) {
+            let message = crate::services::permission_governance::unattended_preflight_message(
+                &settings.permission_policy,
+            );
+            let _ = db.conn.lock().unwrap().execute(
+                "UPDATE schedule_runs SET state='failed',ended_at=?1,error=?2 WHERE id=?3",
+                params![Utc::now().to_rfc3339(), message, schedule_run_id],
+            );
+            let _ = TaskService::new().finish_run(
+                db,
+                &task.id,
+                Some(&task_run.id),
+                false,
+                "",
+                Some(&message),
+                None,
+            );
+            return Err(crate::error::AppError::ValidationFailed(message));
+        }
+        let trust_workspace = crate::services::permission_governance::should_pass_trust(
+            &settings.permission_policy,
+            false,
+            has_grant,
+            settings.sandbox_mode,
+        );
         if let Err(error) = bob.start_streaming_session(
             app.clone(),
             session_id,
             conversation.id,
             mode,
             prompt,
-            project.and_then(|p| p.local_path),
+            workspace,
             BobRunOptions {
                 task_id: Some(task.id.clone()),
                 run_id: Some(task_run.id.clone()),
@@ -493,6 +560,7 @@ impl SchedulerService {
                 integration_ids,
                 plugin_hooks,
                 resume_task_id: None,
+                trust_workspace,
             },
         ) {
             let _ = db.conn.lock().unwrap().execute(
@@ -519,7 +587,11 @@ impl SchedulerService {
 
     fn advance(&self, db: &Database, schedule: &Schedule) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
-        let next = Self::compute_next_run(&schedule.cron_or_event, &schedule.timezone);
+        let next = Self::compute_next_run(
+            &schedule.cron_or_event,
+            &schedule.timezone,
+            schedule.run_at.as_deref(),
+        );
         db.conn.lock().unwrap().execute(
             "UPDATE schedules SET last_run=?1,next_run=?2,updated_at=?1 WHERE id=?3",
             params![now, next, schedule.id],
@@ -588,26 +660,34 @@ impl SchedulerService {
         Ok(())
     }
 
-    fn compute_next_run(expression: &str, timezone: &str) -> Option<String> {
+    fn compute_next_run(expression: &str, timezone: &str, run_at: Option<&str>) -> Option<String> {
         let now = Utc::now();
         let value = expression.trim().to_lowercase();
+        let tz = Tz::from_str(timezone).unwrap_or(chrono_tz::UTC);
+
+        if let Some(run_at) = run_at.filter(|value| !value.trim().is_empty()) {
+            if let Some(next) = Self::next_run_with_time(&value, &tz, run_at, now) {
+                return Some(next.to_rfc3339());
+            }
+        }
+
         let relative = if value == "daily" || value.contains("every day") {
-            Some(now + chrono::Duration::days(1))
+            Some(now + Duration::days(1))
         } else if value == "weekly" || value.contains("every week") {
-            Some(now + chrono::Duration::weeks(1))
+            Some(now + Duration::weeks(1))
         } else if value == "monthly" || value.contains("every month") {
-            Some(now + chrono::Duration::days(30))
+            Some(now + Duration::days(30))
         } else if value == "hourly" || value.contains("every hour") {
-            Some(now + chrono::Duration::hours(1))
+            Some(now + Duration::hours(1))
         } else if value.contains("every minute") {
-            Some(now + chrono::Duration::minutes(1))
+            Some(now + Duration::minutes(1))
         } else if value.starts_with("in ") {
             let parts: Vec<&str> = value.split_whitespace().collect();
             let amount = parts.get(1).and_then(|v| v.parse::<i64>().ok())?;
             match parts.get(2).copied() {
-                Some("minute" | "minutes") => Some(now + chrono::Duration::minutes(amount)),
-                Some("hour" | "hours") => Some(now + chrono::Duration::hours(amount)),
-                Some("day" | "days") => Some(now + chrono::Duration::days(amount)),
+                Some("minute" | "minutes") => Some(now + Duration::minutes(amount)),
+                Some("hour" | "hours") => Some(now + Duration::hours(amount)),
+                Some("day" | "days") => Some(now + Duration::days(amount)),
                 _ => None,
             }
         } else {
@@ -624,12 +704,78 @@ impl SchedulerService {
             expression.to_string()
         };
         let schedule = CronSchedule::from_str(&cron_expression).ok()?;
-        let tz = Tz::from_str(timezone).unwrap_or(chrono_tz::UTC);
         let local_now = tz.from_utc_datetime(&now.naive_utc());
         schedule
             .after(&local_now)
             .next()
             .map(|date| date.with_timezone(&Utc).to_rfc3339())
+    }
+
+    fn parse_run_at(value: &str) -> Option<(u32, u32)> {
+        let parts: Vec<&str> = value.trim().split(':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let hour = parts[0].parse::<u32>().ok()?;
+        let minute = parts[1].parse::<u32>().ok()?;
+        if hour > 23 || minute > 59 {
+            return None;
+        }
+        Some((hour, minute))
+    }
+
+    fn local_at_time(
+        tz: &Tz,
+        date: chrono::NaiveDate,
+        hour: u32,
+        minute: u32,
+    ) -> Option<DateTime<Utc>> {
+        let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+        let naive = date.and_time(time);
+        tz.from_local_datetime(&naive)
+            .earliest()
+            .map(|value| value.with_timezone(&Utc))
+    }
+
+    fn next_run_with_time(
+        frequency: &str,
+        tz: &Tz,
+        run_at: &str,
+        from: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let (hour, minute) = Self::parse_run_at(run_at)?;
+        let local_from = from.with_timezone(tz);
+
+        if frequency == "hourly" || frequency.contains("every hour") {
+            let mut candidate = local_from
+                .with_minute(minute)?
+                .with_second(0)?
+                .with_nanosecond(0)?;
+            if candidate <= local_from {
+                candidate += Duration::hours(1);
+            }
+            return Some(candidate.with_timezone(&Utc));
+        }
+
+        let step_days = if frequency == "weekly" || frequency.contains("every week") {
+            7
+        } else if frequency == "monthly" || frequency.contains("every month") {
+            30
+        } else {
+            1
+        };
+
+        let mut date = local_from.date_naive();
+        for _ in 0..400 {
+            if let Some(mut candidate) = Self::local_at_time(tz, date, hour, minute) {
+                if candidate > from {
+                    return Some(candidate);
+                }
+            }
+            date += Duration::days(step_days);
+        }
+
+        None
     }
 
     fn system_timezone() -> String {
@@ -647,14 +793,15 @@ impl SchedulerService {
             project_id: row.get(3)?,
             plugin_or_mode: row.get(4)?,
             cron_or_event: row.get(5)?,
-            timezone: row.get(6)?,
-            next_run: row.get(7)?,
-            last_run: row.get(8)?,
-            offline_behavior: row.get(9)?,
-            overlap_policy: row.get(10)?,
-            state: row.get(11)?,
-            created_at: row.get(12)?,
-            updated_at: row.get(13)?,
+            run_at: row.get(6)?,
+            timezone: row.get(7)?,
+            next_run: row.get(8)?,
+            last_run: row.get(9)?,
+            offline_behavior: row.get(10)?,
+            overlap_policy: row.get(11)?,
+            state: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
         })
     }
 }

@@ -8,7 +8,7 @@ use chrono::Utc;
 use rusqlite::params;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub struct WorkspaceService;
@@ -103,6 +103,8 @@ impl WorkspaceService {
                     .get("disable-model-invocation")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let skill_dir = entry.path();
+                let (created_at, updated_at) = skill_timestamps(&path);
                 skills.push(Skill {
                     slug,
                     name,
@@ -111,10 +113,13 @@ impl WorkspaceService {
                     source_path: path.to_string_lossy().to_string(),
                     scope: scope.clone(),
                     enabled,
+                    builtin: skill_dir_is_builtin(&skill_dir),
+                    created_at,
+                    updated_at,
                 });
             }
         }
-        skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        sort_skills_for_display(&mut skills);
         skills
     }
 
@@ -150,6 +155,7 @@ impl WorkspaceService {
         std::fs::write(&temporary, markdown)?;
         std::fs::rename(&temporary, &path)?;
         let _ = std::fs::remove_file(backup);
+        let (created_at, updated_at) = skill_timestamps(&path);
         Ok(Skill {
             slug: input.slug.clone(),
             name: input.slug,
@@ -162,6 +168,9 @@ impl WorkspaceService {
                 "global-bob".into()
             },
             enabled: true,
+            builtin: skill_dir_is_builtin(&skill_dir),
+            created_at,
+            updated_at,
         })
     }
 
@@ -236,46 +245,55 @@ impl WorkspaceService {
         let (slug, description, content) = match integration_id {
             "github" => (
                 "bob-work-github",
-                "Use GitHub locally through the gh CLI for repositories, issues and pull requests.",
-                "Use the `gh` CLI and the GH_TOKEN already provided by Bob Work. Never print, echo, log or persist the token. Start with read-only commands. Ask for explicit approval before creating or editing issues, opening or merging pull requests, pushing code, changing settings, or deleting anything. Summarize every external mutation with its URL.",
+                "Use the Bob Work GitHub connector (MCP bob-work-github) for repositories, issues and pull requests.",
+                "Prefer the Bob Work MCP server `bob-work-github` tools (`github_list_repos`, `github_search_issues`, `github_get_pull_request`). Do not use the `gh` CLI and do not invent shell auth. Credentials stay inside Bob Work — never print, echo, log or persist tokens. Start read-only. Ask for explicit approval before creating/editing issues, opening/merging pull requests, pushing code, changing settings, or deleting anything. Summarize every external mutation with its URL.",
             ),
             "slack" => (
                 "bob-work-slack",
-                "Use the Slack Web API with the local Bob Work Slack credential.",
-                "Use Slack Web API calls with the SLACK_BOT_TOKEN environment variable. Never print, echo, log or persist the token. Resolve channel and user identities before acting. Reading and searching may proceed within the granted scope; always ask explicit approval immediately before sending, editing, or deleting a message. Return channel, timestamp, and permalink when available.",
+                "Use the Bob Work Slack connector (MCP bob-work-slack).",
+                "Prefer the Bob Work MCP server `bob-work-slack` tools (`slack_search_messages`, `slack_list_channels`, `slack_post_message`). Do not call the Slack Web API via ad-hoc curl and do not print tokens. Resolve channel and user identities before acting. Reading/searching may proceed within scope; always ask explicit approval before sending, editing, or deleting a message. Return channel, timestamp, and permalink when available.",
             ),
             "monday" => (
                 "bob-work-monday",
-                "Use Monday.com GraphQL API with the local Bob Work credential.",
-                "Use the Monday.com GraphQL API with the MONDAY_API_TOKEN environment variable. Never print, echo, log or persist the token. Query schema and board/item identifiers before acting. Ask explicit approval before creating, changing, moving, archiving, or deleting any item, board, update, or automation. Summarize mutations with stable identifiers.",
+                "Use the Bob Work Monday.com connector (MCP bob-work-monday).",
+                "Prefer the Bob Work MCP server `bob-work-monday` tools (`monday_list_boards`, `monday_search_items`, `monday_create_update`). Do not call Monday GraphQL via ad-hoc curl and do not print tokens. Query board/item identifiers before acting. Ask explicit approval before creating, changing, moving, archiving, or deleting any item, board, update, or automation. Summarize mutations with stable identifiers.",
             ),
             "outlook-mail" => (
                 "bob-work-outlook-mail",
-                "Use Microsoft Graph for Outlook mail with the Bob Work Microsoft OAuth credential.",
-                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Prefer read/search/draft operations first. Ask explicit approval before sending, moving, deleting or permanently changing mail. Return stable Graph identifiers and web links when available.",
+                "Use the Bob Work Microsoft connector (MCP bob-work-microsoft) for Outlook mail.",
+                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (especially `graph_search_mail`). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Prefer read/search/draft first. Ask explicit approval before sending, moving, deleting or permanently changing mail. Return stable Graph identifiers and web links when available.",
             ),
             "outlook-calendar" => (
                 "bob-work-outlook-calendar",
-                "Use Microsoft Graph for Outlook Calendar with the Bob Work Microsoft OAuth credential.",
-                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Read availability and events before proposing changes. Ask explicit approval before creating, updating, cancelling or deleting calendar events. Return event IDs and web links when available.",
+                "Use the Bob Work Microsoft connector (MCP bob-work-microsoft) for Outlook Calendar.",
+                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (especially `graph_list_calendar_events`). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Read availability and events before proposing changes. Ask explicit approval before creating, updating, cancelling or deleting calendar events. Return event IDs and web links when available.",
             ),
             "teams" => (
                 "bob-work-teams",
-                "Use Microsoft Graph for Teams channels and messages with the Bob Work Microsoft OAuth credential.",
-                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Resolve team, channel and message identifiers before acting. Ask explicit approval before posting, editing or deleting Teams messages. Summarize every external mutation with stable identifiers.",
+                "Use the Bob Work Microsoft connector (MCP bob-work-microsoft) for Teams.",
+                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (especially `graph_list_teams`). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Resolve team, channel and message identifiers before acting. Ask explicit approval before posting, editing or deleting Teams messages. Summarize every external mutation with stable identifiers.",
             ),
             "onedrive" => (
                 "bob-work-onedrive",
-                "Use Microsoft Graph for OneDrive files with the Bob Work Microsoft OAuth credential.",
-                "Use Microsoft Graph with the MICROSOFT_GRAPH_ACCESS_TOKEN environment variable. Never print, echo, log or persist the token. Search and inspect files before writing. Ask explicit approval before uploading, overwriting, moving or deleting files. Return drive item IDs, paths and web URLs when available.",
+                "Use the Bob Work Microsoft connector (MCP bob-work-microsoft) for OneDrive.",
+                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (especially `graph_search_onedrive`). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Search and inspect files before writing. Ask explicit approval before uploading, overwriting, moving or deleting files. Return drive item IDs, paths and web URLs when available.",
             ),
             _ => return Err(AppError::ValidationFailed("Cette intégration n’a pas de skill local intégré.".into())),
         };
-        self.save_skill(SaveSkillInput {
+        let skill = self.save_skill(SaveSkillInput {
             slug: slug.into(),
             description: description.into(),
             content: content.into(),
             workspace: None,
+        })?;
+        let skill_dir = PathBuf::from(&skill.source_path)
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&skill.source_path));
+        let _ = std::fs::write(skill_dir.join(".bob-work-builtin"), "1");
+        Ok(Skill {
+            builtin: true,
+            ..skill
         })
     }
 
@@ -304,6 +322,130 @@ impl WorkspaceService {
             return vec![];
         };
         Self::list_mcp_servers_from_home(&home)
+    }
+
+    /// True when any configured MCP server stores a non-empty env value for `key`
+    /// (used by plugin Sources to detect API keys saved via Intégrations → APIs).
+    pub fn mcp_env_key_present(&self, key: &str) -> bool {
+        self.mcp_env_value(key).is_some()
+    }
+
+    /// Unredacted env value from MCP settings (never expose to the UI).
+    pub fn mcp_env_value(&self, key: &str) -> Option<String> {
+        let home = dirs::home_dir()?;
+        for path in [
+            home.join(".bob/settings/mcp.json"),
+            home.join(".bob/settings/mcp_settings.json"),
+        ] {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+            let Some(servers) = json
+                .get("mcpServers")
+                .or_else(|| json.get("servers"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for server in servers.values() {
+                if let Some(value) = server
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .and_then(|env| env.get(key))
+                    .and_then(Value::as_str)
+                {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() && !(trimmed.starts_with("${") && trimmed.ends_with('}'))
+                    {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Env pairs from MCP settings suitable for injecting into the Bob process
+    /// (so plugin MCP placeholders like `${FINNHUB_API_KEY}` resolve).
+    pub fn mcp_env_for_bob_process(&self) -> Vec<(String, String)> {
+        let mut out = vec![];
+        let Some(home) = dirs::home_dir() else {
+            return out;
+        };
+        for path in [
+            home.join(".bob/settings/mcp.json"),
+            home.join(".bob/settings/mcp_settings.json"),
+        ] {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+            let Some(servers) = json
+                .get("mcpServers")
+                .or_else(|| json.get("servers"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for server in servers.values() {
+                let Some(env) = server.get("env").and_then(Value::as_object) else {
+                    continue;
+                };
+                for (key, value) in env {
+                    if !valid_env_key(key) {
+                        continue;
+                    }
+                    let Some(text) = value.as_str() else {
+                        continue;
+                    };
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() || (trimmed.starts_with("${") && trimmed.ends_with('}')) {
+                        continue;
+                    }
+                    // Prefer first concrete value; skip duplicates.
+                    if out.iter().any(|(existing, _)| existing == key) {
+                        continue;
+                    }
+                    out.push((key.clone(), trimmed.to_string()));
+                }
+            }
+            if !out.is_empty() {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Unredacted MCP server JSON from disk — used by connection probes that need
+    /// headers / env secrets. Never expose this value to the UI.
+    pub fn read_mcp_server_config(&self, name: &str) -> Option<Value> {
+        let home = dirs::home_dir()?;
+        for path in [
+            home.join(".bob/settings/mcp.json"),
+            home.join(".bob/settings/mcp_settings.json"),
+        ] {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+            if let Some(server) = json
+                .get("mcpServers")
+                .or_else(|| json.get("servers"))
+                .and_then(Value::as_object)
+                .and_then(|servers| servers.get(name))
+                .cloned()
+            {
+                return Some(server);
+            }
+        }
+        None
     }
 
     fn list_mcp_servers_from_home(home: &std::path::Path) -> Vec<McpServer> {
@@ -339,8 +481,11 @@ impl WorkspaceService {
                         }
                     })
                     .to_string();
-                let command_or_url = raw
+                let redacted_raw = redact_mcp_raw(raw.clone());
+                let command_or_url = redacted_raw
                     .get("url")
+                    .or_else(|| redacted_raw.get("command"))
+                    .or_else(|| raw.get("url"))
                     .or_else(|| raw.get("command"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
@@ -369,7 +514,8 @@ impl WorkspaceService {
                         args,
                         enabled,
                         status: "configured".into(),
-                        raw: redact_mcp_raw(raw.clone()),
+                        raw: redacted_raw,
+                        last_test: None,
                     },
                 );
             }
@@ -386,17 +532,88 @@ impl WorkspaceService {
                 "Commande ou URL MCP obligatoire".into(),
             ));
         }
+        let transport = input.transport.trim().to_ascii_lowercase();
+        let remote = matches!(
+            transport.as_str(),
+            "http" | "sse" | "streamable-http" | "streamable_http"
+        );
+        if remote && !safe_remote_mcp_url(&input.command_or_url) {
+            return Err(AppError::ValidationFailed(
+                "URL MCP distante : HTTPS requis (HTTP uniquement sur localhost)".into(),
+            ));
+        }
+
         let mut config = Map::new();
-        if input.transport == "http" || input.transport == "sse" {
-            config.insert("type".into(), Value::String(input.transport.clone()));
-            config.insert("url".into(), Value::String(input.command_or_url));
+        if remote {
+            let normalized = if transport == "streamable_http" {
+                "streamable-http".to_string()
+            } else {
+                transport
+            };
+            config.insert("type".into(), Value::String(normalized));
+            config.insert(
+                "url".into(),
+                Value::String(input.command_or_url.trim().to_string()),
+            );
         } else {
-            config.insert("command".into(), Value::String(input.command_or_url));
+            config.insert(
+                "command".into(),
+                Value::String(input.command_or_url.trim().to_string()),
+            );
             config.insert(
                 "args".into(),
                 Value::Array(input.args.into_iter().map(Value::String).collect()),
             );
         }
+
+        if let Some(env) = input.env {
+            let mut env_map = Map::new();
+            for (key, value) in env {
+                let key = key.trim();
+                let value = value.trim();
+                if key.is_empty() || value.is_empty() {
+                    continue;
+                }
+                if !valid_env_key(key) {
+                    return Err(AppError::ValidationFailed(format!(
+                        "Nom de variable d’environnement invalide : {}",
+                        key
+                    )));
+                }
+                env_map.insert(key.to_string(), Value::String(value.to_string()));
+            }
+            if !env_map.is_empty() {
+                config.insert("env".into(), Value::Object(env_map));
+            }
+        }
+
+        if let Some(headers) = input.headers {
+            if !remote {
+                return Err(AppError::ValidationFailed(
+                    "Les en-têtes HTTP ne s’appliquent qu’aux serveurs MCP distants".into(),
+                ));
+            }
+            let mut header_map = Map::new();
+            for (key, value) in headers {
+                let key = key.trim();
+                let value = value.trim();
+                if key.is_empty() || value.is_empty() {
+                    continue;
+                }
+                if key.contains('\n')
+                    || key.contains('\r')
+                    || value.contains('\n')
+                    || value.contains('\r')
+                {
+                    return Err(AppError::ValidationFailed("En-tête HTTP invalide".into()));
+                }
+                header_map.insert(key.to_string(), Value::String(value.to_string()));
+            }
+            if !header_map.is_empty() {
+                config.insert("headers".into(), Value::Object(header_map));
+            }
+        }
+
         let output = std::process::Command::new(bob_path)
             .args([
                 "mcp",
@@ -527,11 +744,15 @@ impl WorkspaceService {
     }
 
     pub fn usage_status(&self, db: &Database) -> UsageStatus {
+        self.usage_status_with_refresh(db, false)
+    }
+
+    pub fn usage_status_with_refresh(&self, db: &Database, force: bool) -> UsageStatus {
         use crate::services::bob_usage::BobUsageService;
 
         let service = BobUsageService::new();
         let latest = service.latest_snapshot(db).ok().flatten();
-        let snapshot = if BobUsageService::should_refresh(latest.as_ref()) {
+        let snapshot = if force || BobUsageService::should_refresh(latest.as_ref()) {
             match service.refresh_snapshot(db) {
                 Ok(fresh) => fresh.or(latest),
                 Err(error) => {
@@ -564,13 +785,13 @@ impl WorkspaceService {
                 unit: None,
                 captured_at: None,
                 instance_label: None,
-                message: "Connectez-vous à Bob Shell (bob chat) pour afficher vos Bobcoins.".into(),
+                message: "Enregistrez une clé API IBM Bob dans Réglages pour afficher vos Bobcoins (comme dans l’IDE).".into(),
             },
         }
     }
 }
 
-fn snapshot_to_status(
+pub(crate) fn snapshot_to_status(
     data: crate::services::bob_usage::UsageSnapshotData,
     available: bool,
     message: String,
@@ -630,6 +851,15 @@ mod mcp_tests {
 
         std::fs::remove_dir_all(&home).unwrap();
     }
+
+    #[test]
+    fn remote_mcp_url_rules_and_env_keys() {
+        assert!(super::safe_remote_mcp_url("https://mcp.example.com/v1"));
+        assert!(super::safe_remote_mcp_url("http://127.0.0.1:8787/mcp"));
+        assert!(!super::safe_remote_mcp_url("http://example.com/mcp"));
+        assert!(super::valid_env_key("FINNHUB_API_KEY"));
+        assert!(!super::valid_env_key("bad-key"));
+    }
 }
 
 #[cfg(test)]
@@ -675,6 +905,168 @@ mod skill_tests {
 
         std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
     }
+
+    #[test]
+    fn sorts_user_skills_before_builtins_newest_first() {
+        let newer = super::Skill {
+            slug: "new-user".into(),
+            name: "New".into(),
+            description: String::new(),
+            content: String::new(),
+            source_path: String::new(),
+            scope: "global-bob".into(),
+            enabled: true,
+            builtin: false,
+            created_at: "2026-08-02T10:00:00Z".into(),
+            updated_at: "2026-08-10T10:00:00Z".into(),
+        };
+        let older = super::Skill {
+            slug: "old-user".into(),
+            name: "Old".into(),
+            description: String::new(),
+            content: String::new(),
+            source_path: String::new(),
+            scope: "global-bob".into(),
+            enabled: true,
+            builtin: false,
+            created_at: "2026-08-01T10:00:00Z".into(),
+            updated_at: "2026-08-01T10:00:00Z".into(),
+        };
+        let builtin = super::Skill {
+            slug: "bob-work-computer-use".into(),
+            name: "Computer Use".into(),
+            description: String::new(),
+            content: String::new(),
+            source_path: String::new(),
+            scope: "global-bob".into(),
+            enabled: true,
+            builtin: true,
+            created_at: "2026-08-11T12:00:00Z".into(),
+            updated_at: "2026-08-11T12:00:00Z".into(),
+        };
+        let mut skills = vec![builtin.clone(), older.clone(), newer.clone()];
+        super::sort_skills_for_display(&mut skills);
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| skill.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-user", "old-user", "bob-work-computer-use"]
+        );
+    }
+
+    #[test]
+    fn detects_builtin_skill_from_plugin_id_marker() {
+        let path = isolated_skill();
+        let skill_dir = path.parent().unwrap();
+        assert!(!super::skill_dir_is_builtin(skill_dir));
+        std::fs::write(
+            skill_dir.join(".bob-work-plugin-id"),
+            "builtin-computer-use",
+        )
+        .unwrap();
+        assert!(super::skill_dir_is_builtin(skill_dir));
+        std::fs::remove_dir_all(skill_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn detects_native_plugin_skills_by_slug() {
+        for slug in [
+            "bob-work-computer-use",
+            "bob-work-chrome-control",
+            "bob-work-microsoft-word",
+        ] {
+            let root = std::env::temp_dir().join(format!("bob-work-slug-{slug}"));
+            let skill_dir = root.join(slug);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            assert!(
+                super::skill_dir_is_builtin(&skill_dir),
+                "{slug} should be marked builtin"
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+}
+
+fn rfc3339_from_system_time(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn skill_timestamps(path: &Path) -> (String, String) {
+    let meta = std::fs::metadata(path).ok();
+    let modified = meta
+        .as_ref()
+        .and_then(|item| item.modified().ok())
+        .map(rfc3339_from_system_time)
+        .unwrap_or_default();
+    let created = meta
+        .as_ref()
+        .and_then(|item| item.created().ok())
+        .map(rfc3339_from_system_time)
+        .unwrap_or_else(|| modified.clone());
+    (created, modified)
+}
+
+fn sort_skills_for_display(skills: &mut [Skill]) {
+    skills.sort_by(|left, right| match (left.builtin, right.builtin) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => {
+            let left_stamp = if left.updated_at.is_empty() {
+                left.created_at.as_str()
+            } else {
+                left.updated_at.as_str()
+            };
+            let right_stamp = if right.updated_at.is_empty() {
+                right.created_at.as_str()
+            } else {
+                right.updated_at.as_str()
+            };
+            right_stamp
+                .cmp(left_stamp)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        }
+    });
+}
+
+fn skill_dir_is_builtin(skill_dir: &Path) -> bool {
+    if skill_dir.join(".bob-work-builtin").is_file() {
+        return true;
+    }
+    if let Ok(owner) = std::fs::read_to_string(skill_dir.join(".bob-work-plugin-id")) {
+        if owner.trim().starts_with("builtin-") {
+            return true;
+        }
+    }
+    if std::fs::read_to_string(skill_dir.join(".bob-work-plugin.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|value| value.get("builtin") == Some(&Value::Bool(true)))
+    {
+        return true;
+    }
+    // Known Bob Work native skills (plugins builtin-* + intégrations OAuth).
+    matches!(
+        skill_dir.file_name().and_then(|value| value.to_str()),
+        Some(
+            // Built-in plugins (Computer Use, Chrome, Office, Documents)
+            "bob-work-computer-use"
+                | "bob-work-chrome-control"
+                | "bob-work-documents"
+                | "bob-work-microsoft-word"
+                | "bob-work-microsoft-powerpoint"
+                | "bob-work-microsoft-excel"
+                | "bob-work-microsoft-onenote"
+                // Built-in integration skills
+                | "bob-work-github"
+                | "bob-work-slack"
+                | "bob-work-monday"
+                | "bob-work-outlook-mail"
+                | "bob-work-outlook-calendar"
+                | "bob-work-teams"
+                | "bob-work-onedrive"
+        )
+    )
 }
 
 fn validate_slug(slug: &str) -> AppResult<()> {
@@ -693,6 +1085,20 @@ fn validate_slug(slug: &str) -> AppResult<()> {
             "Le nom doit utiliser a-z, 0-9 et des tirets simples (64 caractères maximum).".into(),
         ))
     }
+}
+
+fn safe_remote_mcp_url(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("https://")
+        || value.starts_with("http://localhost")
+        || value.starts_with("http://127.0.0.1")
+        || value.starts_with("http://[::1]")
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn parse_frontmatter(content: &str) -> (Value, String) {
@@ -715,9 +1121,47 @@ fn redact_mcp_raw(mut value: Value) -> Value {
     if let Some(map) = value.as_object_mut() {
         for key in ["env", "headers", "token", "authorization"] {
             if map.contains_key(key) {
-                map.insert(key.to_string(), Value::String("<stored securely>".into()));
+                // Keep an object marker so the UI can still classify "API + clé"
+                // vs public remote MCP without exposing secret values.
+                let mut redacted = Map::new();
+                redacted.insert("_redacted".into(), Value::Bool(true));
+                map.insert(key.to_string(), Value::Object(redacted));
             }
+        }
+        if let Some(url) = map.get("url").and_then(Value::as_str).map(str::to_string) {
+            map.insert("url".into(), Value::String(redact_url_secrets(&url)));
         }
     }
     value
+}
+
+fn redact_url_secrets(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let sensitive = ["api_key", "apikey", "access_token", "token", "key", "auth"];
+    let mut changed = false;
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            if sensitive.iter().any(|item| key.eq_ignore_ascii_case(item)) {
+                changed = true;
+                (key.to_string(), "<redacted>".into())
+            } else {
+                (key.to_string(), value.to_string())
+            }
+        })
+        .collect();
+    if !changed {
+        return url.to_string();
+    }
+    parsed.set_query(None);
+    if !pairs.is_empty() {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in pairs {
+            serializer.append_pair(&key, &value);
+        }
+        parsed.set_query(Some(&serializer.finish()));
+    }
+    parsed.to_string()
 }

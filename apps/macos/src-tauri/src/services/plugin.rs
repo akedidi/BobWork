@@ -26,8 +26,8 @@ impl PluginService {
     }
 
     /// Keep Bob Work's first-party document capabilities available as native
-    /// Bob Shell skills. A newer built-in is staged like any other plugin
-    /// version instead of silently replacing the version selected by the user.
+    /// Bob Shell skills. A newer packaged built-in is activated automatically;
+    /// only a failed activation falls back to an explicit staged update.
     pub fn ensure_builtin_plugins(&self, db: &Database) -> AppResult<()> {
         for builtin in builtin_document_plugins() {
             let now = Utc::now().to_rfc3339();
@@ -79,46 +79,392 @@ impl PluginService {
                 };
                 if !self.version_exists(db, builtin.id, builtin.version)? {
                     self.persist_version(db, &candidate, None, false)?;
+                } else {
+                    // Refresh the packaged snapshot so a bad staged manifest
+                    // (e.g. invalid OAuth schema) cannot block activation forever.
+                    self.refresh_builtin_version(db, &candidate)?;
                 }
+                // Packaged builtin bumps are applied automatically. Staging them
+                // as "Prête à être installée" left the Update button as the only
+                // path, and that path often failed on MCP/deploy side-effects.
+                match self.activate_version(db, builtin.id, builtin.version) {
+                    Ok(_) => {
+                        info!(
+                            "Auto-activated built-in plugin {} to {}",
+                            builtin.id, builtin.version
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Could not auto-activate built-in plugin {} to {}: {}",
+                            builtin.id, builtin.version, error
+                        );
+                        let keep_available = existing
+                            .available_version
+                            .as_deref()
+                            .and_then(|value| Self::parse_version(value).ok())
+                            .filter(|version| version > &packaged_version)
+                            .map(|version| version.to_string())
+                            .unwrap_or_else(|| builtin.version.into());
+                        let conn = db.conn.lock().unwrap();
+                        conn.execute(
+                            "UPDATE plugins SET available_version=?1,updated_at=?2 WHERE id=?3",
+                            params![keep_available, now, builtin.id],
+                        )?;
+                    }
+                }
+            } else if packaged_version == current_version {
+                if existing.available_version.is_some() {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE plugins SET available_version=NULL,updated_at=?1 WHERE id=?2",
+                        params![now, builtin.id],
+                    )?;
+                }
+                if Self::normalized_manifest(&existing.manifest)
+                    != Self::normalized_manifest(&builtin.manifest)
+                {
+                    warn!(
+                        "Built-in plugin {} changed without a version bump; keeping immutable version {}",
+                        builtin.id, builtin.version
+                    );
+                }
+            }
+            let active = self.get_by_id(db, builtin.id)?.unwrap_or(existing.clone());
+            if active.install_state == "installed" {
+                let active_matches_packaged =
+                    Self::parse_version(&active.version)? == packaged_version;
+                let deploy_manifest = if active_matches_packaged {
+                    &builtin.manifest
+                } else {
+                    &active.manifest
+                };
+                let deployer = PluginDeployService::new();
+                // Refresh only when the on-disk skill is missing/stale — rewriting
+                // every launch was wiping newer installed versions (and local edits).
+                if !deployer.is_current_deploy(builtin.id, &active.version, deploy_manifest) {
+                    let result = if active_matches_packaged {
+                        deployer.deploy(builtin.id, deploy_manifest)
+                    } else {
+                        deployer.deploy_preserving_embedded(builtin.id, deploy_manifest)
+                    };
+                    if let Err(error) = result {
+                        warn!(
+                            "Built-in plugin {} deploy failed (non-fatal): {}",
+                            builtin.id, error
+                        );
+                    }
+                }
+            }
+            if !self.version_exists(db, builtin.id, &active.version)? {
+                self.persist_version(db, &active, None, true)?;
+            }
+        }
+        self.ensure_packaged_work_plugins(db)?;
+        if let Err(error) = self.prune_shadow_agentic_plugins(db) {
+            warn!("Unable to prune shadow agentic plugins: {}", error);
+        }
+        Ok(())
+    }
+
+    /// Work-level packaged plugins that ship with Bob Work but are not protected builtins
+    /// (editable, deletable, restorable). Distinct from `builtin-*` Office / Computer Use.
+    fn ensure_packaged_work_plugins(&self, db: &Database) -> AppResult<()> {
+        self.demote_legacy_cto_builtin(db)?;
+        for packaged in packaged_work_plugins() {
+            if self.is_packaged_work_dismissed(db, packaged.id)? {
+                continue;
+            }
+            let now = Utc::now().to_rfc3339();
+            let Some(existing) = self.get_by_id(db, packaged.id)? else {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO plugins
+                     (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+                     VALUES (?1,?2,?3,'Bob Work',?4,'personal',?5,?6,'installed','valid',?7,?7)
+                    ",
+                    params![
+                        packaged.id,
+                        packaged.name,
+                        packaged.version,
+                        packaged.description,
+                        packaged.category,
+                        packaged.manifest.to_string(),
+                        now,
+                    ],
+                )?;
+                drop(conn);
+                let plugin = self.get_by_id(db, packaged.id)?.ok_or_else(|| {
+                    AppError::NotFound(format!("Plugin {} not found", packaged.id))
+                })?;
+                self.persist_version(db, &plugin, None, true)?;
+                PluginDeployService::new().deploy(packaged.id, &packaged.manifest)?;
+                continue;
+            };
+
+            let packaged_version = Self::parse_version(packaged.version)?;
+            let current_version = Self::parse_version(&existing.version)?;
+            let mut force_redeploy = false;
+            if packaged_version > current_version {
+                let candidate = Plugin {
+                    id: packaged.id.into(),
+                    name: packaged.name.into(),
+                    version: packaged.version.into(),
+                    author: Some("Bob Work".into()),
+                    description: Some(packaged.description.into()),
+                    scope: existing.scope.clone(),
+                    category: packaged.category.into(),
+                    manifest: packaged.manifest.clone(),
+                    install_state: existing.install_state.clone(),
+                    validation_state: "valid".into(),
+                    signature: None,
+                    created_at: existing.created_at.clone(),
+                    updated_at: now.clone(),
+                    last_executed_at: existing.last_executed_at.clone(),
+                    available_version: Some(packaged.version.into()),
+                };
+                if !self.version_exists(db, packaged.id, packaged.version)? {
+                    self.persist_version(db, &candidate, None, false)?;
+                }
+                // Stage only — do not auto-activate (Restaurer / Mettre à jour stay honest).
                 let keep_available = existing
                     .available_version
                     .as_deref()
                     .and_then(|value| Self::parse_version(value).ok())
                     .filter(|version| version > &packaged_version)
                     .map(|version| version.to_string())
-                    .unwrap_or_else(|| builtin.version.into());
+                    .unwrap_or_else(|| packaged.version.into());
                 let conn = db.conn.lock().unwrap();
                 conn.execute(
                     "UPDATE plugins SET available_version=?1,updated_at=?2 WHERE id=?3",
-                    params![keep_available, now, builtin.id],
+                    params![keep_available, now, packaged.id],
                 )?;
-            } else if packaged_version == current_version
-                && Self::normalized_manifest(&existing.manifest)
-                    != Self::normalized_manifest(&builtin.manifest)
-            {
-                warn!(
-                    "Built-in plugin {} changed without a version bump; keeping immutable version {}",
-                    builtin.id, builtin.version
-                );
+            } else if packaged_version == current_version {
+                let mut manifest = packaged.manifest.clone();
+                if let Some(object) = manifest.as_object_mut() {
+                    object.insert("builtin".into(), serde_json::Value::Bool(false));
+                }
+                if Self::normalized_manifest(&existing.manifest)
+                    != Self::normalized_manifest(&manifest)
+                    || existing.manifest.get("builtin") == Some(&serde_json::Value::Bool(true))
+                {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE plugins SET name=?1,description=?2,category=?3,manifest=?4,available_version=NULL,updated_at=?5 WHERE id=?6",
+                        params![
+                            packaged.name,
+                            packaged.description,
+                            packaged.category,
+                            manifest.to_string(),
+                            now,
+                            packaged.id,
+                        ],
+                    )?;
+                    // Packaged metadata changed without a semver bump — refresh disk once.
+                    force_redeploy = true;
+                } else if existing.available_version.is_some() {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE plugins SET available_version=NULL,updated_at=?1 WHERE id=?2",
+                        params![now, packaged.id],
+                    )?;
+                }
             }
-            if existing.install_state == "installed" {
-                let deploy_manifest = if packaged_version == current_version {
-                    &builtin.manifest
+
+            let active = self.get_by_id(db, packaged.id)?.unwrap_or(existing);
+            if active.install_state == "installed" {
+                let active_matches_packaged =
+                    Self::parse_version(&active.version)? == packaged_version;
+                let deploy_manifest = if active_matches_packaged {
+                    &packaged.manifest
                 } else {
-                    &existing.manifest
+                    &active.manifest
                 };
-                PluginDeployService::new().deploy(builtin.id, deploy_manifest)?;
+                let deployer = PluginDeployService::new();
+                let needs_deploy = force_redeploy
+                    || !deployer.is_current_deploy(packaged.id, &active.version, deploy_manifest);
+                if needs_deploy {
+                    let result = if active_matches_packaged {
+                        deployer.deploy(packaged.id, deploy_manifest)
+                    } else {
+                        // Active version is ahead of (or diverged from) the app
+                        // package — refresh SKILL/metadata only; keep Python edits.
+                        deployer.deploy_preserving_embedded(packaged.id, deploy_manifest)
+                    };
+                    if let Err(error) = result {
+                        warn!(
+                            "Packaged work plugin {} deploy failed (non-fatal): {}",
+                            packaged.id, error
+                        );
+                    }
+                }
             }
-            if !self.version_exists(db, builtin.id, &existing.version)? {
-                self.persist_version(db, &existing, None, true)?;
+            if !self.version_exists(db, packaged.id, &active.version)? {
+                self.persist_version(db, &active, None, true)?;
             }
         }
         Ok(())
     }
 
-    /// Register local Office MCP servers for installed built-in document plugins.
+    /// Rewrite legacy `builtin-cto-invest` rows to the non-protected packaged id.
+    fn demote_legacy_cto_builtin(&self, db: &Database) -> AppResult<()> {
+        const LEGACY_ID: &str = "builtin-cto-invest";
+        const TARGET_ID: &str = "bob-work-cto-invest";
+        let Some(legacy) = self.get_by_id(db, LEGACY_ID)? else {
+            return Ok(());
+        };
+        if self.get_by_id(db, TARGET_ID)?.is_some() {
+            let conn = db.conn.lock().unwrap();
+            let _ = conn.execute(
+                "DELETE FROM plugin_versions WHERE plugin_id=?1",
+                params![LEGACY_ID],
+            );
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
+            info!("Removed legacy builtin CTO row (target {TARGET_ID} already present)");
+            return Ok(());
+        }
+
+        let mut manifest = legacy.manifest.clone();
+        if let Some(object) = manifest.as_object_mut() {
+            object.insert("builtin".into(), serde_json::Value::Bool(false));
+            object.insert("slug".into(), serde_json::Value::String(TARGET_ID.into()));
+        }
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Insert target row first so plugin_versions FK can be remapped safely.
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,signature,created_at,updated_at,last_executed_at,available_version)
+                 SELECT ?1,name,version,author,description,scope,category,?2,install_state,validation_state,signature,created_at,?3,last_executed_at,available_version
+                 FROM plugins WHERE id=?4",
+                params![TARGET_ID, manifest.to_string(), now, LEGACY_ID],
+            )?;
+            conn.execute(
+                "UPDATE plugin_versions SET plugin_id=?1 WHERE plugin_id=?2",
+                params![TARGET_ID, LEGACY_ID],
+            )?;
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
+        }
+        if legacy.install_state == "installed" {
+            if let Err(error) = PluginDeployService::new().deploy(TARGET_ID, &manifest) {
+                warn!("CTO demotion deploy failed (non-fatal): {}", error);
+            }
+        }
+        info!("Demoted legacy {LEGACY_ID} → {TARGET_ID}");
+        Ok(())
+    }
+
+    fn is_packaged_work_plugin(plugin_id: &str) -> bool {
+        packaged_work_plugins()
+            .iter()
+            .any(|plugin| plugin.id == plugin_id)
+    }
+
+    fn is_protected_builtin(plugin_id: &str) -> bool {
+        plugin_id.starts_with("builtin-")
+            || builtin_document_plugins()
+                .iter()
+                .any(|plugin| plugin.id == plugin_id)
+    }
+
+    fn dismissed_packaged_work_plugins(db: &Database) -> AppResult<BTreeSet<String>> {
+        let conn = db.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params!["dismissed_packaged_plugins"],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(raw) = raw else {
+            return Ok(BTreeSet::new());
+        };
+        let parsed: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(parsed.into_iter().collect())
+    }
+
+    fn is_packaged_work_dismissed(&self, db: &Database, plugin_id: &str) -> AppResult<bool> {
+        Ok(Self::dismissed_packaged_work_plugins(db)?.contains(plugin_id))
+    }
+
+    fn dismiss_packaged_work_plugin(&self, db: &Database, plugin_id: &str) -> AppResult<()> {
+        let mut dismissed = Self::dismissed_packaged_work_plugins(db)?;
+        if !dismissed.insert(plugin_id.to_string()) {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let value = serde_json::to_string(&dismissed.into_iter().collect::<Vec<_>>())?;
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params!["dismissed_packaged_plugins", value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Drop agentic-* registry rows that duplicate a first-party / packaged slug.
+    /// Those shadows were imported before owned-by skips and usually
+    /// have no `manifest.icon`, producing icon-less duplicates in the UI.
+    pub fn prune_shadow_agentic_plugins(&self, db: &Database) -> AppResult<usize> {
+        let plugins = self.get_all(db)?;
+        let canonical_slugs: BTreeSet<String> = plugins
+            .iter()
+            .filter(|plugin| !plugin.id.starts_with("agentic-"))
+            .filter_map(|plugin| {
+                plugin
+                    .manifest
+                    .get("slug")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let mut removed = 0usize;
+        for plugin in plugins {
+            if !plugin.id.starts_with("agentic-") {
+                continue;
+            }
+            let Some(slug) = plugin.manifest.get("slug").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if !canonical_slugs.contains(slug) {
+                continue;
+            }
+            // Retire discovery for this agentic id only — do not undeploy the
+            // shared skill directory owned by the canonical plugin.
+            if let Err(error) = PluginDeployService::new().retire_agentic_bundle(&plugin.id) {
+                warn!(
+                    "Could not retire shadow agentic bundle {}: {}",
+                    plugin.id, error
+                );
+            }
+            let conn = db.conn.lock().unwrap();
+            let _ = conn.execute(
+                "DELETE FROM plugin_versions WHERE plugin_id=?1",
+                params![plugin.id],
+            );
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![plugin.id])?;
+            drop(conn);
+            info!("Pruned shadow agentic plugin {} (slug {})", plugin.id, slug);
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    fn slug_owned_by_canonical_plugin(&self, db: &Database, slug: &str) -> AppResult<bool> {
+        Ok(self.get_all(db)?.iter().any(|plugin| {
+            !plugin.id.starts_with("agentic-")
+                && plugin.manifest.get("slug").and_then(|value| value.as_str()) == Some(slug)
+        }))
+    }
+
+    /// Register local Office / packaged MCP servers for installed plugins that ship with Bob Work.
     pub fn sync_installed_office_mcps(&self, db: &Database, bob_path: &str) -> AppResult<()> {
-        for builtin in builtin_document_plugins() {
+        let packaged = builtin_document_plugins()
+            .into_iter()
+            .chain(packaged_work_plugins());
+        for builtin in packaged {
             if !PluginMcpService::has_servers(&builtin.manifest) {
                 continue;
             }
@@ -176,7 +522,24 @@ impl PluginService {
             .filter_map(|r| r.ok())
             .collect();
 
-        Ok(plugins)
+        Ok(Self::sort_for_display(plugins))
+    }
+
+    /// User/agentic plugins first (newest created first), then builtins.
+    fn sort_for_display(mut plugins: Vec<Plugin>) -> Vec<Plugin> {
+        plugins.sort_by(|left, right| {
+            let left_builtin = Self::is_protected_builtin(&left.id);
+            let right_builtin = Self::is_protected_builtin(&right.id);
+            match (left_builtin, right_builtin) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => right
+                    .created_at
+                    .cmp(&left.created_at)
+                    .then_with(|| left.name.cmp(&right.name)),
+            }
+        });
+        plugins
     }
 
     pub fn get_by_id(&self, db: &Database, id: &str) -> AppResult<Option<Plugin>> {
@@ -247,6 +610,24 @@ impl PluginService {
             let metadata_path = bundle_dir.join(".bob-work-plugin.json");
             let skill_path = bundle_dir.join("SKILL.md");
             if !metadata_path.is_file() || !skill_path.is_file() {
+                continue;
+            }
+            // Built-in / packaged / Office deployments also write SKILL.md + plugin JSON
+            // under ~/.bob/skills. Skip them so they are not re-imported as agentic-*.
+            if let Ok(owned_by) = std::fs::read_to_string(bundle_dir.join(".bob-work-plugin-id")) {
+                let owned_by = owned_by.trim();
+                if owned_by.starts_with("builtin-")
+                    || Self::is_packaged_work_plugin(owned_by)
+                    || (!owned_by.is_empty() && !owned_by.starts_with("agentic-"))
+                {
+                    continue;
+                }
+            }
+            if std::fs::read_to_string(&metadata_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .is_some_and(|value| value.get("builtin") == Some(&serde_json::Value::Bool(true)))
+            {
                 continue;
             }
             match self.import_agentic_bundle(db, &bundle_dir, &metadata_path, &skill_path) {
@@ -337,6 +718,16 @@ impl PluginService {
                 {
                     return Err(AppError::Plugin("Invalid plugin entrypoint file".into()));
                 }
+                let bundle_root = bundle_dir.canonicalize().map_err(|error| {
+                    AppError::Plugin(format!("Invalid plugin bundle directory: {}", error))
+                })?;
+                crate::security::path_validation::validate_symlink(
+                    &entrypoint_path,
+                    &[bundle_root.clone()],
+                )
+                .map_err(|error| AppError::Plugin(error.to_string()))?;
+                crate::security::path_validation::validate_path(&entrypoint_path, &[bundle_root])
+                    .map_err(|error| AppError::Plugin(error.to_string()))?;
             }
         }
 
@@ -384,6 +775,14 @@ impl PluginService {
             .unwrap_or("executable")
             .to_string();
         let id = format!("agentic-{}", slug);
+        if self.slug_owned_by_canonical_plugin(db, &slug)? {
+            warn!(
+                "Skipping agentic bundle {:?}: slug {} is owned by a packaged/built-in plugin",
+                bundle_dir, slug
+            );
+            return Ok(None);
+        }
+        ensure_manifest_icon(&mut manifest, &name, Some(description.as_str()));
         PluginMcpService::new().validate_bundle(&id, &manifest, bundle_dir)?;
         PluginExtensionService::new().prepare_hooks(&manifest)?;
         let validation = self.validate(&manifest);
@@ -535,6 +934,13 @@ impl PluginService {
         })
     }
 
+    fn packaged_builtin_version(plugin_id: &str) -> Option<&'static str> {
+        builtin_document_plugins()
+            .into_iter()
+            .find(|builtin| builtin.id == plugin_id)
+            .map(|builtin| builtin.version)
+    }
+
     fn validate_input_version(input: &CreatePluginInput) -> AppResult<Version> {
         let version = Self::parse_version(&input.version)?;
         let manifest_version = input
@@ -659,6 +1065,29 @@ impl PluginService {
         if backup.exists() {
             std::fs::remove_dir_all(backup)?;
         }
+        Ok(())
+    }
+
+    fn refresh_builtin_version(&self, db: &Database, plugin: &Plugin) -> AppResult<()> {
+        let release_notes = Self::release_notes(&plugin.manifest);
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE plugin_versions SET name=?1, author=?2, description=?3, scope=?4,
+             category=?5, manifest=?6, validation_state=?7, release_notes=?8
+             WHERE plugin_id=?9 AND version=?10",
+            params![
+                plugin.name,
+                plugin.author,
+                plugin.description,
+                plugin.scope,
+                plugin.category,
+                plugin.manifest.to_string(),
+                plugin.validation_state,
+                release_notes,
+                plugin.id,
+                plugin.version,
+            ],
+        )?;
         Ok(())
     }
 
@@ -901,6 +1330,19 @@ impl PluginService {
         if current.version == version {
             return Ok(current);
         }
+        // Built-ins are re-applied to the packaged version on every plugin list.
+        // Allowing an explicit downgrade would only flash a success toast then
+        // snap back — refuse it with a clear message instead.
+        if let Some(packaged) = Self::packaged_builtin_version(plugin_id) {
+            let packaged_version = Self::parse_version(packaged)?;
+            let target_version = Self::parse_version(version)?;
+            if target_version < packaged_version {
+                return Err(AppError::ValidationFailed(format!(
+                    "« {} » est un plugin intégré : la version livrée {} ne peut pas être rétrogradée.",
+                    current.name, packaged
+                )));
+            }
+        }
         let (name, author, description, scope, category, manifest, validation_state, signature) = {
             let conn = db.conn.lock().unwrap();
             conn.query_row(
@@ -957,7 +1399,14 @@ impl PluginService {
             }
         }
         if current.install_state == "installed" {
-            PluginDeployService::new().deploy(plugin_id, &manifest)?;
+            if let Err(error) = PluginDeployService::new().deploy(plugin_id, &manifest) {
+                // Keep the version switch even if skill files cannot be rewritten —
+                // otherwise "Mettre à jour" appears broken while the DB stays old.
+                warn!(
+                    "Plugin {} deploy failed during version switch to {} (non-fatal): {}",
+                    plugin_id, version, error
+                );
+            }
         }
         let target_semver = Self::parse_version(version)?;
         let mut available_after = current
@@ -1064,7 +1513,9 @@ impl PluginService {
             return Err(AppError::ValidationFailed("Invalid plugin category".into()));
         }
         Self::validate_input_version(&input)?;
-        let validation = self.validate(&input.manifest);
+        let mut manifest = input.manifest;
+        ensure_manifest_icon(&mut manifest, &input.name, input.description.as_deref());
+        let validation = self.validate(&manifest);
         if !validation.valid {
             return Err(AppError::Plugin(validation.errors.join("; ")));
         }
@@ -1085,7 +1536,7 @@ impl PluginService {
                 input.description,
                 scope,
                 input.category,
-                input.manifest.to_string(),
+                manifest.to_string(),
                 if validation.warnings.is_empty() {
                     "valid"
                 } else {
@@ -1096,7 +1547,7 @@ impl PluginService {
             ],
         )?;
 
-        if let Err(error) = PluginDeployService::new().deploy(&id, &input.manifest) {
+        if let Err(error) = PluginDeployService::new().deploy(&id, &manifest) {
             let _ = conn.execute("DELETE FROM plugins WHERE id=?1", params![id]);
             return Err(error);
         }
@@ -1112,7 +1563,7 @@ impl PluginService {
             description: input.description,
             scope,
             category: input.category,
-            manifest: input.manifest,
+            manifest,
             install_state: "installed".to_string(),
             validation_state: if validation.warnings.is_empty() {
                 "valid".into()
@@ -1167,7 +1618,30 @@ impl PluginService {
                 input.version
             )));
         }
-        let validation = self.validate(&input.manifest);
+        let mut manifest = input.manifest;
+        // Keep a previous icon when the editor omitted it; otherwise infer one.
+        if !manifest
+            .get("icon")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            if let Some(previous_icon) = previous
+                .manifest
+                .get("icon")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                if let Some(object) = manifest.as_object_mut() {
+                    object.insert(
+                        "icon".into(),
+                        serde_json::Value::String(previous_icon.to_string()),
+                    );
+                }
+            } else {
+                ensure_manifest_icon(&mut manifest, &input.name, input.description.as_deref());
+            }
+        }
+        let validation = self.validate(&manifest);
         if !validation.valid {
             return Err(AppError::Plugin(validation.errors.join("; ")));
         }
@@ -1176,7 +1650,20 @@ impl PluginService {
             .scope
             .clone()
             .unwrap_or_else(|| "personal".to_string());
-        PluginDeployService::new().deploy(plugin_id, &input.manifest)?;
+        // Prefer preserving Office/CTO Python when this update is ahead of the
+        // version currently shipped inside the app binary.
+        let packaged = Self::packaged_builtin_version(plugin_id).or_else(|| {
+            packaged_work_plugins()
+                .into_iter()
+                .find(|plugin| plugin.id == plugin_id)
+                .map(|plugin| plugin.version)
+        });
+        let deployer = PluginDeployService::new();
+        if packaged == Some(input.version.as_str()) {
+            deployer.deploy(plugin_id, &manifest)?;
+        } else {
+            deployer.deploy_preserving_embedded(plugin_id, &manifest)?;
+        }
         {
             let conn = db.conn.lock().unwrap();
             let changed = conn.execute(
@@ -1184,7 +1671,7 @@ impl PluginService {
                  scope=?5, category=?6, manifest=?7, validation_state=?8, updated_at=?9 WHERE id=?10",
                 params![
                     input.name, input.version, input.author, input.description, scope, input.category,
-                    input.manifest.to_string(),
+                    manifest.to_string(),
                     if validation.warnings.is_empty() { "valid" } else { "warning" },
                     now, plugin_id,
                 ],
@@ -1308,12 +1795,7 @@ impl PluginService {
         let plugin = self
             .get_by_id(db, plugin_id)?
             .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-        if plugin
-            .manifest
-            .get("builtin")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
+        if Self::is_protected_builtin(plugin_id) {
             return Err(AppError::ValidationFailed(
                 "Un plugin intégré peut être désactivé, mais pas supprimé.".into(),
             ));
@@ -1332,6 +1814,9 @@ impl PluginService {
             .unwrap_or(false)
         {
             PluginDeployService::new().retire_agentic_bundle(plugin_id)?;
+        }
+        if Self::is_packaged_work_plugin(plugin_id) {
+            self.dismiss_packaged_work_plugin(db, plugin_id)?;
         }
         let conn = db.conn.lock().unwrap();
         conn.execute("DELETE FROM plugins WHERE id = ?1", params![plugin_id])?;
@@ -1387,7 +1872,12 @@ fn office_specialized_mode(
     })
 }
 
-fn office_mcp_server(display_name: &str, description: &str, office_kind: &str, tools: &[&str]) -> serde_json::Value {
+fn office_mcp_server(
+    display_name: &str,
+    description: &str,
+    office_kind: &str,
+    tools: &[&str],
+) -> serde_json::Value {
     serde_json::json!({
         "displayName": display_name,
         "description": description,
@@ -1407,6 +1897,277 @@ fn office_permissions() -> serde_json::Value {
         {"type":"mcp.connect"},
         {"type":"command.execute"}
     ])
+}
+
+/// Assign `manifest.icon` when missing: prefer a known brand key, else a public favicon URL.
+fn ensure_manifest_icon(manifest: &mut serde_json::Value, name: &str, description: Option<&str>) {
+    let has_icon = manifest
+        .get("icon")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_icon {
+        return;
+    }
+    let slug = manifest
+        .get("slug")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let icon = infer_plugin_icon(slug, name, description.unwrap_or(""));
+    if let Some(object) = manifest.as_object_mut() {
+        object.insert("icon".into(), serde_json::Value::String(icon));
+    }
+}
+
+fn infer_plugin_icon(slug: &str, name: &str, description: &str) -> String {
+    let text = format!("{slug} {name} {description}").to_lowercase();
+    // Prefer precise product tokens over generic words (mail/document/browser).
+    const LOCAL: &[(&[&str], &str)] = &[
+        (
+            &["powerpoint", "pptx", "microsoft-powerpoint"],
+            "powerpoint",
+        ),
+        (&["excel", "xlsx", "microsoft-excel"], "excel"),
+        (&["onenote", "microsoft-onenote"], "onenote"),
+        (
+            &["microsoft-word", "docx", " bob-work-microsoft-word"],
+            "word",
+        ),
+        (&["bob-work-documents", "builtin-documents"], "document"),
+        (
+            &["cto-invest", "cto investissements", "bob-work-cto"],
+            "invest",
+        ),
+        (
+            &["computer-use", "computer use", "bob-work-computer"],
+            "computer",
+        ),
+        (
+            &[
+                "chrome-control",
+                "contrôle chrome",
+                "controle chrome",
+                "bob-work-chrome",
+            ],
+            "chrome",
+        ),
+        (&["github"], "github"),
+        (&["slack"], "slack"),
+        (&["monday"], "monday"),
+        (&["outlook"], "outlook"),
+        (&["teams", "microsoft teams"], "teams"),
+        (&["outlook-calendar", "calendrier outlook"], "calendar"),
+        (&["onedrive", "one drive"], "onedrive"),
+    ];
+    for (keys, icon) in LOCAL {
+        if keys.iter().any(|key| text.contains(key.trim())) {
+            return (*icon).into();
+        }
+    }
+    // "word" alone is ambiguous; only match as a product token.
+    if text.contains("microsoft word") || slug.contains("microsoft-word") || slug.ends_with("-word")
+    {
+        return "word".into();
+    }
+    if let Some(url) = suggest_favicon_url(&text) {
+        return url;
+    }
+    "plugin".into()
+}
+
+fn suggest_favicon_url(text: &str) -> Option<String> {
+    const DOMAINS: &[(&[&str], &str)] = &[
+        (&["notion"], "notion.so"),
+        (&["trello"], "trello.com"),
+        (&["jira", "atlassian"], "atlassian.com"),
+        (&["discord"], "discord.com"),
+        (&["linear"], "linear.app"),
+        (&["figma"], "figma.com"),
+        (&["stripe"], "stripe.com"),
+        (&["shopify"], "shopify.com"),
+        (&["hubspot"], "hubspot.com"),
+        (&["salesforce"], "salesforce.com"),
+        (&["dropbox"], "dropbox.com"),
+        (&["asana"], "asana.com"),
+        (&["zoom"], "zoom.us"),
+        (&["telegram"], "telegram.org"),
+        (&["whatsapp"], "whatsapp.com"),
+        (&["spotify"], "spotify.com"),
+        (&["youtube"], "youtube.com"),
+        (&["linkedin"], "linkedin.com"),
+        (&["reddit"], "reddit.com"),
+        (&["aws", "amazon web"], "aws.amazon.com"),
+        (&["azure"], "azure.microsoft.com"),
+        (&["gmail", "google mail"], "gmail.com"),
+        (&["google drive", "gdrive"], "drive.google.com"),
+        (&["tmdb", "themoviedb"], "themoviedb.org"),
+        (&["openai", "chatgpt"], "openai.com"),
+        (&["anthropic", "claude"], "anthropic.com"),
+    ];
+    for (keys, domain) in DOMAINS {
+        if keys.iter().any(|key| text.contains(key)) {
+            return Some(format!(
+                "https://www.google.com/s2/favicons?domain={domain}&sz=128"
+            ));
+        }
+    }
+    None
+}
+
+fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
+    vec![BuiltinPlugin {
+        id: "bob-work-cto-invest",
+        name: "CTO Investissements",
+        version: "1.2.3",
+        description: "Propose des idées d’actions chiffrées pour un Compte-Titres Ordinaire (CTO) français : cotations, screening et brief informatif — pas un conseil personnalisé.",
+        category: "executable",
+        manifest: serde_json::json!({
+            "name": "CTO Investissements",
+            "slug": "bob-work-cto-invest",
+            "version": "1.2.3",
+            "description": "Propose des idées d’actions chiffrées pour un Compte-Titres Ordinaire (CTO) français : cotations, screening et brief informatif — pas un conseil personnalisé.",
+            "category": "executable",
+            "builtin": false,
+            "icon": "invest",
+            "capabilities": ["market.read", "cto.screen", "invest.brief", "cli.execute", "connector.status", "llm.synthesize"],
+            "permissions": [
+                {"type": "network.request"},
+                {"type": "mcp.connect"},
+                {"type": "command.execute"}
+            ],
+            "runtime": {"python": ">=3.9", "cli": true, "mcp": true},
+            "entrypoints": [
+                {"name": "screen", "runtime": "python3", "path": "scripts/screen_cto.py"},
+                {"name": "mcp", "runtime": "python3", "path": "mcp/server.py"}
+            ],
+            "resources": [
+                {"kind": "stdio-cli", "label": "CLI screen_cto.py", "optional": false, "notes": "Entrypoint local"},
+                {"kind": "mcp", "label": "Marché CTO (local)", "optional": false, "provider": "cto-market", "mcpServer": "cto-market", "notes": "Cotations Stooq + Finnhub si clé présente"},
+                {"kind": "api-public", "label": "Stooq", "optional": false, "notes": "Cotations publiques sans clé — source par défaut"},
+                {"kind": "api-key", "label": "Finnhub", "optional": true, "provider": "finnhub", "env": "FINNHUB_API_KEY", "notes": "Fallback US optionnel via FINNHUB_API_KEY (pas un outil MCP séparé)"},
+                {"kind": "mcp", "label": "MCP distant marché", "optional": true, "env": "CTO_REMOTE_MCP_URL", "notes": "URL https optionnelle / Intégrations → MCP"},
+                {"kind": "bob-llm", "label": "LLM Bob", "optional": false, "notes": "Synthèse du brief CTO"},
+                {"kind": "web-search", "label": "Recherche web Bob", "optional": true, "notes": "Actualités si Accès web actif"}
+            ],
+            "connectorStrategy": {
+                "targetLevel": "chatgpt-work",
+                "explored": ["api-public", "api-key", "local-mcp", "remote-mcp", "bob-llm", "web-search", "oauth-catalog"],
+                "tiers": [
+                    {"id": "T1", "kind": "open-api", "provider": "stooq", "required": true, "auth": "none"},
+                    {"id": "T2", "kind": "open-api", "provider": "finnhub", "required": false, "auth": "token", "env": "FINNHUB_API_KEY"},
+                    {"id": "T3", "kind": "local-mcp-cli", "provider": "bundled-python", "required": true},
+                    {"id": "T4", "kind": "remote-mcp", "provider": "user-or-prompt", "required": false, "env": "CTO_REMOTE_MCP_URL", "activation": "Integrations MCP tab or prompt URL + use_mcp_tool"}
+                ],
+                "fallback": "T3 fixtures (e2e) → T1 Stooq → T2 Finnhub if key → enrich via T4 if user MCP present",
+                "designNotes": "Pas d’OAuth broker inventé : les données marché publiques n’exigent pas de compte. Un MCP distant n’est jamais hardcodé (URL fournie par l’utilisateur). Disclaimer CTO toujours renvoyé par les tools."
+            },
+            "releaseNotes": "1.2.3 — Description fonctionnelle (bénéfice utilisateur) au lieu d’un résumé technique des connecteurs.",
+            "integrations": [],
+            "specializedMode": {
+                "label": "Mode CTO Investissements",
+                "description": "Aide à repérer des idées d’actions pour un CTO français, avec chiffres et risques, à partir de données de marché locales.",
+                "inputExtensions": [],
+                "outputFormats": ["md", "json"],
+                "allowedTools": ["cto_connector_status", "cto_market_snapshot", "cto_screen_ideas", "use_mcp_tool", "execute_command"],
+                "preferredLibraries": [],
+                "workflow": "1) cto_connector_status pour savoir quelles sources sont actives. 2) cto_market_snapshot / cto_screen_ideas (MCP local). 3) Si l’utilisateur a fourni un MCP marché (URL / Intégrations), enrichir via use_mcp_tool sans inventer de connexion. 4) Synthèse 2–4 idées + disclaimer CTO.",
+                "sandbox": "market-data"
+            },
+            "mcpServers": {
+                "cto-market": {
+                    "displayName": "Marché CTO (local)",
+                    "description": "MCP Python local : cotations Stooq, fallback Finnhub, screening informatif.",
+                    "required": true,
+                    "command": "python3",
+                    "args": ["mcp/server.py"],
+                    "cwd": ".",
+                    "env": {
+                        "BOB_CTO_INVEST": "1",
+                        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}",
+                        "CTO_REMOTE_MCP_URL": "${CTO_REMOTE_MCP_URL}"
+                    },
+                    "tools": ["cto_connector_status", "cto_market_snapshot", "cto_screen_ideas"]
+                }
+            },
+            "instructions": "Mode CTO Investissements Bob Work — plugin niveau ChatGPT Work (pas un skill seul).\n\nBundle : cto_market.py, scripts/screen_cto.py, mcp/server.py.\nConnecteurs : T1 Stooq (défaut, sans clé) ; T2 Finnhub si FINNHUB_API_KEY ; T3 MCP/CLI local ; T4 MCP distant seulement si l’utilisateur fournit une URL https ou l’ajoute dans Intégrations → MCP (ne jamais inventer ni simuler « connecté »).\nWorkflow : cto_connector_status → snapshot/screen locaux → éventuel use_mcp_tool sur MCP utilisateur → brief.\nRappels : pas un conseil personnalisé ; citer le disclaimer outil ; fiscalité CTO, frais, change US, risque de perte. Structure : sources actives → idées chiffrées → risques → prochaines vérifications."
+        }),
+    }, BuiltinPlugin {
+        id: "bob-work-ibm-pursuit",
+        name: "Brief Mission IBM",
+        version: "1.0.0",
+        description: "Prépare un brief d’atelier CIO à partir de sources publiques : snapshot client, 3–4 plays IBM et questions — pas une offre commerciale.",
+        category: "executable",
+        manifest: serde_json::json!({
+            "name": "Brief Mission IBM",
+            "slug": "bob-work-ibm-pursuit",
+            "version": "1.0.0",
+            "description": "Prépare un brief d’atelier CIO à partir de sources publiques : snapshot client, 3–4 plays IBM et questions — pas une offre commerciale.",
+            "category": "executable",
+            "builtin": false,
+            "icon": "plugin",
+            "capabilities": ["client.snapshot", "ibm.plays", "consulting.brief", "cli.execute", "connector.status", "llm.synthesize"],
+            "permissions": [
+                {"type": "network.request"},
+                {"type": "mcp.connect"},
+                {"type": "command.execute"}
+            ],
+            "runtime": {"python": ">=3.9", "cli": true, "mcp": true},
+            "entrypoints": [
+                {"name": "brief", "runtime": "python3", "path": "scripts/brief_pursuit.py"},
+                {"name": "mcp", "runtime": "python3", "path": "mcp/server.py"}
+            ],
+            "resources": [
+                {"kind": "stdio-cli", "label": "CLI brief_pursuit.py", "optional": false, "notes": "Entrypoint local"},
+                {"kind": "mcp", "label": "Brief Mission IBM (local)", "optional": false, "provider": "ibm-pursuit", "mcpServer": "ibm-pursuit", "notes": "Snapshot public + screening de plays IBM"},
+                {"kind": "api-public", "label": "Wikipedia / Wikidata", "optional": false, "notes": "Fiche entreprise sans clé"},
+                {"kind": "api-public", "label": "DuckDuckGo Instant Answer", "optional": false, "notes": "Résumé public sans clé"},
+                {"kind": "api-public", "label": "Google News RSS", "optional": false, "notes": "Signaux d’actualité publics sans clé"},
+                {"kind": "api-key", "label": "NewsAPI", "optional": true, "provider": "newsapi", "env": "NEWSAPI_KEY", "notes": "Actus optionnelles via NEWSAPI_KEY — pas Slack, pas Microsoft"},
+                {"kind": "bob-llm", "label": "LLM Bob", "optional": false, "notes": "Synthèse du brief atelier"},
+                {"kind": "web-search", "label": "Recherche web Bob", "optional": true, "notes": "Complément si Accès web actif"}
+            ],
+            "connectorStrategy": {
+                "targetLevel": "chatgpt-work",
+                "explored": ["api-public", "api-key", "local-mcp", "remote-mcp", "bob-llm", "web-search", "oauth-catalog"],
+                "tiers": [
+                    {"id": "T1", "kind": "open-api", "provider": "wikipedia-wikidata-duckduckgo-news-rss", "required": true, "auth": "none"},
+                    {"id": "T2", "kind": "open-api", "provider": "newsapi", "required": false, "auth": "token", "env": "NEWSAPI_KEY"},
+                    {"id": "T3", "kind": "local-mcp-cli", "provider": "bundled-python", "required": true},
+                    {"id": "T4", "kind": "remote-mcp", "provider": "user-https-non-microsoft", "required": false, "env": "IBM_PURSUIT_REMOTE_MCP_URL", "activation": "URL https optionnelle hors Slack/Microsoft — laisser vide par défaut"}
+                ],
+                "fallback": "T3 fixtures (e2e) → T1 APIs ouvertes → T2 NewsAPI si clé. T4 ignoré si Slack/Microsoft.",
+                "designNotes": "Pas d’OAuth Slack/Microsoft/Graph/SharePoint/Teams/Outlook. Un MCP distant n’est jamais hardcodé. Disclaimer consultant toujours renvoyé par les tools."
+            },
+            "releaseNotes": "1.0.0 — Brief mission consultant IBM, APIs ouvertes uniquement.",
+            "integrations": [],
+            "specializedMode": {
+                "label": "Mode Brief Mission IBM",
+                "description": "Aide un consultant IBM à préparer un atelier CIO avec faits publics, plays et questions — sans offre commerciale.",
+                "inputExtensions": [],
+                "outputFormats": ["md", "json"],
+                "allowedTools": ["ibm_connector_status", "ibm_client_snapshot", "ibm_screen_plays", "execute_command"],
+                "preferredLibraries": [],
+                "workflow": "1) ibm_connector_status. 2) ibm_client_snapshot. 3) ibm_screen_plays. 4) Synthèse Markdown (sources, snapshot, plays, risques, script d’atelier, disclaimer). Ne jamais utiliser Slack, Teams, Outlook, SharePoint ni Graph.",
+                "sandbox": "open-web-research"
+            },
+            "mcpServers": {
+                "ibm-pursuit": {
+                    "displayName": "Brief Mission IBM (local)",
+                    "description": "MCP Python local : APIs ouvertes, snapshot client, screening de plays IBM.",
+                    "required": true,
+                    "command": "python3",
+                    "args": ["mcp/server.py"],
+                    "cwd": ".",
+                    "env": {
+                        "BOB_IBM_PURSUIT": "1",
+                        "NEWSAPI_KEY": "${NEWSAPI_KEY}",
+                        "IBM_PURSUIT_REMOTE_MCP_URL": "${IBM_PURSUIT_REMOTE_MCP_URL}"
+                    },
+                    "tools": ["ibm_connector_status", "ibm_client_snapshot", "ibm_screen_plays"]
+                }
+            },
+            "instructions": "Mode Brief Mission IBM — plugin niveau ChatGPT Work (pas un skill seul).\n\nBundle : ibm_pursuit.py, scripts/brief_pursuit.py, mcp/server.py.\nConnecteurs : T1 Wikipedia/Wikidata/DuckDuckGo/Google News RSS (sans clé) ; T2 NewsAPI si NEWSAPI_KEY ; T3 MCP/CLI local. Pas Slack, pas Microsoft (Graph, Teams, SharePoint, Outlook).\nWorkflow : ibm_connector_status → ibm_client_snapshot → ibm_screen_plays → brief Markdown.\nRappels : pas une offre commerciale ; pas de prix inventés ; citer le disclaimer outil. Structure : sources actives → 5 faits + 3 signaux → 3–4 plays (preuve, offre, risque, question) → risques / non-objectifs → script d’atelier → disclaimer."
+        }),
+    }]
 }
 
 fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
@@ -1558,12 +2319,12 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                 "description": "Read and organize Microsoft OneNote through an authorized connector.", "category": "integration",
                 "builtin": true, "icon": "onenote",
                 "fileExtensions": [".one", ".onetoc2", ".md"],
-                "requiresIntegration": "microsoft-graph",
+                "requiresIntegration": "onenote",
                 "capabilities": ["onenote.read", "onenote.prepare", "onenote.write"],
                 "permissions": [{"type":"network.request"}, {"type":"file.read"}, {"type":"file.write"}],
                 "integrations": [{
-                    "provider": "microsoft-graph",
-                    "displayName": "Microsoft 365",
+                    "provider": "onenote",
+                    "displayName": "Microsoft OneNote",
                     "authType": "oauth",
                     "scopes": ["Notes.Read", "Notes.ReadWrite"],
                     "optional": true
@@ -1577,6 +2338,109 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "Avec Graph connecté : résoudre carnet/section/page avant action. Sinon : brouillon Markdown ou DOCX local en attendant publication."
                 ),
                 "instructions": "Mode OneNote Bob Work. Utilise ce skill uniquement si Microsoft Graph ou un MCP compatible est configuré. Résous les identités carnet/section/page avant d’agir. Lecture selon le scope du connecteur. Demande une approbation explicite avant création, déplacement, renommage ou suppression. Sans connecteur, prépare un brouillon Markdown ou DOCX local et explique que la publication OneNote reste en attente ; ne simule jamais un upload réussi."
+            }),
+        },
+        BuiltinPlugin {
+            id: "builtin-computer-use",
+            name: "Computer Use",
+            version: "1.0.2",
+            description: "Ouvre et pilote des apps Mac (Telegram, etc.) : lire l’écran, cliquer et taper via Accessibilité.",
+            category: "executable",
+            manifest: serde_json::json!({
+                "name": "Computer Use",
+                "slug": "bob-work-computer-use",
+                "version": "1.0.2",
+                "description": "Ouvre et pilote des apps Mac (Telegram, etc.) : lire l’écran, cliquer et taper via Accessibilité.",
+                "category": "executable",
+                "builtin": true,
+                "icon": "computer",
+                "capabilities": ["desktop.control", "app.open", "ui.read", "ui.input"],
+                "permissions": [
+                    {"type": "browser.control"},
+                    {"type": "mcp.connect"},
+                    {"type": "command.execute"}
+                ],
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "connectorStrategy": {
+                    "targetLevel": "chatgpt-work",
+                    "tiers": [
+                        {"id": "T3", "kind": "local-mcp", "provider": "bob-work-computer-use", "required": true, "activation": "Réglages → Contrôle de l’ordinateur"}
+                    ],
+                    "designNotes": "Le MCP global bob-work-computer-use est installé quand le réglage est activé (comme Chrome). Pas de simulation : Accessibilité macOS requise pour cliquer/taper ; open_app fonctionne via /usr/bin/open."
+                },
+                "browserExtensions": [{
+                    "id": "desktop",
+                    "displayName": "Contrôle bureau macOS",
+                    "capability": "computer_use",
+                    "mcpServer": "bob-work-computer-use",
+                    "required": true
+                }],
+                "specializedMode": {
+                    "label": "Mode Computer Use",
+                    "description": "Contrôle local du Mac : applications, fenêtres, clics et saisie via le MCP bob-work-computer-use.",
+                    "inputExtensions": [],
+                    "outputFormats": ["md"],
+                    "allowedTools": [
+                        "accessibility_status", "list_apps", "open_app", "focus_app",
+                        "get_app_state", "desktop_click", "desktop_type", "press_key", "use_mcp_tool"
+                    ],
+                    "preferredLibraries": [],
+                    "workflow": "1) Vérifier accessibility_status. 2) open_app (ex. Telegram). 3) get_app_state pour lire l’UI. 4) desktop_click / desktop_type / press_key. 5) Confirmer le résultat. Demander confirmation avant actions destructrices.",
+                    "sandbox": "macos-accessibility"
+                },
+                "instructions": "Mode Computer Use Bob Work. Le serveur MCP `bob-work-computer-use` doit être actif (Réglages → Accès et contrôle → Contrôle de l’ordinateur). Outils : accessibility_status, list_apps, open_app, focus_app, get_app_state, desktop_click, desktop_type, press_key.\n\nN’exécute jamais `osascript`, `python3` ni un script Terminal pour piloter l’UI — la permission Accessibilité doit aller à l’app **Bob Work**, pas à python3. Si Accessibilité est refusée ou l’arbre UI est vide, demande d’autoriser Bob Work dans Réglages Système → Confidentialité et sécurité → Accessibilité (ou Réglages Bob Work → Demander Accessibilité), puis réessaie. Exemple Telegram : open_app({app:\"Telegram\"}) puis get_app_state({app:\"Telegram\"}) avant toute saisie. Ne simule jamais une action réussie si l’outil renvoie ok:false. Reste sur le Mac local ; pas d’upload d’écran cloud."
+            }),
+        },
+        BuiltinPlugin {
+            id: "builtin-chrome-control",
+            name: "Contrôle Chrome",
+            version: "1.0.2",
+            description: "Pilote Google Chrome : ouvrir des onglets, naviguer et exécuter du JavaScript dans la page.",
+            category: "executable",
+            manifest: serde_json::json!({
+                "name": "Contrôle Chrome",
+                "slug": "bob-work-chrome-control",
+                "version": "1.0.2",
+                "description": "Pilote Google Chrome : ouvrir des onglets, naviguer et exécuter du JavaScript dans la page.",
+                "category": "executable",
+                "builtin": true,
+                "icon": "chrome",
+                "capabilities": ["browser.control", "chrome.tabs", "chrome.navigate", "chrome.js"],
+                "permissions": [
+                    {"type": "browser.control"},
+                    {"type": "mcp.connect"},
+                    {"type": "command.execute"}
+                ],
+                "runtime": {"python": ">=3.9", "mcp": true},
+                "connectorStrategy": {
+                    "targetLevel": "chatgpt-work",
+                    "tiers": [
+                        {"id": "T3", "kind": "local-mcp", "provider": "bob-work-chrome-control", "required": true, "activation": "Réglages → Contrôle de Chrome"}
+                    ],
+                    "designNotes": "Le MCP global bob-work-chrome-control est installé quand le réglage est activé. Automatisation macOS (Bob Work → Google Chrome) est requise pour lire/contrôler les onglets."
+                },
+                "browserExtensions": [{
+                    "id": "chrome",
+                    "displayName": "Contrôle Google Chrome",
+                    "capability": "chrome",
+                    "mcpServer": "bob-work-chrome-control",
+                    "required": true
+                }],
+                "specializedMode": {
+                    "label": "Mode Contrôle Chrome",
+                    "description": "Pilotage local de Google Chrome via le MCP bob-work-chrome-control.",
+                    "inputExtensions": [],
+                    "outputFormats": ["md"],
+                    "allowedTools": [
+                        "chrome_open_url", "chrome_read_front_tab", "chrome_list_tabs",
+                        "chrome_activate_tab", "chrome_navigate", "chrome_execute_js",
+                        "browser_snapshot", "use_mcp_tool"
+                    ],
+                    "preferredLibraries": [],
+                    "workflow": "1) Vérifier que Chrome est installé et Automatisation accordée. 2) chrome_open_url ou chrome_list_tabs. 3) chrome_navigate / chrome_execute_js selon besoin. 4) Renvoyer titre+URL confirmés. Ne simule jamais un onglet si l’outil échoue.",
+                    "sandbox": "macos-chrome-automation"
+                },
+                "instructions": "Mode Contrôle Chrome Bob Work. Le serveur MCP `bob-work-chrome-control` doit être actif (Réglages → Accès et contrôle → Contrôle de Chrome). Outils : chrome_open_url, chrome_read_front_tab, chrome_list_tabs, chrome_activate_tab, chrome_navigate, chrome_execute_js, browser_snapshot.\n\nN’utilise jamais osascript/python3 pour contrôler Chrome. Si Automatisation est refusée, explique d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation (ou Réglages Bob Work → Demander Automatisation). Reste local ; pas d’upload cloud."
             }),
         },
     ]
@@ -1593,21 +2457,654 @@ mod builtin_tests {
     }
 
     #[test]
+    fn get_all_lists_newest_user_plugins_before_builtins() {
+        let db = test_database();
+        let service = PluginService::new();
+        service.ensure_builtin_plugins(&db).expect("seed builtins");
+        let older = service
+            .create(
+                &db,
+                CreatePluginInput {
+                    name: "Older custom".into(),
+                    version: "1.0.0".into(),
+                    author: None,
+                    description: Some("old".into()),
+                    scope: Some("personal".into()),
+                    category: "recipe".into(),
+                    manifest: serde_json::json!({
+                        "name": "Older custom",
+                        "slug": "older-custom",
+                        "version": "1.0.0",
+                        "description": "old",
+                        "category": "recipe",
+                        "permissions": []
+                    }),
+                },
+            )
+            .expect("create older");
+        let newer = service
+            .create(
+                &db,
+                CreatePluginInput {
+                    name: "Newer custom".into(),
+                    version: "1.0.0".into(),
+                    author: None,
+                    description: Some("new".into()),
+                    scope: Some("personal".into()),
+                    category: "recipe".into(),
+                    manifest: serde_json::json!({
+                        "name": "Newer custom",
+                        "slug": "newer-custom",
+                        "version": "1.0.0",
+                        "description": "new",
+                        "category": "recipe",
+                        "permissions": []
+                    }),
+                },
+            )
+            .expect("create newer");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE plugins SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                rusqlite::params!["2026-08-01T10:00:00+00:00", older.id],
+            )
+            .expect("stamp older");
+            conn.execute(
+                "UPDATE plugins SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                rusqlite::params!["2026-08-10T10:00:00+00:00", newer.id],
+            )
+            .expect("stamp newer");
+        }
+
+        let listed = service.get_all(&db).expect("list");
+        let names: Vec<_> = listed.iter().map(|plugin| plugin.name.as_str()).collect();
+        let newer = names
+            .iter()
+            .position(|name| *name == "Newer custom")
+            .unwrap();
+        let older = names
+            .iter()
+            .position(|name| *name == "Older custom")
+            .unwrap();
+        let first_builtin = listed
+            .iter()
+            .position(|plugin| PluginService::is_protected_builtin(&plugin.id))
+            .unwrap();
+        assert!(
+            newer < older,
+            "newest custom plugin should come first: {names:?}"
+        );
+        assert!(
+            older < first_builtin,
+            "builtins should follow custom plugins: {names:?}"
+        );
+        assert!(listed[first_builtin..]
+            .iter()
+            .all(|plugin| PluginService::is_protected_builtin(&plugin.id)));
+    }
+
+    #[test]
     fn document_plugin_catalog_is_complete_and_native() {
         let plugins = builtin_document_plugins();
-        assert_eq!(plugins.len(), 5);
+        assert_eq!(plugins.len(), 7);
         let names = plugins.iter().map(|plugin| plugin.name).collect::<Vec<_>>();
         assert!(names.contains(&"Documents"));
         assert!(names.contains(&"Microsoft Word"));
         assert!(names.contains(&"Microsoft PowerPoint"));
         assert!(names.contains(&"Microsoft Excel"));
         assert!(names.contains(&"Microsoft OneNote"));
+        assert!(names.contains(&"Computer Use"));
+        assert!(names.contains(&"Contrôle Chrome"));
+        assert!(!names.contains(&"CTO Investissements"));
         assert!(plugins
             .iter()
             .all(|plugin| plugin.manifest.get("builtin") == Some(&serde_json::Value::Bool(true))));
         assert!(plugins
             .iter()
             .all(|plugin| plugin.manifest.get("slug").is_some()));
+        let work = packaged_work_plugins();
+        assert_eq!(work.len(), 2);
+        assert_eq!(work[0].id, "bob-work-cto-invest");
+        assert_eq!(work[1].id, "bob-work-ibm-pursuit");
+        assert!(work.iter().all(|plugin| {
+            plugin.manifest.get("builtin") == Some(&serde_json::Value::Bool(false))
+        }));
+    }
+
+    #[test]
+    fn infer_plugin_icon_maps_office_and_remote_brands() {
+        assert_eq!(
+            infer_plugin_icon("bob-work-microsoft-word", "Microsoft Word", ""),
+            "word"
+        );
+        assert_eq!(
+            infer_plugin_icon("bob-work-microsoft-excel", "Microsoft Excel", ""),
+            "excel"
+        );
+        assert!(infer_plugin_icon("my-notion-brief", "Notion Brief", "").contains("notion.so"));
+        let mut manifest = serde_json::json!({
+            "name": "Notion Brief",
+            "slug": "my-notion-brief",
+            "version": "1.0.0"
+        });
+        ensure_manifest_icon(&mut manifest, "Notion Brief", Some("Sync Notion pages"));
+        assert!(manifest
+            .get("icon")
+            .and_then(|value| value.as_str())
+            .is_some_and(|icon| icon.contains("notion.so")));
+    }
+
+    #[test]
+    fn prune_removes_agentic_shadows_of_builtins() {
+        let db = test_database();
+        let service = PluginService::new();
+        service.ensure_builtin_plugins(&db).expect("seed builtins");
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+                 VALUES (?1,?2,'1.0.0','Bob Agent',?3,'personal','recipe',?4,'installed','valid',?5,?5)",
+                rusqlite::params![
+                    "agentic-bob-work-microsoft-word",
+                    "Microsoft Word",
+                    "Shadow without icon",
+                    serde_json::json!({
+                        "name": "Microsoft Word",
+                        "slug": "bob-work-microsoft-word",
+                        "version": "1.0.0",
+                        "builtin": true,
+                        "agentic": true
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )
+            .expect("insert shadow");
+        }
+        let removed = service.prune_shadow_agentic_plugins(&db).expect("prune");
+        assert_eq!(removed, 1);
+        assert!(service
+            .get_by_id(&db, "agentic-bob-work-microsoft-word")
+            .expect("lookup")
+            .is_none());
+        assert!(service
+            .get_by_id(&db, "builtin-word")
+            .expect("lookup")
+            .is_some());
+    }
+
+    #[test]
+    fn prune_removes_agentic_shadow_of_packaged_cto() {
+        let db = test_database();
+        let service = PluginService::new();
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("seed packaged CTO");
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+                 VALUES (?1,?2,'1.2.0','Bob Agent',?3,'personal','executable',?4,'installed','valid',?5,?5)",
+                rusqlite::params![
+                    "agentic-bob-work-cto-invest",
+                    "CTO Investissements",
+                    "Shadow duplicate",
+                    serde_json::json!({
+                        "name": "CTO Investissements",
+                        "slug": "bob-work-cto-invest",
+                        "version": "1.2.0",
+                        "builtin": false,
+                        "agentic": true
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )
+            .expect("insert shadow");
+        }
+        let removed = service.prune_shadow_agentic_plugins(&db).expect("prune");
+        assert_eq!(removed, 1);
+        assert!(service
+            .get_by_id(&db, "agentic-bob-work-cto-invest")
+            .expect("lookup")
+            .is_none());
+        assert!(service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .is_some());
+    }
+
+    #[test]
+    fn create_assigns_inferred_icon_when_missing() {
+        let db = test_database();
+        let service = PluginService::new();
+        let plugin = service
+            .create(
+                &db,
+                CreatePluginInput {
+                    name: "Microsoft Excel Helper".into(),
+                    version: "1.0.0".into(),
+                    author: None,
+                    description: Some("Analyse des classeurs xlsx".into()),
+                    scope: Some("personal".into()),
+                    category: "recipe".into(),
+                    manifest: serde_json::json!({
+                        "name": "Microsoft Excel Helper",
+                        "slug": "excel-helper",
+                        "version": "1.0.0",
+                        "description": "Analyse des classeurs xlsx",
+                        "category": "recipe",
+                        "permissions": []
+                    }),
+                },
+            )
+            .expect("create");
+        assert_eq!(
+            plugin.manifest.get("icon").and_then(|value| value.as_str()),
+            Some("excel")
+        );
+    }
+
+    #[test]
+    fn cto_invest_plugin_is_created_deployed_and_usable_in_prompt_context() {
+        let db = test_database();
+        let service = PluginService::new();
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("seed packaged CTO invest");
+
+        let plugin = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("CTO plugin installed");
+        assert_eq!(plugin.version, "1.2.3");
+        assert_eq!(plugin.install_state, "installed");
+        assert_eq!(plugin.category, "executable");
+        assert_eq!(
+            plugin.manifest.get("slug").and_then(|value| value.as_str()),
+            Some("bob-work-cto-invest")
+        );
+        assert_eq!(
+            plugin.manifest.get("builtin"),
+            Some(&serde_json::Value::Bool(false)),
+            "CTO must not be a protected builtin"
+        );
+        assert!(
+            plugin.manifest.get("specializedMode").is_some(),
+            "CTO plugin needs specializedMode for prompt injection"
+        );
+        assert!(
+            plugin.manifest.get("connectorStrategy").is_some(),
+            "Work-level CTO plugin must declare connectorStrategy"
+        );
+        assert!(
+            plugin
+                .manifest
+                .get("resources")
+                .and_then(|value| value.as_array())
+                .is_some_and(|items| items.len() >= 3),
+            "CTO plugin must list resources in manifest"
+        );
+        assert!(
+            plugin
+                .manifest
+                .get("integrations")
+                .and_then(|value| value.as_array())
+                .is_some_and(|items| items.is_empty()),
+            "CTO must not fake Finnhub as a catalogue Connexion"
+        );
+        assert!(
+            plugin
+                .manifest
+                .get("entrypoints")
+                .and_then(|value| value.as_array())
+                .is_some_and(|items| items.len() >= 2),
+            "CTO Python plugin must declare CLI + MCP entrypoints"
+        );
+        assert!(PluginMcpService::has_servers(&plugin.manifest));
+
+        let skill_dir = dirs::home_dir()
+            .expect("home")
+            .join(".bob/skills/bob-work-cto-invest");
+        let mcp_script = skill_dir.join("mcp/server.py");
+        assert!(
+            skill_dir.join("SKILL.md").is_file(),
+            "CTO skill frontmatter must be deployed"
+        );
+        assert!(
+            skill_dir.join("cto_market.py").is_file(),
+            "CTO shared Python lib must be deployed"
+        );
+        assert!(
+            skill_dir.join("scripts/screen_cto.py").is_file(),
+            "CTO CLI entrypoint must be deployed"
+        );
+        assert!(mcp_script.is_file(), "CTO MCP server must be deployed");
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join(".bob-work-plugin-id")).expect("plugin id"),
+            "bob-work-cto-invest"
+        );
+        let script = std::fs::read_to_string(&mcp_script).expect("read MCP");
+        assert!(script.contains("cto_market_snapshot") || script.contains("import cto_market"));
+        assert!(script.contains("cto_screen_ideas") || script.contains("import cto_market"));
+        let market = std::fs::read_to_string(skill_dir.join("cto_market.py")).expect("market lib");
+        assert!(market.contains("pas un conseil en investissement"));
+    }
+
+    #[test]
+    fn ensure_builtin_plugins_auto_activates_packaged_update() {
+        let db = test_database();
+        let service = PluginService::new();
+        let now = Utc::now().to_rfc3339();
+        let old_manifest = serde_json::json!({
+            "name": "Documents", "slug": "bob-work-documents", "version": "1.0.0",
+            "description": "old", "category": "recipe", "builtin": true,
+            "permissions": [{"type":"file.read"},{"type":"file.write"},{"type":"mcp.connect"},{"type":"command.execute"}],
+            "mcpServers": {
+                "office-tools": {
+                    "displayName": "Outils",
+                    "command": "python3",
+                    "args": ["mcp/server.py"],
+                    "cwd": ".",
+                    "tools": ["inspect_document"]
+                }
+            }
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at,available_version)
+                 VALUES ('builtin-documents','Documents','1.0.0','Bob Work','old','personal','recipe',?1,'installed','valid',?2,?2,'1.1.0')",
+                params![old_manifest.to_string(), now],
+            )
+            .expect("seed old plugin");
+        }
+        let seeded = service
+            .get_by_id(&db, "builtin-documents")
+            .expect("lookup")
+            .expect("plugin");
+        service
+            .persist_version(&db, &seeded, None, true)
+            .expect("persist old version");
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("ensure builtins");
+        let upgraded = service
+            .get_by_id(&db, "builtin-documents")
+            .expect("lookup")
+            .expect("plugin");
+        assert_eq!(upgraded.version, "1.1.0");
+        assert!(upgraded.available_version.is_none());
+    }
+
+    #[test]
+    fn demotes_legacy_builtin_cto_and_allows_restore() {
+        let db = test_database();
+        let service = PluginService::new();
+        let now = Utc::now().to_rfc3339();
+        let legacy_manifest = serde_json::json!({
+            "name": "CTO Investissements",
+            "slug": "bob-work-cto-invest",
+            "version": "1.2.0",
+            "description": "legacy builtin",
+            "category": "executable",
+            "builtin": true,
+            "icon": "invest",
+            "permissions": [{"type":"network.request"},{"type":"mcp.connect"},{"type":"command.execute"}],
+            "mcpServers": {
+                "cto-market": {
+                    "displayName": "Marché CTO (local)",
+                    "command": "python3",
+                    "args": ["mcp/server.py"],
+                    "cwd": ".",
+                    "env": {"BOB_CTO_INVEST": "1"},
+                    "tools": ["cto_connector_status", "cto_market_snapshot", "cto_screen_ideas"]
+                }
+            }
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+                 VALUES ('builtin-cto-invest','CTO Investissements','1.2.0','Bob Work','legacy','personal','executable',?1,'installed','valid',?2,?2)",
+                params![legacy_manifest.to_string(), now],
+            )
+            .expect("seed legacy");
+        }
+        let seeded = service
+            .get_by_id(&db, "builtin-cto-invest")
+            .expect("lookup")
+            .expect("plugin");
+        service
+            .persist_version(&db, &seeded, None, true)
+            .expect("persist current");
+        let older = Plugin {
+            version: "1.1.0".into(),
+            available_version: None,
+            updated_at: now.clone(),
+            ..seeded.clone()
+        };
+        service
+            .persist_version(&db, &older, None, false)
+            .expect("persist older");
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("demote + ensure");
+        assert!(service
+            .get_by_id(&db, "builtin-cto-invest")
+            .expect("lookup")
+            .is_none());
+        let demoted = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("demoted plugin");
+        assert_eq!(
+            demoted.manifest.get("builtin"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        let restored = service
+            .activate_version(&db, "bob-work-cto-invest", "1.1.0")
+            .expect("restore must succeed for non-builtin CTO");
+        assert_eq!(restored.version, "1.1.0");
+    }
+
+    #[test]
+    fn ensure_preserves_newer_cto_version_and_custom_python() {
+        let db = test_database();
+        let service = PluginService::new();
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("seed packaged CTO");
+
+        let packaged = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("CTO");
+        let packaged_version = packaged.version.clone();
+        let newer = format!(
+            "{}.{}.{}",
+            9,
+            9,
+            9 // deliberately ahead of any packaged CTO semver
+        );
+        let mut newer_manifest = packaged.manifest.clone();
+        if let Some(object) = newer_manifest.as_object_mut() {
+            object.insert("version".into(), serde_json::Value::String(newer.clone()));
+            object.insert(
+                "releaseNotes".into(),
+                serde_json::Value::String("custom newer release".into()),
+            );
+        }
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE plugins SET version=?1, manifest=?2, available_version=NULL, updated_at=?3 WHERE id=?4",
+                params![newer, newer_manifest.to_string(), now, "bob-work-cto-invest"],
+            )
+            .expect("bump active version ahead of packaged");
+        }
+        let bumped = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("CTO");
+        service
+            .persist_version(&db, &bumped, None, true)
+            .expect("persist newer history row");
+
+        let skill_dir = dirs::home_dir()
+            .expect("home")
+            .join(".bob/skills/bob-work-cto-invest");
+        std::fs::create_dir_all(skill_dir.join("mcp")).expect("mcp dir");
+        std::fs::create_dir_all(skill_dir.join("scripts")).expect("scripts dir");
+        let custom_marker = "# bob-work-custom-cto-bundle\nprint('keep-me')\n";
+        std::fs::write(skill_dir.join("cto_market.py"), custom_marker).expect("custom python");
+        std::fs::write(skill_dir.join(".bob-work-plugin-id"), "bob-work-cto-invest")
+            .expect("owner marker");
+        // No deploy marker → ensure refreshes SKILL once, but must preserve Python.
+        let _ = std::fs::remove_file(skill_dir.join(".bob-work-deployed-version"));
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("ensure must not downgrade");
+        let after = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("CTO");
+        assert_eq!(after.version, newer, "active version must survive relaunch");
+        assert_ne!(after.version, packaged_version);
+        let python = std::fs::read_to_string(skill_dir.join("cto_market.py")).expect("python");
+        assert!(
+            python.contains("bob-work-custom-cto-bundle"),
+            "custom CTO Python must not be overwritten by packaged ensure refresh"
+        );
+
+        // Second ensure is a no-op refresh (marker matches) and still keeps the bundle.
+        service.ensure_builtin_plugins(&db).expect("second ensure");
+        let python_again =
+            std::fs::read_to_string(skill_dir.join("cto_market.py")).expect("python");
+        assert!(python_again.contains("bob-work-custom-cto-bundle"));
+        assert_eq!(
+            service
+                .get_by_id(&db, "bob-work-cto-invest")
+                .expect("lookup")
+                .expect("CTO")
+                .version,
+            newer
+        );
+    }
+
+    #[test]
+    fn packaged_work_plugin_stays_deleted_after_uninstall() {
+        let db = test_database();
+        let service = PluginService::new();
+        service.ensure_builtin_plugins(&db).expect("seed CTO");
+        assert!(service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .is_some());
+
+        service
+            .uninstall(&db, "bob-work-cto-invest")
+            .expect("delete packaged CTO");
+        assert!(service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .is_none());
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("ensure must not reseed dismissed CTO");
+        assert!(service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .is_none());
+
+        let error = service
+            .uninstall(&db, "builtin-documents")
+            .expect_err("builtin must stay protected");
+        assert!(error.to_string().contains("intégré"));
+    }
+
+    #[test]
+    fn ensure_builtin_plugins_repairs_invalid_staged_onenote_update() {
+        let db = test_database();
+        let service = PluginService::new();
+        let now = Utc::now().to_rfc3339();
+        let old_manifest = serde_json::json!({
+            "name": "Microsoft OneNote", "slug": "bob-work-microsoft-onenote", "version": "1.0.0",
+            "description": "old", "category": "integration", "builtin": true,
+            "permissions": [{"type":"network.request"}],
+            "requiresIntegration": "microsoft-graph"
+        });
+        // Previously shipped 1.1.0 used an unknown OAuth provider without MCP —
+        // validation rejected activation and left "Prête à être installée".
+        let bad_staged = serde_json::json!({
+            "name": "Microsoft OneNote", "slug": "bob-work-microsoft-onenote", "version": "1.1.0",
+            "description": "bad", "category": "integration", "builtin": true,
+            "permissions": [{"type":"network.request"}],
+            "integrations": [{
+                "provider": "microsoft-graph",
+                "authType": "oauth",
+                "scopes": ["Notes.Read"]
+            }]
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at,available_version)
+                 VALUES ('builtin-onenote','Microsoft OneNote','1.0.0','Bob Work','old','personal','integration',?1,'installed','valid',?2,?2,'1.1.0')",
+                params![old_manifest.to_string(), now],
+            )
+            .expect("seed old onenote");
+            conn.execute(
+                "INSERT INTO plugin_versions
+                 (plugin_id,version,name,author,description,scope,category,manifest,validation_state,created_at)
+                 VALUES ('builtin-onenote','1.1.0','Microsoft OneNote','Bob Work','bad','personal','integration',?1,'valid',?2)",
+                params![bad_staged.to_string(), now],
+            )
+            .expect("seed bad staged version");
+        }
+        let seeded = service
+            .get_by_id(&db, "builtin-onenote")
+            .expect("lookup")
+            .expect("plugin");
+        service
+            .persist_version(&db, &seeded, None, true)
+            .expect("persist old version");
+
+        assert!(!service.validate(&bad_staged).valid);
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("ensure builtins");
+        let upgraded = service
+            .get_by_id(&db, "builtin-onenote")
+            .expect("lookup")
+            .expect("plugin");
+        assert_eq!(upgraded.version, "1.1.0");
+        assert!(upgraded.available_version.is_none());
+        assert_eq!(
+            upgraded
+                .manifest
+                .get("integrations")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("provider"))
+                .and_then(|value| value.as_str()),
+            Some("onenote")
+        );
     }
 
     #[test]
@@ -1802,6 +3299,44 @@ mod builtin_tests {
         );
 
         std::fs::remove_dir_all(&root).expect("cleanup test bundle");
+    }
+
+    #[test]
+    fn skips_builtin_marked_bundles_during_agentic_sync() {
+        let db = test_database();
+        let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
+        let bundle = root.join("bob-work-microsoft-word");
+        std::fs::create_dir_all(bundle.join("scripts")).expect("dirs");
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: bob-work-microsoft-word\n---\nWord",
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join(".bob-work-plugin.json"),
+            serde_json::json!({
+                "name": "Microsoft Word",
+                "slug": "bob-work-microsoft-word",
+                "version": "1.1.0",
+                "category": "recipe",
+                "builtin": true,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("scripts/noop.py"), "print('ok')\n").unwrap();
+        std::fs::write(bundle.join(".bob-work-plugin-id"), "builtin-word").unwrap();
+
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("sync");
+        assert!(imported.is_empty());
+        assert!(PluginService::new()
+            .get_by_id(&db, "agentic-bob-work-microsoft-word")
+            .expect("lookup")
+            .is_none());
+
+        std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]

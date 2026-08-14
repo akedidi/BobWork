@@ -75,6 +75,10 @@
     "resources": []
   },
   "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    },
     "shell": {
       "open": true
     }

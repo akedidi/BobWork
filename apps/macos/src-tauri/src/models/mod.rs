@@ -2,6 +2,7 @@
 // Bob Work - Data Models
 // ============================================================
 
+pub mod analytics;
 pub mod approval;
 pub mod artifact;
 pub mod conversation;

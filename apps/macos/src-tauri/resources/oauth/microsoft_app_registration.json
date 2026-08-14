@@ -1,0 +1,31 @@
+{
+  "displayName": "Bob Work",
+  "signInAudience": "AzureADMultipleOrgs",
+  "isPublicClient": true,
+  "allowPublicClientFlows": true,
+  "redirectUris": [
+    "http://127.0.0.1:47823/oauth/callback"
+  ],
+  "platform": "Mobile and desktop applications",
+  "delegatedGraphPermissions": [
+    "openid",
+    "profile",
+    "offline_access",
+    "User.Read",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "Team.ReadBasic.All",
+    "ChannelMessage.Read.All",
+    "Calendars.ReadWrite",
+    "Files.ReadWrite.All",
+    "Notes.Read",
+    "Notes.ReadWrite"
+  ],
+  "notes": [
+    "Register a public client (no secret) in Microsoft Entra ID.",
+    "Enable 'Allow public client flows' for PKCE authorization-code.",
+    "Add the loopback redirect URI exactly as listed.",
+    "Ship the Application (client) ID via the BOBWORK_OAUTH_MICROSOFT_CLIENT_ID build environment variable, or configure it once in Bob Work.",
+    "Consent screen will then show 'Bob Work' instead of Graph PowerShell / Command Line Tools."
+  ]
+}

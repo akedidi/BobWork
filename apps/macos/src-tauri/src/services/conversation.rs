@@ -31,10 +31,19 @@ impl ConversationService {
 
     pub fn get_all(&self, db: &Database, project_id: Option<&str>) -> AppResult<Vec<Conversation>> {
         let conn = db.conn.lock().unwrap();
+        // Only list conversations that already have a user prompt — empty drafts
+        // stay out of the sidebar until the first message is sent.
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, title, type, business_mode, bob_mode,
-             date, pinned, local_only, summary, bob_context_state, archived
-             FROM conversations WHERE archived = 0 ORDER BY pinned DESC, date DESC LIMIT 50",
+            "SELECT c.id, c.project_id, c.title, c.type, c.business_mode, c.bob_mode,
+             c.date, c.pinned, c.local_only, c.summary, c.bob_context_state, c.archived
+             FROM conversations c
+             WHERE c.archived = 0
+               AND EXISTS (
+                 SELECT 1 FROM messages m
+                 WHERE m.conversation_id = c.id AND m.author = 'user'
+               )
+             ORDER BY c.pinned DESC, c.date DESC
+             LIMIT 50",
         )?;
 
         let all_convs: Vec<Conversation> = stmt
@@ -50,6 +59,23 @@ impl ConversationService {
         } else {
             Ok(all_convs)
         }
+    }
+
+    /// Delete conversations that never received a user prompt (stale drafts).
+    /// Skips very recent rows so an in-flight first send is not removed.
+    pub fn purge_promptless(&self, db: &Database) -> AppResult<usize> {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(45)).to_rfc3339();
+        let conn = db.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM conversations
+             WHERE date < ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM messages m
+                 WHERE m.conversation_id = conversations.id AND m.author = 'user'
+               )",
+            params![cutoff],
+        )?;
+        Ok(deleted)
     }
 
     pub fn get_by_id(&self, db: &Database, id: &str) -> AppResult<Option<Conversation>> {
@@ -160,7 +186,12 @@ impl ConversationService {
         Ok(())
     }
 
-    pub fn set_project_id(&self, db: &Database, id: &str, project_id: Option<&str>) -> AppResult<()> {
+    pub fn set_project_id(
+        &self,
+        db: &Database,
+        id: &str,
+        project_id: Option<&str>,
+    ) -> AppResult<()> {
         let conn = db.conn.lock().unwrap();
         let changed = conn.execute(
             "UPDATE conversations SET project_id = ?1 WHERE id = ?2",
@@ -396,5 +427,251 @@ impl ConversationService {
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
             archived: row.get::<_, bool>(11).unwrap_or(false),
         })
+    }
+
+    /// Retrieve short excerpts from *other* conversations that may help Bob answer.
+    /// Prefer same-project messages when `project_id` is set; never includes the
+    /// current conversation. Opt-in via settings (`cross_conversation_context`).
+    pub fn related_context_snippets(
+        &self,
+        db: &Database,
+        query: &str,
+        current_conversation_id: &str,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> AppResult<Vec<RelatedContextSnippet>> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|term| {
+                term.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|term| term.len() >= 2)
+            .take(8)
+            .map(|term| format!("\"{}\"*", term.replace('"', "")))
+            .collect();
+        if terms.is_empty() || limit == 0 {
+            return Ok(vec![]);
+        }
+        let expression = terms.join(" OR ");
+        let limit = limit.clamp(1, 8) as i64;
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.title,
+                    snippet(search_index, 4, '', '', ' … ', 28),
+                    bm25(search_index)
+             FROM search_index
+             JOIN conversations c ON c.id = search_index.entity_id
+             WHERE search_index MATCH ?1
+               AND search_index.entity_type = 'message'
+               AND c.id != ?2
+               AND COALESCE(c.archived, 0) = 0
+               AND (?3 IS NULL OR search_index.project_id = ?3 OR (search_index.project_id IS NULL AND ?3 IS NULL))
+             ORDER BY bm25(search_index)
+             LIMIT ?4",
+        )?;
+        // When scoped to a project, require matching project_id.
+        // When not in a project, allow any conversation (personal + project).
+        let project_filter: Option<&str> = project_id;
+        let rows = stmt.query_map(
+            params![
+                expression,
+                current_conversation_id,
+                project_filter,
+                limit * 3
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, f64>(3).unwrap_or(0.0),
+                ))
+            },
+        )?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut snippets = Vec::new();
+        for row in rows.filter_map(Result::ok) {
+            let (conversation_id, title, excerpt, _score) = row;
+            let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+            if excerpt.trim().is_empty() {
+                continue;
+            }
+            if !seen.insert(conversation_id.clone()) {
+                continue;
+            }
+            snippets.push(RelatedContextSnippet {
+                conversation_id,
+                conversation_title: title,
+                excerpt: excerpt.chars().take(280).collect(),
+            });
+            if snippets.len() >= limit as usize {
+                break;
+            }
+        }
+        Ok(snippets)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedContextSnippet {
+    pub conversation_id: String,
+    pub conversation_title: String,
+    pub excerpt: String,
+}
+
+impl RelatedContextSnippet {
+    pub fn format_block(snippets: &[Self]) -> Option<String> {
+        if snippets.is_empty() {
+            return None;
+        }
+        let body = snippets
+            .iter()
+            .map(|snippet| {
+                format!(
+                    "- « {} » : {}",
+                    snippet.conversation_title.trim(),
+                    snippet.excerpt.trim()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "Contexte lié (autres conversations, extrait local — à utiliser seulement s’il aide vraiment) :\n{body}"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::conversation::{AddMessageInput, CreateConversationInput};
+    use crate::models::project::CreateProjectInput;
+    use crate::services::project::ProjectService;
+
+    #[test]
+    fn format_block_is_none_when_empty() {
+        assert!(RelatedContextSnippet::format_block(&[]).is_none());
+    }
+
+    #[test]
+    fn related_context_excludes_current_conversation_and_prefers_project() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let projects = ProjectService::new();
+        let conversations = ConversationService::new();
+        let project = projects
+            .create(
+                &db,
+                CreateProjectInput {
+                    name: "Alpha".into(),
+                    description: None,
+                    objective: None,
+                    color: None,
+                    local_path: None,
+                    custom_instructions: None,
+                    language: None,
+                    default_mode: None,
+                    template: None,
+                },
+            )
+            .expect("project");
+
+        let current = conversations
+            .create(
+                &db,
+                CreateConversationInput {
+                    project_id: Some(project.id.clone()),
+                    title: "Chat courant".into(),
+                    conversation_type: None,
+                    business_mode: None,
+                    bob_mode: None,
+                },
+            )
+            .expect("current");
+        let sibling = conversations
+            .create(
+                &db,
+                CreateConversationInput {
+                    project_id: Some(project.id.clone()),
+                    title: "Brief CTO précédent".into(),
+                    conversation_type: None,
+                    business_mode: None,
+                    bob_mode: None,
+                },
+            )
+            .expect("sibling");
+        let other_project_chat = conversations
+            .create(
+                &db,
+                CreateConversationInput {
+                    project_id: None,
+                    title: "Hors projet".into(),
+                    conversation_type: None,
+                    business_mode: None,
+                    bob_mode: None,
+                },
+            )
+            .expect("other");
+
+        conversations
+            .add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: current.id.clone(),
+                    author: "user".into(),
+                    content: "Parle-moi du screening CTO actions françaises".into(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("current msg");
+        conversations
+            .add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: sibling.id.clone(),
+                    author: "assistant".into(),
+                    content:
+                        "Le screening CTO avait retenu AIR.PA et BN.PA pour un brief informatif."
+                            .into(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("sibling msg");
+        conversations
+            .add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: other_project_chat.id.clone(),
+                    author: "assistant".into(),
+                    content: "Le screening CTO hors projet ne doit pas polluer.".into(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("other msg");
+
+        let snippets = conversations
+            .related_context_snippets(
+                &db,
+                "screening CTO actions",
+                &current.id,
+                Some(&project.id),
+                4,
+            )
+            .expect("search");
+        assert!(!snippets.is_empty());
+        assert!(snippets.iter().all(|s| s.conversation_id != current.id));
+        assert!(snippets.iter().any(|s| s.conversation_id == sibling.id));
+        assert!(snippets
+            .iter()
+            .all(|s| s.conversation_id != other_project_chat.id));
+        let block = RelatedContextSnippet::format_block(&snippets).expect("block");
+        assert!(block.contains("Contexte lié"));
+        assert!(block.contains("Brief CTO"));
     }
 }

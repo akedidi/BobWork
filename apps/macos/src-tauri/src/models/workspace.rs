@@ -21,6 +21,15 @@ pub struct Skill {
     pub source_path: String,
     pub scope: String,
     pub enabled: bool,
+    /// Deployed by a Bob Work built-in plugin (`builtin-*`) or integration skill.
+    #[serde(default)]
+    pub builtin: bool,
+    /// Filesystem birth time of `SKILL.md` when available.
+    #[serde(default)]
+    pub created_at: String,
+    /// Filesystem mtime of `SKILL.md`.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +51,8 @@ pub struct McpServer {
     pub enabled: bool,
     pub status: String,
     pub raw: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test: Option<crate::models::plugin::ConnectionTestSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +63,10 @@ pub struct SaveMcpServerInput {
     pub command_or_url: String,
     pub args: Vec<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

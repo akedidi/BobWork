@@ -53,10 +53,19 @@ impl ChromeMcpService {
     }
 
     pub fn mcp_config(bundle_dir: &PathBuf) -> Value {
+        let mut env = serde_json::Map::new();
+        #[cfg(target_os = "macos")]
+        {
+            env.insert(
+                "BOB_WORK_APPLESCRIPT_SOCKET".into(),
+                json!(crate::macos_applescript_bridge::socket_path_string()),
+            );
+        }
         json!({
             "command": "python3",
             "args": ["server.py"],
             "cwd": bundle_dir.to_string_lossy(),
+            "env": env,
         })
     }
 
@@ -86,12 +95,7 @@ impl ChromeMcpService {
         let config = Self::mcp_config(&bundle_dir);
         run_bob(
             bob_path,
-            &[
-                "mcp",
-                "add-json",
-                CHROME_MCP_NAME,
-                &config.to_string(),
-            ],
+            &["mcp", "add-json", CHROME_MCP_NAME, &config.to_string()],
         )?;
         run_bob(bob_path, &["mcp", "enable", CHROME_MCP_NAME])?;
         Ok(())
@@ -131,49 +135,14 @@ impl ChromeMcpService {
                 "Installez Google Chrome pour utiliser le contrôle navigateur.".into(),
             );
         }
-        let script = r#"tell application "Google Chrome"
-  if (count of windows) = 0 then return "NO_WINDOW"
-  return title of active tab of front window
-end tell"#;
-        let output = Command::new("osascript").args(["-e", script]).output();
-        match output {
-            Ok(result) if result.status.success() => {
-                if String::from_utf8_lossy(&result.stdout).trim() == "NO_WINDOW" {
-                    (
-                        "granted".into(),
-                        "Automatisation accordée. Ouvrez Chrome pour lire les onglets actifs.".into(),
-                    )
-                } else {
-                    (
-                        "granted".into(),
-                        "Automatisation accordée à Google Chrome.".into(),
-                    )
-                }
-            }
-            Ok(result) => {
-                let stderr = String::from_utf8_lossy(&result.stderr).to_ascii_lowercase();
-                if stderr.contains("not authorized")
-                    || stderr.contains("autorisation")
-                    || stderr.contains("(-1743)")
-                {
-                    (
-                        "denied".into(),
-                        "Autorisez python3 (ou le terminal Bob) à contrôler Google Chrome dans Réglages Système → Automatisation.".into(),
-                    )
-                } else {
-                    (
-                        "unknown".into(),
-                        format!(
-                            "Impossible de vérifier Automatisation : {}",
-                            String::from_utf8_lossy(&result.stderr).trim()
-                        ),
-                    )
-                }
-            }
-            Err(error) => (
-                "unknown".into(),
-                format!("Impossible d’exécuter la sonde Automatisation : {}", error),
-            ),
+        #[cfg(target_os = "macos")]
+        {
+            // In-process probe only so Automation lists Bob Work, never osascript.
+            crate::macos_permissions::probe_chrome_automation_in_process()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ("unavailable".into(), "Non disponible.".into())
         }
     }
 }
@@ -211,5 +180,23 @@ mod tests {
         assert_eq!(config["command"], "python3");
         assert_eq!(config["args"], json!(["server.py"]));
         assert_eq!(config["cwd"], "/tmp/bob-work-chrome");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(config["env"]["BOB_WORK_APPLESCRIPT_SOCKET"]
+                .as_str()
+                .unwrap_or("")
+                .contains("applescript.sock"));
+        }
+    }
+
+    #[test]
+    fn bundled_script_prefers_bob_work_applescript_bridge() {
+        assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_APPLESCRIPT_SOCKET"));
+        assert!(CHROME_MCP_SCRIPT.contains("_run_osascript_via_bob_work"));
+        assert!(CHROME_MCP_SCRIPT.contains("BRIDGE_REQUIRED_ERROR"));
+        assert!(
+            !CHROME_MCP_SCRIPT.contains("[\"osascript\""),
+            "Chrome MCP must not spawn /usr/bin/osascript (TCC would attach to python3)"
+        );
     }
 }

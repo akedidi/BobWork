@@ -58,6 +58,7 @@ pub async fn update_task_pinned(
 #[tauri::command]
 pub async fn cancel_task(
     id: String,
+    app_handle: AppHandle,
     db: State<'_, Database>,
     bob_service: State<'_, BobService>,
 ) -> Result<(), AppError> {
@@ -66,5 +67,7 @@ pub async fn cancel_task(
             let _ = bob_service.cancel_session(&session_id);
         }
     }
-    TaskService::new().cancel(&db, &id)
+    TaskService::new().cancel(&db, &id)?;
+    let _ = app_handle.emit("task-updated", &id);
+    Ok(())
 }
