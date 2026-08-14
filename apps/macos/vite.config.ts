@@ -12,6 +12,29 @@ export default defineConfig(async () => ({
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
     exclude: ['**/node_modules/**', '**/src-tauri/**'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary', 'html'],
+      reportsDirectory: './coverage',
+      thresholds: {
+        statements: 45,
+        branches: 40,
+        functions: 35,
+        lines: 50,
+        'src/lib/{activeTasks,builtinCatalog,chromeSnapshot,errorMessage,localFilePaths,pluginBuilder,scheduleDisplay}.ts': {
+          statements: 80,
+          branches: 60,
+          functions: 75,
+          lines: 85,
+        },
+        'src/stores/appStore.ts': {
+          statements: 30,
+          branches: 18,
+          functions: 28,
+          lines: 34,
+        },
+      },
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

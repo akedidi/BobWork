@@ -1,0 +1,36 @@
+---
+description: Barre qualité plugins Bob Work (niveau ChatGPT Work) et explication des choix à la création
+globs: apps/macos/**/*.{rs,py,tsx,ts,json}
+alwaysApply: false
+---
+
+# Plugins Bob Work — barre qualité
+
+Quand tu crées ou refactors un **plugin** (pas un skill seul), vise le niveau **ChatGPT Work**.
+
+## Minimum Work-level
+
+1. **Mode produit** : `specializedMode` (label, outils, workflow).
+2. **Surface exécutable** : CLI / MCP local / MCP distant.
+3. **Exploration des intégrations** : OAuth, MCP, API publique, API+clé, web search, LLM Bob, Computer Use/Chrome — retenir selon le workflow.
+4. **`description`** = bénéfice utilisateur (1–2 phrases). **`resources`** + **`connectorStrategy`** listent les intégrations (y compris optionnelles) — pas la description.
+5. Permissions honnêtes ; zéro secret en clair.
+6. Explique tes choix (retenu vs écarté).
+
+## Familles à explorer
+
+| Kind | Exemples |
+|------|----------|
+| oauth | GitHub, Slack, Monday, Microsoft |
+| mcp / stdio-cli | Bundle local, MCP global Bob |
+| api-public / api-key | Stooq, Finnhub `${KEY}` |
+| web-search | Accès web Bob |
+| bob-llm | Synthèse / raisonnement chat |
+| computer-use / chrome | Bureau / navigateur |
+
+## Anti-patterns
+
+- Skill-only sans code/MCP
+- Faux « Connecté »
+- Description remplie de jargon MCP/CLI au lieu du bénéfice utilisateur
+- Intégrations seulement dans `description` et absentes de `resources`

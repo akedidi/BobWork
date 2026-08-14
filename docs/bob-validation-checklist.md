@@ -522,6 +522,22 @@ Based on findings, recommend:
 
 ---
 
+## Pre-release: real Bob Shell smoke
+
+WDIO e2e uses `fake-bob`. Before a release, also run a real Shell turn:
+
+```bash
+# Requires bob on PATH + BOB_API_KEY (or BOBSHELL_API_KEY)
+pnpm mac:smoke:bob
+# or: pnpm --filter macos run smoke:bob
+```
+
+CI: workflow `Smoke Bob Shell (real)` (`.github/workflows/smoke-bob-shell.yml`) on `workflow_dispatch` and `v*` tags. Needs repository secret `BOB_API_KEY`.
+
+Optional local skip (no key / no binary): `BOB_SMOKE_SKIP_IF_NO_KEY=1 pnpm mac:smoke:bob` (exit 2).
+
+---
+
 ## Next Steps
 
 After completing this checklist:
@@ -531,6 +547,7 @@ After completing this checklist:
 3. [ ] Adjust architecture if needed
 4. [ ] Get stakeholder approval
 5. [ ] Begin Phase 2: Architecture & Foundations
+6. [ ] Run `pnpm mac:smoke:bob` with a real API key before tagging
 
 ---
 

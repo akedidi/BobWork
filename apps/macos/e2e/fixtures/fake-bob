@@ -236,7 +236,7 @@ $stdin_prompt"
   fi
 
   if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_WORD_PLUGIN_E2E'; then
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-microsoft-word'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-microsoft-word|\$microsoft-word|@skill:bob-work-microsoft-word|@plugin:builtin-word'; then
       printf '%s\n' 'Le plugin Word intégré n’a pas été traduit en skill Bob.' >&2
       exit 6
     fi
@@ -267,7 +267,7 @@ $stdin_prompt"
       printf '%s\n' 'Le jeton GitHub de session n’a pas été injecté dans le processus Bob.' >&2
       exit 8
     fi
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-github'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-github|@skill:bob-work-github'; then
       printf '%s\n' 'Le skill GitHub intégré n’a pas été invoqué.' >&2
       exit 8
     fi
@@ -284,7 +284,7 @@ $stdin_prompt"
   fi
 
   if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_DOCUMENTS_PLUGIN_E2E'; then
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-documents'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-documents|\$documents|@skill:bob-work-documents|@plugin:builtin-documents'; then
       printf '%s\n' 'Le plugin Documents intégré n’a pas été traduit en skill Bob.' >&2
       exit 6
     fi
@@ -294,7 +294,7 @@ $stdin_prompt"
   fi
 
   if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_EXCEL_PLUGIN_E2E'; then
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-microsoft-excel'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-microsoft-excel|@skill:bob-work-microsoft-excel|@plugin:builtin-excel'; then
       printf '%s\n' 'Le plugin Excel intégré n’a pas été traduit en skill Bob.' >&2
       exit 6
     fi
@@ -304,7 +304,7 @@ $stdin_prompt"
   fi
 
   if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_POWERPOINT_PLUGIN_E2E'; then
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-microsoft-powerpoint'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-microsoft-powerpoint|@skill:bob-work-microsoft-powerpoint|@plugin:builtin-powerpoint'; then
       printf '%s\n' 'Le plugin PowerPoint intégré n’a pas été traduit en skill Bob.' >&2
       exit 6
     fi
@@ -314,7 +314,7 @@ $stdin_prompt"
   fi
 
   if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_ONENOTE_PLUGIN_E2E'; then
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-microsoft-onenote'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-microsoft-onenote|@skill:bob-work-microsoft-onenote|@plugin:builtin-onenote'; then
       printf '%s\n' 'Le plugin OneNote intégré n’a pas été traduit en skill Bob.' >&2
       exit 6
     fi
@@ -327,12 +327,28 @@ $stdin_prompt"
     exit 0
   fi
 
+  if printf '%s' "$prompt" | grep -q 'USE_BUILTIN_CTO_INVEST_PLUGIN_E2E'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-cto-invest|@skill:bob-work-cto-invest|@plugin:bob-work-cto-invest'; then
+      printf '%s\n' 'Le plugin CTO Investissements n’a pas été traduit en skill Bob.' >&2
+      exit 6
+    fi
+    ensure_skill_dir "$HOME/.bob/skills/bob-work-cto-invest"
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-10T09:20:00Z","role":"assistant","isReasoning":true,"content":"Chargement du plugin CTO Investissements et lecture des cotations publiques."}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-10T09:20:01Z","tool_name":"use_mcp_tool","tool_id":"cto-snap","parameters":{"server":"cto-market","tool":"cto_market_snapshot"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-10T09:20:02Z","tool_id":"cto-snap","status":"success","output":"ASML +2.4%, NVDA +3.1%, LVMH +1.2%"}'
+    printf '%s\n' '{"type":"tool_use","timestamp":"2026-08-10T09:20:03Z","tool_name":"use_mcp_tool","tool_id":"cto-screen","parameters":{"server":"cto-market","tool":"cto_screen_ideas"}}'
+    printf '%s\n' '{"type":"tool_result","timestamp":"2026-08-10T09:20:04Z","tool_id":"cto-screen","status":"success","output":"Ideas: ASML, NVDA, LVMH"}'
+    printf '%s\n' '{"type":"message","timestamp":"2026-08-10T09:20:05Z","role":"assistant","isReasoning":false,"content":"Plugin CTO Investissements utilisé : idées du moment ASML (+2,4 %), NVIDIA (+3,1 %) et LVMH (+1,2 %) pour un Compte-Titres — information générale uniquement, pas un conseil en investissement."}'
+    printf '%s\n' '{"type":"result","timestamp":"2026-08-10T09:20:06Z","status":"success","stats":{"task_id":"e2e-builtin-cto-invest","duration_ms":420,"tool_calls":2}}'
+    exit 0
+  fi
+
   if printf '%s' "$prompt" | grep -q 'SLACK_INTEGRATION_E2E'; then
     if [ "${SLACK_BOT_TOKEN:-}" != 'e2e-slack-token' ]; then
       printf '%s\n' 'Le jeton Slack n’a pas été injecté dans le processus Bob.' >&2
       exit 8
     fi
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-slack'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-slack|@skill:bob-work-slack'; then
       printf '%s\n' 'Le skill Slack intégré n’a pas été invoqué.' >&2
       exit 8
     fi
@@ -350,7 +366,7 @@ $stdin_prompt"
       printf '%s\n' 'Le jeton Monday.com n’a pas été injecté dans le processus Bob.' >&2
       exit 8
     fi
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-monday'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-monday|@skill:bob-work-monday'; then
       printf '%s\n' 'Le skill Monday intégré n’a pas été invoqué.' >&2
       exit 8
     fi
@@ -368,7 +384,7 @@ $stdin_prompt"
       printf '%s\n' 'Le jeton Microsoft Graph n’a pas été injecté dans le processus Bob.' >&2
       exit 8
     fi
-    if ! printf '%s' "$prompt" | grep -q '\$bob-work-outlook-mail'; then
+    if ! printf '%s' "$prompt" | grep -Eq '\$bob-work-outlook-mail|@skill:bob-work-outlook-mail'; then
       printf '%s\n' 'Le skill Outlook intégré n’a pas été invoqué.' >&2
       exit 8
     fi

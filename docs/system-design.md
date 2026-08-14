@@ -4,7 +4,7 @@
 **Date:** 2026-08-05  
 **Status:** Draft
 
-> **Décision d’implémentation 0.1.4 (9 août 2026)** — Le Trousseau a été retiré de l’architecture. Toute mention Keychain plus bas décrit une ancienne option non implémentée. Les secrets manuels restent uniquement dans la session mémoire.
+> **Décision d’implémentation 0.1.4+ (août 2026)** — Le Trousseau a été retiré de l’architecture. Toute mention Keychain plus bas décrit une ancienne option non implémentée. Les secrets manuels vivent dans le **coffre local chiffré** (persistants jusqu’à effacement) et sont injectés uniquement dans `bob run`.
 
 ---
 

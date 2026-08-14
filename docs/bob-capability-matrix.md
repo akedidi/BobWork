@@ -4,7 +4,7 @@
 **Date:** 2026-08-05  
 **Status:** Draft - Requires Validation with Actual Bob Installation
 
-> **Décision validée 0.1.4 (9 août 2026)** — Le stockage Keychain envisagé dans cette matrice n’est pas implémenté. Bob Work utilise exclusivement des secrets manuels de session non persistants.
+> **Décision validée 0.1.4+ (août 2026)** — Le stockage Keychain envisagé dans cette matrice n’est pas implémenté. Bob Work utilise un **coffre local AES-256-GCM** pour la clé Bob et les jetons manuels (persistants jusqu’à effacement). Voir `keychain-security.md`.
 
 ---
 

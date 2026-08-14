@@ -4,7 +4,11 @@
 **Date:** 2026-08-05  
 **Status:** Draft
 
-> **Décision d’implémentation 0.1.4 (9 août 2026)** — Bob Work n’utilise aucun stockage Keychain/Trousseau. Toute mention contraire dans ce document de conception initial est obsolète. La clé Bob et les jetons manuels sont limités à la session mémoire ; voir `keychain-security.md` et `limitations.md`.
+> **Décision d’implémentation 0.1.4+** — Bob Work n’utilise aucun Trousseau macOS. La clé Bob et les jetons d’intégration sont dans un **coffre local AES-256-GCM** (voir `keychain-security.md` et `limitations.md`). Toute mention Keychain / secrets « session-only » dans le corps historique de ce document est obsolète.
+>
+> **Préflight** — Le démarrage interactif de session (`bob run`) est autorisé par défaut. Les **planifications** passent par `needs_unattended_preflight` : coffre ou session SSO, plus un grant utilisateur « Toujours » si la politique est restrictive (`always_ask`, `ask_for_modifications`, ou `ask_for_important` à risque élevé). **`never_ask` ne déclenche pas ce préflight.**
+>
+> **Redaction runtime** — `secret_redaction` masque Bearer, jetons JSON, préfixes Slack/GitHub/`sk-` et PEM sur stdout/stderr **et** sur l’arbre JSON streamé vers l’UI.
 
 ---
 

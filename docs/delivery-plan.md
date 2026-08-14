@@ -4,7 +4,7 @@
 **Date:** 2026-08-05  
 **Status:** Draft
 
-> **Décision de livraison 0.1.4 (9 août 2026)** — Les tâches Keychain de ce plan initial sont annulées. Le produit livré ne possède ni dépendance, ni commande, ni entitlement de Trousseau ; les secrets manuels sont volatils.
+> **Décision de livraison 0.1.4+** — Pas de Trousseau macOS. Les secrets manuels vivent dans le **coffre local chiffré** (persistants jusqu’à effacement). Les planifications exigent un préflight unattended (coffre + grants) ; `bob run` interactif démarre sans ce préflight. Les phases « Pending » ci-dessous sont un plan historique : le MVP et l’infrastructure Developer ID/notarisation/updater sont livrés dans le dépôt ; une release publique exige encore les secrets Apple, la clé Tauri et le Client ID Entra du propriétaire.
 
 ---
 
@@ -648,15 +648,15 @@ bob-work/
 - Update system
 
 **Tasks**:
-- [ ] Configure Tauri bundler
-- [ ] Create app icon
+- [x] Configure Tauri bundler
+- [x] Create app icon
 - [ ] Create DMG background image
-- [ ] Build DMG
+- [x] Build DMG
 - [ ] Test installation on clean Mac
 - [ ] Write installation guide
 - [ ] Document signing process
-- [ ] Document notarization process
-- [ ] Set up update system (Tauri updater)
+- [x] Document notarization process
+- [x] Set up update system (Tauri updater)
 - [ ] Test update process
 - [ ] Create release notes
 

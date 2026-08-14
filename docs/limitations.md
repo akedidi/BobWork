@@ -46,8 +46,8 @@ Les permissions macOS — Microphone, Reconnaissance vocale, Notifications, Acce
 
 - L’accès Web est réalisé uniquement si le mode/outillage Bob sélectionné le permet. Le réglage désactivé ajoute une contrainte locale au contexte, mais cette version ne constitue pas un pare-feu réseau du processus Bob.
 - Le panneau droit peut conserver plusieurs onglets Web et ouvrir les sources sans quitter la conversation. Certains sites appliquent `X-Frame-Options` ou une politique CSP qui interdit leur affichage dans un cadre intégré ; le bouton d’ouverture dans le navigateur système reste alors disponible. Les onglets intégrés n’utilisent pas le profil ni les cookies de Chrome.
-- Computer Use et Chrome sont des points d’activation pour un skill ou serveur MCP compatible. Aucun moteur de contrôle propriétaire n’est embarqué. L’utilisateur doit installer/configurer ce fournisseur dans Extensions, puis accorder Accessibilité/Automation.
-- Le contrôle de Chrome dépend également d’un profil Chrome local actif et, selon le fournisseur, d’une extension navigateur.
+- Computer Use et Chrome sont des MCP first-party (`bob-work-computer-use`, `bob-work-chrome-control`) activés depuis Réglages → Accès et contrôle. Les actions UI passent par un pont AppleScript dans Bob Work (identité TCC = l’app, pas python3). Il n’y a pas de moteur vision/AX embarqué : pas de clic sur capture d’écran, pas d’arbre d’accessibilité natif, pas de CDP.
+- L’onboarding et la carte de statut listent les outils MCP (`tools/list`) et l’état Accessibilité / Automatisation. Un badge **Prêt** apparaît sur les plugins intégrés lorsque MCP + TCC sont accordés.
 
 ## Intégrations
 
@@ -59,7 +59,7 @@ Dans un plugin, une connexion `oauth` ou `mcp` doit référencer un serveur MCP 
 
 ## Voix, usage et imports
 
-- La dictée utilise l’API de reconnaissance disponible dans la WebView Apple. Sa disponibilité locale et les langues prises en charge dépendent de macOS ; le texte reste éditable avant envoi.
+- La langue de l’interface suit Réglages → Apparence : `auto` détecte le système (`fr` / `en` / `es`), sinon repli sur l’anglais. Un choix explicite force la langue.
 - Bob Shell 2 n’expose pas de commande headless stable pour le quota mensuel. La limite restante affiche donc « non communiquée » plutôt qu’un chiffre inventé. Les événements d’usage d’une exécution sont conservés lorsqu’ils existent.
 - Les imports Bob Work, ChatGPT et Claude/Cowork sont tolérants et versionnés. Un changement de format fournisseur peut laisser certains champs non reconnus ; le contenu importable est conservé sans exécuter de code issu de l’archive.
 
@@ -71,6 +71,6 @@ Dans un plugin, une connexion `oauth` ou `mcp` doit référencer un serveur MCP 
 
 ## Distribution
 
-Le bundle est signé **ad hoc** pour Apple Silicon. Il n’est pas signé avec un certificat Apple Developer ID et n’est pas notarisé : Gatekeeper peut demander une validation dans Confidentialité et sécurité au premier lancement. Bob Work ne demande aucun accès au Trousseau. Une distribution publique reste néanmoins censée utiliser un certificat **Developer ID Application** et la notarisation Apple.
+Les builds locaux sont signés **ad hoc** : Gatekeeper peut demander une validation dans Confidentialité et sécurité au premier lancement. Les releases GitHub passent par le workflow `release.yml`, qui exige un certificat **Developer ID Application**, notarie chez Apple et publie les artefacts de mise à jour signés. Sans les secrets Apple et Tauri documentés dans `docs/release-macos.md`, le workflow s’arrête avant le build au lieu de publier un binaire non signé. Bob Work ne demande aucun accès au Trousseau.
 
 Le DMG livré est `aarch64`; un DMG universel Intel + Apple Silicon nécessite une compilation additionnelle de la cible x86_64 et une validation sur Mac Intel.

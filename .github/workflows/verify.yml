@@ -1,0 +1,178 @@
+name: Verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit JavaScript dependencies
+        run: pnpm security:audit:js
+
+      - name: Audit Rust dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: apps/macos/src-tauri
+
+  verify:
+    name: Typecheck · Unit tests · Release build (no e2e)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/macos/src-tauri -> target
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck + Vitest coverage + Vite build
+        run: pnpm --filter macos run verify
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bob-work-coverage-${{ github.run_id }}
+          path: apps/macos/coverage/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Rust unit tests (default features, no e2e)
+        run: cargo test --manifest-path apps/macos/src-tauri/Cargo.toml --locked -- --test-threads=1
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Assert release build does not enable e2e feature
+        run: |
+          set -euo pipefail
+          # Default `tauri build` / `cargo build --release` must not pass --features e2e.
+          if rg -n --glob '!**/e2e/**' --glob '!**/*.md' 'build:tauri.*--features e2e|cargo build --release.*--features e2e' apps/macos package.json apps/macos/package.json; then
+            echo "Release scripts must not enable the e2e feature" >&2
+            exit 1
+          fi
+          cargo metadata --manifest-path apps/macos/src-tauri/Cargo.toml --format-version 1 --no-deps >/dev/null
+          if cargo tree --manifest-path apps/macos/src-tauri/Cargo.toml --edges normal | rg 'tauri-plugin-wdio'; then
+            echo "WebDriver dependency leaked into the production dependency graph" >&2
+            exit 1
+          fi
+          echo "OK: release path stays on default features (e2e is opt-in for WDIO only)."
+
+      - name: Compile release library without e2e
+        run: cargo build --release --manifest-path apps/macos/src-tauri/Cargo.toml --locked
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Ensure e2e-only symbols are absent from release binary
+        run: |
+          set -euo pipefail
+          BIN="apps/macos/src-tauri/target/release/bob-work"
+          if [[ ! -f "$BIN" ]]; then
+            BIN="$(find apps/macos/src-tauri/target/release -maxdepth 1 -type f -perm +111 | head -1)"
+          fi
+          if [[ -z "${BIN}" || ! -f "${BIN}" ]]; then
+            echo "Release binary not found; skipping symbol check (library-only build)."
+            exit 0
+          fi
+          if nm -gU "$BIN" 2>/dev/null | rg -i 'e2e_seed_oauth|e2e_connect_integration|wdio'; then
+            echo "e2e/wdio symbols found in release binary" >&2
+            exit 1
+          fi
+          echo "OK: no e2e IPC symbols in release binary ($BIN)"
+
+  e2e-macos:
+    name: End-to-end macOS
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache E2E Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/macos/src-tauri -> target/e2e
+          shared-key: bob-work-e2e
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run packaged-app E2E suite
+        run: pnpm --filter macos run test:e2e
+
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bob-work-e2e-${{ github.run_id }}
+          path: |
+            apps/macos/e2e/artifacts/**
+            /tmp/bob-work-e2e/**
+          if-no-files-found: warn
+          retention-days: 14
