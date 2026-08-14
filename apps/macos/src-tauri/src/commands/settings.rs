@@ -21,26 +21,30 @@ pub async fn update_settings(
     bob: State<'_, BobService>,
 ) -> Result<(), AppError> {
     let previous = SettingsService::new().get(&db)?;
-    let autostart = app_handle.autolaunch();
-    let result = if settings.launch_at_login {
-        autostart.enable()
-    } else {
-        autostart.disable()
-    };
-    result.map_err(|error| {
-        AppError::Io(format!(
-            "Impossible de modifier le lancement automatique : {}",
-            error
-        ))
-    })?;
-    if let Some(tray) = app_handle.tray_by_id("main") {
-        tray.set_visible(settings.menu_bar_enabled)
-            .map_err(|error| {
-                AppError::Io(format!(
-                    "Impossible de modifier l’icône de barre des menus : {}",
-                    error
-                ))
-            })?;
+    if previous.launch_at_login != settings.launch_at_login {
+        let autostart = app_handle.autolaunch();
+        let result = if settings.launch_at_login {
+            autostart.enable()
+        } else {
+            autostart.disable()
+        };
+        result.map_err(|error| {
+            AppError::Io(format!(
+                "Impossible de modifier le lancement automatique : {}",
+                error
+            ))
+        })?;
+    }
+    if previous.menu_bar_enabled != settings.menu_bar_enabled {
+        if let Some(tray) = app_handle.tray_by_id("main") {
+            tray.set_visible(settings.menu_bar_enabled)
+                .map_err(|error| {
+                    AppError::Io(format!(
+                        "Impossible de modifier l’icône de barre des menus : {}",
+                        error
+                    ))
+                })?;
+        }
     }
     SettingsService::new().update_all(&db, &settings)?;
     if previous.chrome_control_enabled != settings.chrome_control_enabled {

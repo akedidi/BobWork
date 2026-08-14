@@ -642,6 +642,22 @@ export default function ChatView() {
     setThinkingText(FALLBACK_THINKING)
     const { text, mode, attachmentPaths, projectId, resumeTaskId } = prompt
 
+    // Render the user's intent immediately. Conversation creation can involve
+    // the local database/keychain and must not leave a clicked suggestion or
+    // builder action looking as if nothing happened.
+    const userMsg: Msg = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: text,
+      ts: new Date().toISOString(),
+      state: 'sent',
+      persisted: false,
+      attachments: attachmentPaths.map((path, index) => ({ id: `attachment-${index}`, name: path.split('/').pop() || path, size: 0, type: 'file', path })),
+    }
+    setMsgs(prev => [...prev, userMsg])
+    setActivities([])
+    setTaskDetail(null)
+
     // Ensure we have a conversation
     let cid = convId
     if (!cid) {
@@ -668,20 +684,6 @@ export default function ChatView() {
         setConvId(cid)
       }
     }
-
-    // Optimistic user message
-    const userMsg: Msg = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: text,
-      ts: new Date().toISOString(),
-      state: 'sent',
-      persisted: false,
-      attachments: attachmentPaths.map((path, index) => ({ id: `attachment-${index}`, name: path.split('/').pop() || path, size: 0, type: 'file', path })),
-    }
-    setMsgs(prev => [...prev, userMsg])
-    setActivities([])
-    setTaskDetail(null)
 
     const mentionedPluginIds = Array.from(text.matchAll(/@plugin:([A-Za-z0-9-]+)/g), match => match[1])
     const approvedPluginIds: string[] = []

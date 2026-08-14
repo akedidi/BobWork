@@ -95,10 +95,6 @@ describe('Bob Work — modes Bob Shell', () => {
     await openSettingsTab('Modes')
     await waitForModesLoaded()
     await $('button=+ Créer avec Bob').click()
-    // The mode helper pre-fills a new chat so the user can refine the request
-    // before sending it; it no longer submits a message automatically.
-    const composer = $('textarea[placeholder="Sur quoi travailler ?"]')
-    await composer.waitForDisplayed({ timeout: 8_000 })
-    await expect(composer).toHaveValue(expect.stringContaining('mode Bob Shell personnalisé'))
+    await expect($('div.msg-user*=mode Bob Shell personnalisé')).toBeDisplayed({ wait: 10_000 })
   })
 })
