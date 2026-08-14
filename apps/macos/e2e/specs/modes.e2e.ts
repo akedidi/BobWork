@@ -17,6 +17,16 @@ const IMPORT_YAML = [
   '  - read',
 ].join('\n')
 
+async function waitForModesLoaded() {
+  await $('h1=Modes').waitForDisplayed({ timeout: 10_000 })
+  const loader = $('.settings-section-loader')
+  if (await loader.isExisting()) {
+    await loader.waitForExist({ reverse: true, timeout: 15_000 })
+  }
+  await $('h3=Installés').waitForDisplayed({ timeout: 10_000 })
+  await $('h3=Catalogue').waitForDisplayed({ timeout: 10_000 })
+}
+
 describe('Bob Work — modes Bob Shell', () => {
   before(async () => {
     await ensureHomeReady()
@@ -24,7 +34,7 @@ describe('Bob Work — modes Bob Shell', () => {
 
   it('liste les modes installés et le catalogue local', async () => {
     await openSettingsTab('Modes')
-    await expect($('h1=Modes')).toBeDisplayed({ wait: 8_000 })
+    await waitForModesLoaded()
     await expectNoLoadErrorBanner()
     await expect($('h3=Installés')).toBeDisplayed()
     await expect($('h3=Catalogue')).toBeDisplayed()
@@ -37,6 +47,7 @@ describe('Bob Work — modes Bob Shell', () => {
 
   it('filtre le catalogue puis installe un mode d’exemple', async () => {
     await openSettingsTab('Modes')
+    await waitForModesLoaded()
     const search = $('input[aria-label="Rechercher un mode…"]')
     await search.setValue('Shell Debugger')
     await expect($('strong=Shell Debugger')).toBeDisplayed()
@@ -47,7 +58,6 @@ describe('Bob Work — modes Bob Shell', () => {
     await card.waitForDisplayed({ timeout: 8_000 })
     if (await card.$('button=Télécharger').isExisting()) {
       await card.$('button=Télécharger').click()
-      await expect($('div.settings-status*=installé')).toBeDisplayed({ wait: 8_000 })
     }
     const installed = $('//div[contains(@class, "mode-card")][contains(., "Shell Debugger")]')
     await expect(installed.$('button=Retirer')).toBeDisplayed({ wait: 8_000 })
@@ -55,6 +65,7 @@ describe('Bob Work — modes Bob Shell', () => {
 
   it('importe un mode YAML personnalisé', async () => {
     await openSettingsTab('Modes')
+    await waitForModesLoaded()
     if (await $('strong=Revue E2E').isExisting()) {
       await expect($('strong=Revue E2E')).toBeDisplayed()
       return
@@ -63,8 +74,7 @@ describe('Bob Work — modes Bob Shell', () => {
     await expect($('h2=Importer un mode YAML')).toBeDisplayed()
     await $('textarea[aria-label="YAML du mode"]').setValue(IMPORT_YAML)
     await $('button=Installer').click()
-    await expect($('div.settings-status*=Revue E2E')).toBeDisplayed({ wait: 8_000 })
-    await expect($('strong=Revue E2E')).toBeDisplayed()
+    await expect($('strong=Revue E2E')).toBeDisplayed({ wait: 10_000 })
   })
 
   it('propose le mode importé dans le sélecteur du composeur', async () => {
@@ -83,6 +93,7 @@ describe('Bob Work — modes Bob Shell', () => {
 
   it('ouvre le chat pour créer un mode avec Bob', async () => {
     await openSettingsTab('Modes')
+    await waitForModesLoaded()
     await $('button=+ Créer avec Bob').click()
     // The mode helper pre-fills a new chat so the user can refine the request
     // before sending it; it no longer submits a message automatically.

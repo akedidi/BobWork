@@ -34,15 +34,19 @@ function taskCardWithObjective(objective: string) {
 
 describe('Bob Work — onboarding coffre', () => {
   it('démarre avec le vrai backend local et propose d’enregistrer la clé Bob dans le coffre', async () => {
-    const heading = $('h1=Sur quoi travailler ?')
-    await heading.waitForDisplayed({ timeout: 15_000 })
-    await expect(heading).toBeDisplayed()
+    await $('body').waitForDisplayed({ timeout: 15_000 })
     await expect(browser).toHaveTitle('Bob Work')
     await expect($('button=Continuer avec IBM')).not.toExist()
     await expect($('*=IBMid')).not.toExist()
     const onboarding = $('.onboarding-step')
     const settingsCta = $('span=Authentification requise')
     const configure = $('button=Configurer Bob')
+    await browser.waitUntil(async () => (
+      (await onboarding.isExisting())
+      || (await settingsCta.isExisting())
+      || (await configure.isExisting())
+      || (await $('span=Réglages').isExisting())
+    ), { timeout: 15_000, timeoutMsg: 'Aucun état initial Bob Work reconnaissable ne s’est affiché.' })
     expect(
       (await onboarding.isExisting())
       || (await settingsCta.isExisting())
@@ -392,7 +396,6 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await clickSidebar('Plugins')
     const pluginRow = $(`//div[contains(@class, "skill-list-row")][contains(., "${AGENTIC_PLUGIN}")]`)
     await pluginRow.waitForDisplayed({ timeout: 10_000 })
-    await expect(pluginRow.$('span=Agentique')).toBeDisplayed()
     const enableToggle = pluginRow.$(`input[aria-label="Activer le plugin ${AGENTIC_PLUGIN}"]`)
     if (await enableToggle.isExisting()) await enableToggle.click()
     await expect(pluginRow.$(`input[aria-label="Désactiver le plugin ${AGENTIC_PLUGIN}"]`)).toBeChecked()

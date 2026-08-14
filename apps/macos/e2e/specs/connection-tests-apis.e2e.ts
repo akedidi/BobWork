@@ -7,6 +7,7 @@ import {
   ensureHomeReady,
   expectConnectionTestBadge,
   invokeTauri,
+  openIntegrationsCategory,
   registerMcpServer,
   selectValue,
 } from '../helpers'
@@ -120,9 +121,7 @@ describe('Bob Work — tests de connexion (APIs, MCP, intégrations)', () => {
 
   it('teste la connexion MCP derrière une intégration OAuth connectée', async () => {
     await connectIntegrationOAuth('github', 'e2e-github-token', 'e2e-user')
-    await clickSidebar('Intégrations et MCP')
-    await $('button=Intégrations').click()
-    await $('button=Dev & collab').click()
+    await openIntegrationsCategory('Dev & collab')
     const githubCard = $('//div[.//div[normalize-space()="GitHub"]]')
     await expect(githubCard.$('.status-dot.green')).toBeDisplayed({ wait: 8_000 })
     await expectConnectionTestBadge(githubCard, 'Non testé')

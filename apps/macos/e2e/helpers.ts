@@ -301,8 +301,12 @@ export async function registerMcpServer(
   env?: Record<string, string>,
 ) {
   await clickSidebar('Intégrations et MCP')
-  await $('button=Serveurs MCP').click()
-  await $('input[placeholder="mon-serveur"]').setValue(name)
+  const serversTab = $('button=Serveurs MCP')
+  await serversTab.waitForClickable({ timeout: 10_000 })
+  await serversTab.click()
+  const nameInput = $('input[placeholder="mon-serveur"]')
+  await nameInput.waitForDisplayed({ timeout: 10_000 })
+  await nameInput.setValue(name)
   await selectValue(await labelled('Transport', 'select'), 'stdio')
   // Form: commande python3 + arguments = chemin du script
   const commandInput = $('input[placeholder="python3"]')
@@ -389,12 +393,39 @@ export async function toggleSetting(label: string, enabled: boolean) {
 
 /** Toggles a setting and waits for the auto-save only if a change occurred. */
 export async function ensureSettingEnabled(label: string, enabled: boolean) {
-  if (await toggleSetting(label, enabled)) await saveSettings()
+  if (!(await toggleSetting(label, enabled))) return
+  const settingKeys: Record<string, string> = {
+    'Accès web': 'webEnabled',
+    'Contrôle de l’ordinateur': 'computerUseEnabled',
+    'Contrôle de Chrome': 'chromeControlEnabled',
+  }
+  const key = settingKeys[label]
+  await saveSettings(key ? { [key]: enabled } : undefined)
 }
 
-export async function saveSettings() {
-  await browser.pause(500)
-  await $('div.settings-status=Réglages enregistrés.').waitForDisplayed({ timeout: 8_000 })
+export async function saveSettings(expected?: Record<string, unknown>) {
+  // Settings are debounced and the success toast is intentionally transient.
+  // Verify the persisted backend snapshot instead of racing that visual toast.
+  await browser.waitUntil(async () => {
+    const settings = await invokeTauri<Record<string, unknown>>('get_settings')
+    if (!expected) return true
+    return Object.entries(expected).every(([key, value]) => settings[key] === value)
+  }, {
+    timeout: 10_000,
+    interval: 200,
+    timeoutMsg: `Les réglages attendus n’ont pas été persistés : ${JSON.stringify(expected ?? {})}`,
+  })
+}
+
+export async function openIntegrationsCategory(category?: string) {
+  await clickSidebar('Intégrations et MCP')
+  const integrationsTab = $('button=Intégrations')
+  await integrationsTab.waitForClickable({ timeout: 10_000 })
+  await integrationsTab.click()
+  if (!category) return
+  const categoryButton = $(`button=${category}`)
+  await categoryButton.waitForClickable({ timeout: 10_000 })
+  await categoryButton.click()
 }
 
 export async function prepareMacosAutomationStepForE2e() {

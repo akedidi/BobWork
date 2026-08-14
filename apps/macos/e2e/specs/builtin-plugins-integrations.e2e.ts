@@ -6,6 +6,7 @@ import {
   connectIntegrationOAuth,
   ensureHomeReady,
   invokeTauri,
+  openIntegrationsCategory,
   openHomeChatComposer,
   pickBuiltinPlugin,
   registerMcpServer,
@@ -163,9 +164,7 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
   it('simule une connexion Microsoft OAuth et exécute Outlook via Graph', async () => {
     await seedOAuthProvider('microsoft', 'e2e-microsoft-token', 'e2e@contoso.com')
     await connectIntegrationOAuth('outlook-mail', 'e2e-microsoft-token', 'e2e@contoso.com')
-    await clickSidebar('Intégrations et MCP')
-    await $('button=Intégrations').click()
-    await $('button=Microsoft 365').click()
+    await openIntegrationsCategory('Microsoft 365')
     const outlookCard = $('//div[.//div[normalize-space()="Outlook"]]')
     await expect(outlookCard.$('.status-dot.green')).toBeDisplayed({ wait: 8_000 })
 

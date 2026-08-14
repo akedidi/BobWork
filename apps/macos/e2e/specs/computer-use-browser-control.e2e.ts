@@ -58,7 +58,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   it('bloque la capacité browser (Accès web) quand le réglage est désactivé', async () => {
     await openSettingsTab('Accès et contrôle')
     await toggleSetting('Accès web', false)
-    await saveSettings()
+    await saveSettings({ webEnabled: false })
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',
@@ -73,7 +73,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
     await openSettingsTab('Accès et contrôle')
     await toggleSetting('Accès web', true)
     await toggleSetting('Contrôle de Chrome', false)
-    await saveSettings()
+    await saveSettings({ webEnabled: true, chromeControlEnabled: false })
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',
@@ -87,7 +87,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
     await openSettingsTab('Accès et contrôle')
     await toggleSetting('Accès web', true)
     await toggleSetting('Contrôle de Chrome', true)
-    await saveSettings()
+    await saveSettings({ webEnabled: true, chromeControlEnabled: true })
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',

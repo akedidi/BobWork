@@ -4,6 +4,7 @@ import {
   ensureHomeReady,
   expectNoLoadErrorBanner,
   invokeTauri,
+  openIntegrationsCategory,
 } from '../helpers'
 
 describe('Bob Work — états OAuth honnêtes (configuré / connecté / Entra)', () => {
@@ -12,10 +13,8 @@ describe('Bob Work — états OAuth honnêtes (configuré / connecté / Entra)',
   })
 
   it('affiche la bannière Entra tant que Microsoft n’a pas de client', async () => {
-    await clickSidebar('Intégrations et MCP')
-    await $('button=Intégrations').click()
+    await openIntegrationsCategory('Microsoft 365')
     await expectNoLoadErrorBanner()
-    await $('button=Microsoft 365').click()
     const outlook = $('//div[@data-provider="outlook-mail"]')
     await outlook.waitForDisplayed({ timeout: 8_000 })
     if (await outlook.$('.status-dot.green').isExisting()) {
@@ -38,9 +37,7 @@ describe('Bob Work — états OAuth honnêtes (configuré / connecté / Entra)',
       clientId: '00000000-0000-4000-8000-000000000001',
     })
     await clickSidebar('Nouveau chat')
-    await clickSidebar('Intégrations et MCP')
-    await $('button=Intégrations').click()
-    await $('button=Microsoft 365').click()
+    await openIntegrationsCategory('Microsoft 365')
 
     const outlook = $('//div[@data-provider="outlook-mail"]')
     await expect(outlook.$('span=Configuré')).toBeDisplayed({ wait: 8_000 })
@@ -50,9 +47,7 @@ describe('Bob Work — états OAuth honnêtes (configuré / connecté / Entra)',
   })
 
   it('distingue GitHub connecté vs non connecté selon l’authentification réelle', async () => {
-    await clickSidebar('Intégrations et MCP')
-    await $('button=Intégrations').click()
-    await $('button=Dev & collab').click()
+    await openIntegrationsCategory('Dev & collab')
     const github = $('//div[@data-provider="github"]')
     await github.waitForDisplayed({ timeout: 8_000 })
     if (await github.$('button=Déconnecter').isExisting()) {
