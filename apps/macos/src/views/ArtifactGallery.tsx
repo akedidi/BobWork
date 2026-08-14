@@ -1,11 +1,22 @@
 // ============================================================
 // Bob Work – Artifact Gallery View
-// Browse, preview, open and delete generated artifacts
+// Browse, preview (right panel), reveal in Finder, delete
 // ============================================================
 
-import { useEffect, useState } from 'react'
-import { getArtifacts, deleteArtifact, openArtifact, generateArtifact } from '../lib/ipc'
+import { useEffect, useMemo, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
+import {
+  getArtifacts,
+  deleteArtifact,
+  generateArtifact,
+  getConversations,
+} from '../lib/ipc'
+import { LoadErrorBanner } from '../components/LoadErrorBanner'
+import WorkspacePanel, { type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
+import { errorMessage } from '../lib/errorMessage'
 import type { Artifact } from '@bob-work/shared-types'
+import { useT } from '../i18n'
+import { ModalOverlay, ModalPanel } from '../components/ModalOverlay'
 
 const TYPE_ICON: Record<string, string> = {
   pptx: '📊', docx: '📄', xlsx: '📈', pdf: '📕',
@@ -16,6 +27,9 @@ const TYPE_LABEL: Record<string, string> = {
   markdown: 'Markdown', text: 'Texte', html: 'Page HTML',
 }
 
+type SortKey = 'date' | 'name' | 'size'
+type SortDir = 'asc' | 'desc'
+
 function fmt(bytes: number | null | undefined) {
   if (!bytes) return '—'
   if (bytes < 1024) return `${bytes} o`
@@ -24,7 +38,7 @@ function fmt(bytes: number | null | undefined) {
 }
 
 function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString('fr-FR', {
+  return new Date(iso).toLocaleDateString(document.documentElement.lang || 'en', {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   })
@@ -47,18 +61,15 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
       await generateArtifact({ artifactType: type, title: title.trim(), content })
       onDone()
     } catch (e) {
-      setError(String(e))
+      setError(errorMessage(e, 'Génération impossible.'))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.45)', zIndex: 200,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div style={{
+    <ModalOverlay onClose={onClose} closeOnBackdrop={!loading}>
+      <ModalPanel style={{
         background: 'var(--bg-base)', borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)', padding: 28, width: 520, maxWidth: '90vw',
       }}>
@@ -126,85 +137,216 @@ function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             {loading ? 'Génération…' : 'Générer'}
           </button>
         </div>
-      </div>
-    </div>
+      </ModalPanel>
+    </ModalOverlay>
   )
 }
 
 // ── Main view ─────────────────────────────────────────────────
 
 export default function ArtifactGallery() {
+  const t = useT()
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [conversationTitles, setConversationTitles] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [actionError, setActionError] = useState<unknown>(null)
   const [filter, setFilter] = useState('all')
+  const [sortKey, setSortKey] = useState<SortKey>('date')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [showModal, setShowModal] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<Artifact | null>(null)
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [previewRequest, setPreviewRequest] = useState<PreviewRequest | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const loadArtifacts = async () => {
+    setLoadError(null)
     try {
-      const list = await getArtifacts()
+      const [list, conversations] = await Promise.all([
+        getArtifacts(),
+        getConversations().catch(() => []),
+      ])
       setArtifacts(list)
-    } catch { /* ignore */ }
-    setLoading(false)
+      const titles: Record<string, string> = {}
+      for (const conv of conversations) {
+        titles[conv.id] = conv.title
+      }
+      setConversationTitles(titles)
+    } catch (error) {
+      setLoadError(error)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { loadArtifacts() }, [])
+  useEffect(() => { void loadArtifacts() }, [])
 
-  const handleOpen = async (artifact: Artifact) => {
-    try { await openArtifact(artifact.id) } catch { /* ignore */ }
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen('artifacts-updated', () => {
+      if (!disposed) void loadArtifacts()
+    }).then(fn => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  const handlePreview = (artifact: Artifact) => {
+    setSelectedId(artifact.id)
+    setPanelOpen(true)
+    setPreviewRequest({
+      id: `${artifact.id}-${Date.now()}`,
+      target: artifact.filePath,
+      title: artifact.title,
+      kind: 'file',
+    })
   }
 
-  const handleDelete = async (artifact: Artifact) => {
-    if (!confirm(`Supprimer « ${artifact.title} » ? Cette action est irréversible.`)) return
+  const requestDelete = (artifact: Artifact) => {
+    setPendingDelete(artifact)
+  }
+
+  const confirmDelete = async () => {
+    const artifact = pendingDelete
+    if (!artifact) return
+    setPendingDelete(null)
     setDeleting(artifact.id)
+    setActionError(null)
     try {
       await deleteArtifact(artifact.id)
       setArtifacts(prev => prev.filter(a => a.id !== artifact.id))
-    } catch { /* ignore */ } finally {
+      if (selectedId === artifact.id) {
+        setSelectedId(null)
+        setPanelOpen(false)
+        setPreviewRequest(null)
+      }
+    } catch (error) {
+      setActionError(error)
+    } finally {
       setDeleting(null)
     }
   }
 
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir(key === 'name' ? 'asc' : 'desc')
+    }
+  }
+
   const types = ['all', ...Array.from(new Set(artifacts.map(a => a.artifactType)))]
-  const visible = filter === 'all' ? artifacts : artifacts.filter(a => a.artifactType === filter)
+  const visible = useMemo(() => {
+    const filtered = filter === 'all' ? [...artifacts] : artifacts.filter(a => a.artifactType === filter)
+    const dir = sortDir === 'asc' ? 1 : -1
+    filtered.sort((a, b) => {
+      if (sortKey === 'name') {
+        return a.title.localeCompare(b.title, 'fr', { sensitivity: 'base' }) * dir
+      }
+      if (sortKey === 'size') {
+        return ((a.size ?? 0) - (b.size ?? 0)) * dir
+      }
+      return (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) * dir
+    })
+    return filtered
+  }, [artifacts, filter, sortKey, sortDir])
+
+  const sortLabel = (key: SortKey, label: string) => {
+    if (sortKey !== key) return label
+    return `${label} ${sortDir === 'asc' ? '↑' : '↓'}`
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       {/* Topbar */}
-      <div className="topbar titlebar-drag" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span className="titlebar-no-drag" style={{ fontWeight: 600, fontSize: 14 }}>Artefacts</span>
+      <div className="topbar titlebar-drag" data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{t('artifacts.title')}</span>
         <button
           onClick={() => setShowModal(true)}
           className="btn-primary titlebar-no-drag"
           style={{ fontSize: 12, padding: '5px 14px' }}
         >
-          + Générer
+          {t('artifacts.generate')}
         </button>
       </div>
 
-      {/* Filter pills */}
-      <div style={{ padding: '0 20px 12px', display: 'flex', gap: 6, flexWrap: 'wrap', flexShrink: 0 }}>
-        {types.map(t => (
-          <button key={t} onClick={() => setFilter(t)} style={{
+      {/* Filters + sort */}
+      <div style={{
+        padding: '0 20px 12px',
+        display: 'flex',
+        gap: 6,
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        flexShrink: 0,
+        paddingRight: panelOpen ? 'min(540px, 48vw)' : 20,
+        transition: 'padding-right 320ms cubic-bezier(0.22, 1, 0.36, 1)',
+      }}>
+        {types.map(typeKey => (
+          <button key={typeKey} onClick={() => setFilter(typeKey)} style={{
             padding: '4px 12px', borderRadius: 99, fontSize: 12, fontWeight: 500, cursor: 'pointer',
             border: '1px solid var(--border)',
-            background: filter === t ? 'var(--accent)' : 'var(--bg-surface)',
-            color: filter === t ? '#fff' : 'var(--text-secondary)',
+            background: filter === typeKey ? 'var(--accent)' : 'var(--bg-surface)',
+            color: filter === typeKey ? '#fff' : 'var(--text-secondary)',
           }}>
-            {t === 'all' ? 'Tous' : `${TYPE_ICON[t] ?? ''} ${TYPE_LABEL[t] ?? t}`}
+            {typeKey === 'all' ? 'Tous' : `${TYPE_ICON[typeKey] ?? ''} ${TYPE_LABEL[typeKey] ?? typeKey}`}
           </button>
         ))}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+          {([
+            ['date', 'Date'],
+            ['name', 'Nom'],
+            ['size', 'Taille'],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => toggleSort(key)}
+              style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                border: '1px solid var(--border)',
+                background: sortKey === key ? 'var(--bg-hover)' : 'transparent',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {sortLabel(key, label)}
+            </button>
+          ))}
+        </span>
       </div>
 
+      <LoadErrorBanner
+        error={loadError}
+        onRetry={() => { setLoading(true); void loadArtifacts() }}
+        fallback={t('artifacts.loadFailed')}
+      />
+      <LoadErrorBanner
+        error={actionError}
+        fallback={t('artifacts.actionFailed')}
+      />
+
       {/* Grid */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 20px 24px' }}>
-        {loading ? (
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        padding: '0 20px 24px',
+        paddingRight: panelOpen ? 'min(540px, 48vw)' : 20,
+        transition: 'padding-right 320ms cubic-bezier(0.22, 1, 0.36, 1)',
+      }}>
+        {loading && !loadError ? (
           <EmptyMsg icon="⏳" text="Chargement…" />
-        ) : visible.length === 0 ? (
+        ) : loadError ? null : visible.length === 0 ? (
           <EmptyMsg
             icon="📁"
-            text="Aucun artefact"
-            sub='Cliquez sur "Générer" pour créer votre premier document.'
+            text={t('artifacts.empty')}
+            sub={t('artifacts.emptyHint')}
           />
         ) : (
           <div style={{
@@ -216,8 +358,10 @@ export default function ArtifactGallery() {
               <ArtifactCard
                 key={artifact.id}
                 artifact={artifact}
-                onOpen={() => handleOpen(artifact)}
-                onDelete={() => handleDelete(artifact)}
+                conversationTitle={artifact.origin ? conversationTitles[artifact.origin] : undefined}
+                selected={selectedId === artifact.id}
+                onOpen={() => handlePreview(artifact)}
+                onDelete={() => requestDelete(artifact)}
                 deleting={deleting === artifact.id}
               />
             ))}
@@ -225,50 +369,118 @@ export default function ArtifactGallery() {
         )}
       </div>
 
+      {panelOpen && (
+        <WorkspacePanel
+          detail={null}
+          live={[]}
+          running={false}
+          variant="preview"
+          request={previewRequest}
+          onClose={() => {
+            setPanelOpen(false)
+            setSelectedId(null)
+          }}
+        />
+      )}
+
       {showModal && (
         <GenerateModal
           onClose={() => setShowModal(false)}
-          onDone={() => { setShowModal(false); loadArtifacts() }}
+          onDone={() => { setShowModal(false); void loadArtifacts() }}
+        />
+      )}
+
+      {pendingDelete && (
+        <DeleteConfirmModal
+          title={pendingDelete.title}
+          busy={deleting === pendingDelete.id}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => void confirmDelete()}
         />
       )}
     </div>
   )
 }
 
+// ── Delete confirmation ───────────────────────────────────────
+
+function DeleteConfirmModal({
+  title, busy, onCancel, onConfirm,
+}: {
+  title: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <ModalOverlay onClose={onCancel} closeOnBackdrop={!busy} zIndex={220}>
+      <ModalPanel
+        role="alertdialog"
+        aria-labelledby="artifact-delete-title"
+        aria-describedby="artifact-delete-desc"
+        style={{
+          background: 'var(--bg-base)', borderRadius: 'var(--radius-lg)',
+          border: '1px solid var(--border)', padding: 24, width: 420, maxWidth: '90vw',
+          boxShadow: 'var(--shadow-lg)',
+        }}
+      >
+        <div id="artifact-delete-title" style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>
+          Supprimer l’artefact ?
+        </div>
+        <p id="artifact-delete-desc" style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          « {title} » sera définitivement retiré. Cette action est irréversible.
+        </p>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+          <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
+            Annuler
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onConfirm}
+            disabled={busy}
+            style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}
+          >
+            {busy ? 'Suppression…' : 'Supprimer'}
+          </button>
+        </div>
+      </ModalPanel>
+    </ModalOverlay>
+  )
+}
+
 // ── Artifact card ─────────────────────────────────────────────
 
 function ArtifactCard({
-  artifact, onOpen, onDelete, deleting,
+  artifact, conversationTitle, selected, onOpen, onDelete, deleting,
 }: {
   artifact: Artifact
+  conversationTitle?: string
+  selected: boolean
   onOpen: () => void
   onDelete: () => void
   deleting: boolean
 }) {
   const icon = TYPE_ICON[artifact.artifactType] ?? '📄'
-
-  const statusColorMap: Record<string, string> = {
-    valid: 'var(--accent)',
-    warning: '#f59e0b',
-    invalid: '#ef4444',
-    pending: 'var(--text-muted)',
-  }
-  const statusColor = statusColorMap[artifact.validationStatus] ?? 'var(--text-muted)'
+  const showIssue = artifact.validationStatus === 'warning' || artifact.validationStatus === 'invalid'
 
   return (
-    <div style={{
-      background: 'var(--bg-surface)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius-md)',
-      padding: '14px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 8,
-      cursor: 'pointer',
-    }}
+    <div
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
+      style={{
+        background: selected ? 'var(--bg-hover)' : 'var(--bg-surface)',
+        border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+        borderRadius: 'var(--radius-md)',
+        padding: '14px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        cursor: 'pointer',
+      }}
       onClick={onOpen}
     >
-      {/* Icon + title */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ fontSize: 28 }}>{icon}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -279,32 +491,14 @@ function ArtifactCard({
             {TYPE_LABEL[artifact.artifactType] ?? artifact.artifactType} · {fmt(artifact.size)}
           </div>
         </div>
-      </div>
-
-      {/* Meta */}
-      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-        {fmtDate(artifact.createdAt)}
-      </div>
-
-      {/* Validation badge */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{
-          fontSize: 10, fontWeight: 600, padding: '2px 8px',
-          borderRadius: 99, border: `1px solid ${statusColor}`, color: statusColor,
-        }}>
-          {artifact.validationStatus === 'valid' ? '✓ Valide'
-            : artifact.validationStatus === 'warning' ? '⚠ Avertissement'
-            : '✗ Invalide'}
-        </span>
-
-        {/* Delete button */}
         <button
           onClick={e => { e.stopPropagation(); onDelete() }}
           disabled={deleting}
           title="Supprimer"
+          aria-label={`Supprimer ${artifact.title}`}
           style={{
             background: 'none', border: 'none', cursor: 'pointer',
-            color: 'var(--text-muted)', padding: 4, borderRadius: 4,
+            color: 'var(--text-muted)', padding: 4, borderRadius: 4, flexShrink: 0,
           }}
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -315,7 +509,27 @@ function ArtifactCard({
         </button>
       </div>
 
-      {artifact.validationNotes && (
+      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        {fmtDate(artifact.createdAt)}
+        {conversationTitle && (
+          <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Conversation · {conversationTitle}
+          </span>
+        )}
+      </div>
+
+      {showIssue && (
+        <span style={{
+          fontSize: 10, fontWeight: 600, padding: '2px 8px', alignSelf: 'flex-start',
+          borderRadius: 99,
+          border: `1px solid ${artifact.validationStatus === 'warning' ? '#f59e0b' : '#ef4444'}`,
+          color: artifact.validationStatus === 'warning' ? '#f59e0b' : '#ef4444',
+        }}>
+          {artifact.validationStatus === 'warning' ? '⚠ Avertissement' : '✗ Invalide'}
+        </span>
+      )}
+
+      {artifact.validationNotes && showIssue && (
         <div style={{ fontSize: 11, color: '#f59e0b', fontStyle: 'italic' }}>
           {artifact.validationNotes}
         </div>

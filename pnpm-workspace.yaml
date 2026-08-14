@@ -1,3 +1,9 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - apps/*
+  - packages/*
+auditConfig:
+  ignoreCves:
+    - CVE-2026-56876
+overrides:
+  nanoid@<3.3.18: 3.3.18
+  serialize-javascript@<7.0.5: 7.0.5

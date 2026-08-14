@@ -44,6 +44,17 @@ describe('CreateModal', () => {
     expect(instructions).toHaveFocus()
   })
 
+  it('closes when clicking the backdrop', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const { container } = render(<CreateModal onClose={onClose} onDone={vi.fn()} />)
+
+    const backdrop = container.querySelector('.modal-overlay')
+    expect(backdrop).toBeTruthy()
+    await user.click(backdrop!)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('prefills a real plugin schedule template without losing the plugin binding', async () => {
     render(<CreateModal onClose={vi.fn()} onDone={vi.fn()} initialTemplate={{
       id: 'weekly-review',

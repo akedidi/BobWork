@@ -3,7 +3,7 @@
 // Conversations réelles : IPC → DB → streaming Tauri events
 // ============================================================
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, type MutableRefObject } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Copy, Check, Pencil } from 'lucide-react'
@@ -14,8 +14,88 @@ import {
   sendMessage, stopTask,
   getConversation, getMessages, createConversation, updateConversation, getTaskDetail, cancelTask, getTasks, getPlugin,
   rewindConversationFromMessage,
+  registerExternalArtifact,
 } from '../lib/ipc'
+import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import type { MessageAttachment, MessageSource, TaskDetail } from '@bob-work/shared-types'
+import { useT } from '../i18n'
+import { errorMessage } from '../lib/errorMessage'
+import { isActiveTaskState, latestActiveTaskForConversation } from '../lib/activeTasks'
+import { useAppStore } from '../stores/appStore'
+import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath } from '../lib/localFilePaths'
+import { PluginIcon, iconForFileName } from '../components/PluginIcon'
+import { ChromeSnapshotCard } from '../components/ChromeSnapshot/ChromeSnapshotCard'
+import { extractChromeSnapshot, upsertChromeSnapshot, type ChromeSnapshot } from '../lib/chromeSnapshot'
+import { useAppDialog } from '../components/AppDialog'
+
+const AUTO_PREVIEW_EXT = /\.(pptx?|docx?|xlsx?|pdf)$/i
+
+function sourcesFromLocalPaths(content: string): MessageSource[] {
+  return extractLocalFilePaths(content).map(path => ({
+    id: path,
+    title: fileNameFromPath(path),
+    path,
+  }))
+}
+
+function mergeMessageSources(...groups: (MessageSource[] | undefined)[]): MessageSource[] {
+  const byKey = new Map<string, MessageSource>()
+  for (const group of groups) {
+    for (const item of group ?? []) {
+      const target = item.path || item.url || item.id
+      if (!target) continue
+      const key = item.url && !item.path
+        ? `web:${item.url}`
+        : `file:${normalizeLocalFilePathKey(item.path || target)}`
+      const existing = byKey.get(key)
+      if (!existing) {
+        byKey.set(key, item)
+        continue
+      }
+      if (item.path && existing.path) {
+        const preferred = preferAbsoluteLocalPath(existing.path, item.path)
+        if (preferred !== existing.path) {
+          byKey.set(key, { ...item, path: preferred, title: item.title || existing.title })
+        }
+      }
+    }
+  }
+  return Array.from(byKey.values())
+}
+
+function applyActiveTaskForConversation(
+  conversationId: string,
+  allTasks: Awaited<ReturnType<typeof getTasks>>,
+  refs: {
+    runningRef: MutableRefObject<boolean>
+    activeSessionRef: MutableRefObject<{ conversationId: string; sessionId: string | null } | null>
+  },
+  setters: {
+    setTaskId: (id: string | null) => void
+    setTaskDetail: (detail: TaskDetail | null) => void
+    setIsRunning: (running: boolean) => void
+    setSessionId: (id: string | null) => void
+  },
+) {
+  const activeTask = latestActiveTaskForConversation(allTasks, conversationId)
+  if (activeTask) {
+    setters.setTaskId(activeTask.id)
+    getTaskDetail(activeTask.id).then(setters.setTaskDetail).catch(() => {})
+    if (activeTask.bobProcessId && isActiveTaskState(activeTask.state)) {
+      refs.runningRef.current = true
+      setters.setIsRunning(true)
+      setters.setSessionId(activeTask.bobProcessId)
+      refs.activeSessionRef.current = { conversationId, sessionId: activeTask.bobProcessId }
+      return
+    }
+  }
+  setters.setTaskId(null)
+  setters.setTaskDetail(null)
+  refs.runningRef.current = false
+  setters.setIsRunning(false)
+  setters.setSessionId(null)
+  refs.activeSessionRef.current = null
+}
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -25,9 +105,12 @@ interface Msg {
   content: string
   ts: string
   state: 'sent' | 'streaming' | 'done' | 'error'
+  /** Fatal/session error shown separately — not painted over the assistant reply. */
+  error?: string
   persisted?: boolean
   attachments?: MessageAttachment[]
   sources?: MessageSource[]
+  snapshots?: ChromeSnapshot[]
 }
 
 interface BobTokenEvent {
@@ -48,6 +131,7 @@ interface BobSessionDoneEvent {
   taskId?: string
   runId?: string
   shellTaskId?: string
+  cancelled?: boolean
 }
 
 interface BobActivityEvent {
@@ -71,9 +155,21 @@ interface QueuedPrompt {
   queuedAt: string
 }
 
+export function conversationTitleForMode(mode: string): string {
+  if (mode === 'skill_builder') return 'Création de skill'
+  if (mode === 'plugin_builder') return 'Création de plugin'
+  return ''
+}
+
+export function isPlaceholderConversationTitle(title: string): boolean {
+  return ['', 'Nouvelle conversation', 'Nouveau chat'].includes(title.trim())
+}
+
 // ── Component ─────────────────────────────────────────────────
 
 export default function ChatView() {
+  const t = useT()
+  const dialog = useAppDialog()
   const { id } = useParams<{ id?: string }>()
   const location = useLocation()
   const navigate = useNavigate()
@@ -92,6 +188,7 @@ export default function ChatView() {
   const [thinkingText, setThinkingText] = useState('')
   const [promptQueue, setPromptQueue] = useState<QueuedPrompt[]>([])
   const [loadingHistory, setLoadingHistory] = useState(!!id)
+  const [loadError, setLoadError] = useState<unknown>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [bobMode, setBobMode] = useState('agent')
 
@@ -115,13 +212,28 @@ export default function ChatView() {
   // ── Load existing conversation ───────────────────────────────
   useEffect(() => {
     if (!id) {
+      setConvId(null)
+      setConvTitle('Nouvelle conversation')
       setConversationPinned(false)
+      setMsgs([])
+      setActivities([])
+      setThinkingText('')
+      setTaskId(null)
+      setTaskDetail(null)
+      setSessionId(null)
+      setBobMode('agent')
+      runningRef.current = false
+      activeSessionRef.current = null
+      setIsRunning(false)
       setLoadingHistory(false)
+      setLoadError(null)
       return
     }
     setConvId(id)
+    useAppStore.getState().markConversationRead(id)
     setConversationPinned(false)
     setLoadingHistory(true)
+    setLoadError(null)
 
     Promise.all([getConversation(id), getMessages(id), getTasks()])
       .then(([conv, messages, allTasks]) => {
@@ -139,18 +251,30 @@ export default function ChatView() {
             state: 'done' as const,
             persisted: true,
             attachments: m.attachments,
-            sources: m.sources,
+            sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
           }))
           const optimistic = prev.filter(p => p.state !== 'done' && !loaded.some(l => l.content === p.content))
           return [...loaded, ...optimistic]
         })
-        const latestTask = allTasks.find(task => task.conversationId === id)
-        if (latestTask) {
-          setTaskId(latestTask.id)
-          getTaskDetail(latestTask.id).then(setTaskDetail).catch(() => {})
+        // Backfill gallery for files Bob already wrote (e.g. Desktop PPTX).
+        for (const message of messages) {
+          if (message.author === 'user') continue
+          for (const path of extractLocalFilePaths(message.content)) {
+            void registerExternalArtifact(path, id).catch(() => {})
+          }
+        }
+        if (id) {
+          applyActiveTaskForConversation(
+            id,
+            allTasks,
+            { runningRef, activeSessionRef },
+            { setTaskId, setTaskDetail, setIsRunning, setSessionId },
+          )
         }
       })
-      .catch(() => {})
+      .catch(error => {
+        setLoadError(error)
+      })
       .finally(() => setLoadingHistory(false))
   }, [id])
 
@@ -161,8 +285,13 @@ export default function ChatView() {
     listen<string>('conversation-updated', event => {
       if (event.payload !== convId) return
       getConversation(convId).then(conversation => {
-        if (!disposed && conversation) setConvTitle(conversation.title)
-      }).catch(() => {})
+        if (!disposed && conversation) {
+          setConvTitle(conversation.title)
+          setLoadError(null)
+        }
+      }).catch(error => {
+        if (!disposed) setLoadError(error)
+      })
     }).then(fn => {
       if (disposed) fn(); else unlisten = fn
     })
@@ -185,12 +314,20 @@ export default function ChatView() {
           state: 'done' as const,
           persisted: true,
           attachments: m.attachments,
-          sources: m.sources,
+          sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
         })))
+        for (const message of messages) {
+          if (message.author === 'user') continue
+          for (const path of extractLocalFilePaths(message.content)) {
+            void registerExternalArtifact(path, convId).catch(() => {})
+          }
+        }
         setActivities([])
         setTaskDetail(null)
         setTaskId(null)
-      }).catch(() => {})
+      }).catch(error => {
+        if (!disposed) setLoadError(error)
+      })
     }).then(fn => {
       if (disposed) fn(); else unlisten = fn
     })
@@ -201,14 +338,54 @@ export default function ChatView() {
   const routeState = location.state as { initialPrompt?: string; mode?: string; attachmentPaths?: string[]; projectId?: string; resumeTaskId?: string } | null
   const initialPrompt = routeState?.initialPrompt
   const initialMode = routeState?.mode ?? 'agent'
-  const initialHandled = useRef(false)
+  const initialHandledKey = useRef<string | null>(null)
 
   useEffect(() => {
-    if (initialPrompt && !initialHandled.current) {
-      initialHandled.current = true
+    if (initialMode === 'plugin_builder' || initialMode === 'skill_builder') {
+      if (!useAppStore.getState().builderSession) {
+        useAppStore.getState().setBuilderSession({ kind: initialMode, brief: initialPrompt ?? '', guided: false })
+      }
+    }
+    if (initialPrompt && initialHandledKey.current !== location.key) {
+      initialHandledKey.current = location.key
       handleSend(initialPrompt, initialMode, routeState?.attachmentPaths ?? [], routeState?.projectId, routeState?.resumeTaskId)
     }
-  }, [initialPrompt])
+  }, [initialPrompt, location.key])
+
+  const builderSession = useAppStore(s => s.builderSession)
+  const routeBuilderMode = routeState?.mode === 'plugin_builder' || routeState?.mode === 'skill_builder'
+    ? routeState.mode
+    : null
+  const conversationBuilderMode = bobMode === 'plugin_builder' || bobMode === 'skill_builder'
+    ? bobMode
+    : null
+  const builderMode = builderSession?.kind ?? routeBuilderMode ?? conversationBuilderMode
+
+  useEffect(() => {
+    const builderTitle = conversationTitleForMode(builderMode ?? '')
+    if (!builderTitle || !convId || convId.startsWith('ephemeral-') || !isPlaceholderConversationTitle(convTitle)) return
+    setConvTitle(builderTitle)
+    // Also repairs conversations created before builder titles were persisted.
+    // updateConversation emits conversation-updated, refreshing the sidebar.
+    void updateConversation(convId, { title: builderTitle }).catch(() => {
+      setConvTitle(current => current === builderTitle ? 'Nouvelle conversation' : current)
+    })
+  }, [builderMode, convId, convTitle])
+
+  useEffect(() => {
+    if (builderMode !== 'plugin_builder') return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen<string>('plugin-updated', event => {
+      if (disposed || !event.payload) return
+      useAppStore.getState().clearBuilderSession()
+      navigate('/plugins', { state: { selectPluginId: event.payload, openCommissioning: true } })
+    }).then(fn => { unlisten = fn })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [builderMode, navigate])
 
   // ── Subscribe to Tauri Bob events ────────────────────────────
   const subscribeToSession = useCallback(async (conversationId: string) => {
@@ -230,6 +407,29 @@ export default function ChatView() {
 
       if (event.payload.eventType === 'thought' && event.payload.chunk) {
         setThinkingText(current => appendThinkingText(current, event.payload.chunk))
+      }
+
+      // Keep protocol/stderr errors out of the reply body — shown as a footer on done.
+      if (event.payload.eventType === 'error') {
+        const errorText = event.payload.chunk?.trim()
+        if (!errorText) return
+        setMsgs(prev => {
+          const streaming = prev.find(m => m.state === 'streaming')
+          if (streaming) {
+            return prev.map(m =>
+              m.state === 'streaming' ? { ...m, error: errorText } : m
+            )
+          }
+          return [...prev, {
+            id: `streaming-${event.payload.sessionId}`,
+            role: 'assistant' as const,
+            content: '',
+            ts: new Date().toISOString(),
+            state: 'streaming' as const,
+            error: errorText,
+          }]
+        })
+        return
       }
 
       setMsgs(prev => {
@@ -264,6 +464,21 @@ export default function ChatView() {
       } else if (eventType === 'step' && content) {
         setThinkingText(current => appendThinkingText(current, content))
       }
+      const snapshot = extractChromeSnapshot(event.payload)
+      if (snapshot) {
+        setMsgs(prev => prev.map(message =>
+          message.state === 'streaming'
+            ? { ...message, snapshots: upsertChromeSnapshot(message.snapshots ?? [], snapshot) }
+            : message,
+        ))
+      }
+      if (
+        eventType.includes('subagent')
+        || eventType.includes('graph')
+        || toolName === 'spawn_subagent'
+      ) {
+        setPanelOpen(true)
+      }
     })
 
     // bob-session-done: finalise + persist
@@ -274,35 +489,69 @@ export default function ChatView() {
       completedSessionsRef.current.add(event.payload.sessionId)
       activeSessionRef.current = null
 
+      const localSources = sourcesFromLocalPaths(fullOutput || '')
+      for (const source of localSources) {
+        if (source.path) {
+          void registerExternalArtifact(source.path, event.payload.conversationId).catch(() => {})
+        }
+      }
+
       // Finalize the streaming message or create it if it didn't exist (fast execution)
       setMsgs(prev => {
+        const finalizeAssistant = (contentRaw: string, priorError?: string, priorSources?: MessageSource[]): Pick<Msg, 'content' | 'error' | 'state' | 'sources'> => {
+          const content = contentRaw.trim()
+          const errorText = success ? undefined : (error || priorError)
+          const errorOnly = !success && !!content && (
+            /^(error|erreur)\b/i.test(content)
+            || (!!errorText && content === errorText.trim())
+          )
+          const sources = mergeMessageSources(priorSources, localSources, sourcesFromLocalPaths(content))
+          if (errorOnly) {
+            return { content, error: undefined, state: 'error', sources }
+          }
+          return {
+            content: content || errorText || '(Pas de réponse)',
+            error: content && errorText ? errorText : undefined,
+            state: success || content ? 'done' : 'error',
+            sources,
+          }
+        }
+
         const hasStreaming = prev.some(m => m.state === 'streaming')
         if (hasStreaming) {
-          return prev.map(m =>
-            m.state === 'streaming'
-              ? {
-                  ...m,
-                  id: `done-${Date.now()}`,
-                  content: fullOutput || m.content || error || '(Pas de réponse)',
-                  state: success ? 'done' : 'error',
-                }
-              : m
-          )
-        } else {
-          return [...prev, {
-            id: `done-${Date.now()}`,
-            role: 'assistant',
-            content: fullOutput || error || '(Pas de réponse)',
-            state: success ? 'done' : 'error',
-            ts: new Date().toISOString()
-          }]
+          return prev.map(m => {
+            if (m.state !== 'streaming') return m
+            return {
+              ...m,
+              id: `done-${Date.now()}`,
+              ...finalizeAssistant(fullOutput || m.content, m.error, m.sources),
+              snapshots: m.snapshots,
+            }
+          })
         }
+        return [...prev, {
+          id: `done-${Date.now()}`,
+          role: 'assistant',
+          ...finalizeAssistant(fullOutput, undefined, undefined),
+          ts: new Date().toISOString(),
+        }]
       })
 
       setIsRunning(false)
       runningRef.current = false
       setSessionId(null)
       setThinkingText('')
+
+      const firstDoc = localSources.find(source => source.path && AUTO_PREVIEW_EXT.test(source.path))
+      if (success && firstDoc?.path) {
+        setPreviewRequest({
+          id: `${Date.now()}-${Math.random()}`,
+          target: firstDoc.path,
+          title: firstDoc.title,
+          kind: 'file',
+        })
+        setPanelOpen(true)
+      }
 
       const completedTaskId = event.payload.taskId
       if (completedTaskId) {
@@ -319,6 +568,44 @@ export default function ChatView() {
 
     unlistenRef.current = [unToken, unActivity, unDone]
   }, [])
+
+  useEffect(() => {
+    if (!convId || !isRunning) return
+    void subscribeToSession(convId)
+  }, [convId, isRunning, subscribeToSession])
+
+  useEffect(() => {
+    if (!convId || convId.startsWith('ephemeral-')) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen<string>('task-updated', _event => {
+      getTasks()
+        .then(allTasks => {
+          if (disposed) return
+          const activeTask = latestActiveTaskForConversation(allTasks, convId)
+          if (activeTask?.bobProcessId && isActiveTaskState(activeTask.state)) {
+            runningRef.current = true
+            setIsRunning(true)
+            setSessionId(activeTask.bobProcessId)
+            activeSessionRef.current = { conversationId: convId, sessionId: activeTask.bobProcessId }
+            setTaskId(activeTask.id)
+            return
+          }
+          if (!runningRef.current) return
+          runningRef.current = false
+          setIsRunning(false)
+          setSessionId(null)
+          activeSessionRef.current = null
+          setThinkingText('')
+          unlistenRef.current.forEach(fn => fn())
+          unlistenRef.current = []
+        })
+        .catch(() => {})
+    }).then(fn => {
+      if (disposed) fn(); else unlisten = fn
+    })
+    return () => { disposed = true; unlisten?.() }
+  }, [convId])
 
   const openPreview = useCallback((target: string, title?: string, kind?: 'file' | 'web') => {
     setPreviewRequest({ id: `${Date.now()}-${Math.random()}`, target, title, kind })
@@ -352,6 +639,7 @@ export default function ChatView() {
 
     runningRef.current = true
     setIsRunning(true)
+    setThinkingText(FALLBACK_THINKING)
     const { text, mode, attachmentPaths, projectId, resumeTaskId } = prompt
 
     // Ensure we have a conversation
@@ -359,7 +647,10 @@ export default function ChatView() {
     if (!cid) {
       try {
         const conv = await createConversation({
-          title: '',
+          // Builder conversations already have a meaningful, stable context.
+          // Persist it immediately instead of relying on a second silent Bob
+          // request that may be slow or fail and leave "Nouvelle conversation".
+          title: conversationTitleForMode(builderMode ?? mode),
           conversationType: mode === 'agent' || mode === 'plan' ? 'work' : 'chat',
           businessMode: mode,
           bobMode: mode,
@@ -390,7 +681,6 @@ export default function ChatView() {
     }
     setMsgs(prev => [...prev, userMsg])
     setActivities([])
-    setThinkingText('')
     setTaskDetail(null)
 
     const mentionedPluginIds = Array.from(text.matchAll(/@plugin:([A-Za-z0-9-]+)/g), match => match[1])
@@ -400,11 +690,21 @@ export default function ChatView() {
         const plugin = await getPlugin(pluginId)
         const manifest = plugin?.manifest as unknown as { builtin?: boolean; specializedMode?: unknown; permissions?: { type?: string; description?: string }[]; runtime?: { python?: string; cli?: boolean } } | undefined
         const guarded = manifest?.permissions?.filter(permission => ['command.execute', 'file.delete', 'network.request', 'mcp.connect'].includes(permission.type ?? '')) ?? []
-        const trustedLocalOffice = Boolean(manifest?.builtin && manifest?.specializedMode)
+        // Packaged Work modes (Brief Mission IBM, CTO Invest…) ship with specializedMode
+        // even when manifest.builtin is false — treat them as trusted local office tools.
+        const trustedLocalOffice = Boolean(manifest?.specializedMode)
         if (plugin && guarded.length > 0 && !trustedLocalOffice) {
           const runtime = [manifest?.runtime?.python ? 'Python' : '', manifest?.runtime?.cli ? 'CLI' : ''].filter(Boolean).join(' / ')
           const details = guarded.map(permission => `• ${permission.description || permission.type}`).join('\n')
-          const accepted = window.confirm(`Autoriser « ${plugin.name} » pour ce prompt${runtime ? ` (${runtime})` : ''} ?\n\n${details}\n\nBob Work lancera Bob Shell uniquement après votre accord.`)
+          const accepted = await dialog.confirm({
+            title: t('chat.pluginPermissionTitle'),
+            message: t('chat.pluginPermissionMessage', {
+              plugin: plugin.name,
+              runtime: runtime ? ` (${runtime})` : '',
+              details,
+            }),
+            confirmLabel: t('chat.authorize'),
+          })
           if (!accepted) {
             setMsgs(prev => [...prev, {
               id: `permission-${Date.now()}`,
@@ -438,7 +738,7 @@ export default function ChatView() {
       })
 
       setMsgs(prev => prev.map(m =>
-        m.id === userMsg.id ? { ...m, id: result.userMessageId, persisted: true } : m
+        m.id === userMsg.id ? { ...m, id: result.userMessageId || m.id, persisted: true } : m
       ))
 
       setTaskId(result.taskId)
@@ -456,21 +756,25 @@ export default function ChatView() {
       setMsgs(prev => [...prev, {
         id: `err-${Date.now()}`,
         role: 'assistant',
-        content: `Erreur : ${err instanceof Error ? err.message : String(err)}`,
+        content: `Erreur : ${errorMessage(err)}`,
         ts: new Date().toISOString(),
         state: 'error',
       }])
       runningRef.current = false
       setIsRunning(false)
     }
-  }, [convId, navigate, replaceQueue, subscribeToSession])
+  }, [builderMode, convId, navigate, replaceQueue, subscribeToSession])
 
   const handleSend = useCallback((text: string, mode: string, attachmentPaths: string[] = [], projectId?: string, resumeTaskId?: string) => {
     if (!text.trim()) return
+    const builderKind = useAppStore.getState().builderSession?.kind
+    const resolvedMode = builderKind === 'plugin_builder' || builderKind === 'skill_builder' || mode === 'plugin_builder' || mode === 'skill_builder'
+      ? 'agent'
+      : (builderKind ?? mode)
     const prompt: QueuedPrompt = {
       id: `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       text: text.trim(),
-      mode,
+      mode: resolvedMode,
       attachmentPaths: [...attachmentPaths],
       projectId,
       resumeTaskId,
@@ -509,16 +813,24 @@ export default function ChatView() {
 
   // ── Stop ─────────────────────────────────────────────────────
   const handleStop = useCallback(async () => {
-    if (!sessionId) return
+    const currentTaskId = taskId
+    if (currentTaskId) {
+      const { tasks, setTasks } = useAppStore.getState()
+      setTasks(tasks.map(task => (
+        task.id === currentTaskId && isActiveTaskState(task.state)
+          ? { ...task, state: 'cancelled' as const }
+          : task
+      )))
+    }
     try {
-      await stopTask(sessionId)
-      if (taskId) await cancelTask(taskId)
+      if (sessionId) await stopTask(sessionId)
+      if (currentTaskId) await cancelTask(currentTaskId)
     } catch { /* ignore */ }
     runningRef.current = false
     setIsRunning(false)
     setSessionId(null)
     setThinkingText('')
-    if (taskId) setTaskId(null)
+    if (currentTaskId) setTaskId(null)
     unlistenRef.current.forEach(fn => fn())
     unlistenRef.current = []
     setMsgs(prev =>
@@ -550,11 +862,14 @@ export default function ChatView() {
 
     const messagesAfter = msgs.length - index - 1
     if (messagesAfter > 0) {
-      const accepted = window.confirm(
+      const accepted = await dialog.confirm({
+        message:
         messagesAfter === 1
-          ? 'Modifier ce message supprimera la réponse suivante et relancera Bob avec le nouveau prompt.'
-          : `Modifier ce message supprimera ${messagesAfter} message(s) suivant(s) et relancera Bob avec le nouveau prompt.`,
-      )
+          ? t('chat.editDeleteOne')
+          : t('chat.editDeleteMany', { count: messagesAfter }),
+        confirmLabel: t('chat.editAndRestart'),
+        destructive: true,
+      })
       if (!accepted) return
     }
 
@@ -598,7 +913,7 @@ export default function ChatView() {
       setMsgs(prev => [...prev, {
         id: `edit-err-${Date.now()}`,
         role: 'assistant',
-        content: `Impossible de modifier le message : ${err instanceof Error ? err.message : String(err)}`,
+        content: `Impossible de modifier le message : ${errorMessage(err)}`,
         ts: new Date().toISOString(),
         state: 'error',
       }])
@@ -621,12 +936,17 @@ export default function ChatView() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
 
       {/* Topbar */}
-      <div className="topbar titlebar-drag">
-        <div className="conversation-title titlebar-no-drag" style={{
-          marginLeft: 8,
-          fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)',
-          maxWidth: 'min(520px, calc(100% - 180px))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
+      <div className="topbar titlebar-drag" data-tauri-drag-region>
+        <div
+          className="conversation-title"
+          title={convTitle}
+          aria-label={convTitle}
+          style={{
+            marginLeft: 8,
+            fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)',
+            maxWidth: 'min(520px, calc(100% - 180px))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}
+        >
           {convTitle}
         </div>
         <div className="titlebar-no-drag" style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
@@ -638,16 +958,6 @@ export default function ChatView() {
               aria-label={conversationPinned ? 'Désépingler la conversation' : 'Épingler la conversation'}
             >
               <PinIcon filled={conversationPinned} />
-            </button>
-          )}
-          {isRunning && (
-            <button
-              className="icon-btn"
-              onClick={handleStop}
-              title="Arrêter"
-              style={{ color: 'var(--danger)' }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
             </button>
           )}
           <button className="icon-btn" title="Navigateur intégré (⌘⇧B)" onClick={() => openPreview('about:blank', 'Nouvel onglet', 'web')}>
@@ -672,8 +982,92 @@ export default function ChatView() {
         />
       )}
 
+      {builderMode && (
+        <div
+          className="builder-mode-banner"
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 2,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+            padding: '10px 16px',
+            borderBottom: '1px solid var(--border)',
+            background: 'var(--bg-surface)',
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>
+              {builderMode === 'plugin_builder' ? 'Création de plugin' : 'Création de skill'}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+              {builderMode === 'plugin_builder'
+                ? (builderSession?.guided
+                  ? 'Cahier des charges validé — Bob génère le bundle, puis mise en service dans Plugins'
+                  : 'Décrivez l’idée ici. Bob pose les questions utiles, puis génère le plugin.')
+                : 'Décrivez le skill. Bob pose quelques questions, puis écrit le fichier d’instructions.'}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={() => {
+              useAppStore.getState().clearBuilderSession()
+              navigate(builderMode === 'plugin_builder' ? '/plugins' : '/skills')
+            }}
+          >
+            {builderMode === 'plugin_builder' ? 'Terminer' : 'Ouvrir Skills'}
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', display: msgs.length === 0 ? 'none' : 'block' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', display: msgs.length === 0 && !loadError && !loadingHistory ? 'none' : 'block' }}>
+        {loadError ? (
+          <LoadErrorBanner
+            error={loadError}
+            onRetry={() => {
+              if (!id) return
+              setLoadingHistory(true)
+              setLoadError(null)
+              Promise.all([getConversation(id), getMessages(id), getTasks()])
+                .then(([conv, messages, allTasks]) => {
+                  if (conv) {
+                    setConvTitle(conv.title)
+                    setConversationPinned(conv.pinned)
+                    setBobMode(conv.bobMode ?? 'agent')
+                  }
+                  setMsgs(messages.map(m => ({
+                    id: m.id,
+                    role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+                    content: m.content,
+                    ts: m.createdAt,
+                    state: 'done' as const,
+                    persisted: true,
+                    attachments: m.attachments,
+                    sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
+                  })))
+                  for (const message of messages) {
+                    if (message.author === 'user') continue
+                    for (const path of extractLocalFilePaths(message.content)) {
+                      void registerExternalArtifact(path, id).catch(() => {})
+                    }
+                  }
+                  applyActiveTaskForConversation(
+                    id,
+                    allTasks,
+                    { runningRef, activeSessionRef },
+                    { setTaskId, setTaskDetail, setIsRunning, setSessionId },
+                  )
+                })
+                .catch(error => setLoadError(error))
+                .finally(() => setLoadingHistory(false))
+            }}
+            fallback={t('chat.loadFailed')}
+          />
+        ) : null}
         {loadingHistory ? (
           <LoadingMessages />
         ) : (
@@ -681,7 +1075,12 @@ export default function ChatView() {
             {msgs.map(msg => (
               <div key={msg.id}>
                 {isRunning && msg.state === 'streaming' && thinkingText && (
-                  <WorkingIndicator thinking={thinkingText} loading={false} />
+                  <WorkingIndicator
+                    thinking={thinkingText}
+                    loading={false}
+                    snapshots={msg.snapshots}
+                    onOpenSnapshot={openPreview}
+                  />
                 )}
                 <MessageBubble
                   msg={msg}
@@ -701,7 +1100,15 @@ export default function ChatView() {
               </div>
             ))}
             {isRunning && !msgs.some(message => message.state === 'streaming') && (
-              <WorkingIndicator thinking={thinkingText} loading />
+              <WorkingIndicator
+                thinking={thinkingText}
+                loading
+                snapshots={activities.reduce<ChromeSnapshot[]>((list, event) => {
+                  const snapshot = extractChromeSnapshot(event)
+                  return snapshot ? upsertChromeSnapshot(list, snapshot) : list
+                }, [])}
+                onOpenSnapshot={openPreview}
+              />
             )}
             <div ref={bottomRef} />
           </div>
@@ -711,9 +1118,9 @@ export default function ChatView() {
       {/* Composer */}
       <div className="composer-wrap" style={{ 
         maxWidth: 720, margin: '0 auto', width: '100%', 
-        ...(msgs.length === 0 ? { flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' } : {})
+        ...(msgs.length === 0 && !loadingHistory && !loadError ? { flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' } : {})
       }}>
-        {msgs.length === 0 && <EmptyState />}
+        {msgs.length === 0 && !loadingHistory && !loadError && <EmptyState builderMode={builderMode} />}
         {promptQueue.length > 0 && (
           <PromptQueuePanel
             items={promptQueue}
@@ -723,9 +1130,16 @@ export default function ChatView() {
           />
         )}
         <Composer
-          placeholder="Travailler avec Bob…"
+          placeholder={
+            builderMode === 'plugin_builder'
+              ? 'Décrivez le plugin à créer…'
+              : builderMode === 'skill_builder'
+                ? 'Décrivez le skill à créer…'
+                : t('chat.placeholder')
+          }
           showModePill
           showProjectPill
+          initialProjectId={routeState?.projectId}
           onSend={handleSend}
           onStop={handleStop}
           busy={isRunning}
@@ -795,7 +1209,7 @@ export function MessageBubble({
           {canEdit && !isEditing && (
             <button
               onClick={onStartEdit}
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400"
+              className="msg-action-btn"
               title="Modifier"
               style={{ cursor: 'pointer' }}
             >
@@ -803,7 +1217,7 @@ export function MessageBubble({
             </button>
           )}
           {!isEditing && (
-            <button onClick={handleCopy} className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400" title="Copier" style={{ cursor: 'pointer' }}>
+            <button onClick={handleCopy} className="msg-action-btn" title="Copier" type="button">
               {copied ? <Check size={14} /> : <Copy size={14} />}
             </button>
           )}
@@ -841,20 +1255,34 @@ export function MessageBubble({
     )
   }
 
-  const isError = msg.state === 'error'
+  const isHardError = msg.state === 'error' && !msg.error
+  const showErrorFooter = Boolean(msg.error) || msg.state === 'error'
 
   return (
     <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }} className="group">
-      <BobAvatar streaming={msg.state === 'streaming'} error={isError} />
-      <div
-        className="msg-assistant prose"
-        style={isError ? { color: 'var(--danger)' } : undefined}
-      >
-        <ReactMarkdown components={{ a: ({ href, children }) => <a href={href} onClick={event => {
-          if (!href) return
-          event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
-        }}>{children}</a> }}>{msg.content}</ReactMarkdown>
+      <BobAvatar streaming={msg.state === 'streaming'} error={showErrorFooter} />
+      <div className="msg-assistant prose">
+        {msg.content && (
+          <div style={isHardError ? { color: 'var(--danger)' } : undefined}>
+            <ReactMarkdown components={{ a: ({ href, children }) => <a href={href} onClick={event => {
+              if (!href) return
+              event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
+            }}>{children}</a> }}>{linkifyLocalFilePaths(msg.content)}</ReactMarkdown>
+          </div>
+        )}
+        {msg.error && (
+          <p style={{ color: 'var(--danger)', marginTop: msg.content ? 10 : 0, fontSize: 13, lineHeight: 1.45 }}>
+            {msg.error}
+          </p>
+        )}
         <MessageResources msg={msg} onOpen={onOpenResource} />
+        {msg.snapshots && msg.snapshots.length > 0 ? (
+          <div className="chrome-snapshot-stack">
+            {msg.snapshots.map(snapshot => (
+              <ChromeSnapshotCard key={snapshot.id} snapshot={snapshot} onOpen={(url, title) => onOpenResource(url, title, 'web')} />
+            ))}
+          </div>
+        ) : null}
         {msg.state === 'streaming' && (
           <span style={{
             display: 'inline-block', width: 8, height: 14,
@@ -864,7 +1292,7 @@ export function MessageBubble({
           }} />
         )}
       </div>
-      <button onClick={handleCopy} className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400 mt-2" title="Copier" style={{ cursor: 'pointer' }}>
+      <button onClick={handleCopy} className="msg-action-btn msg-action-btn--assistant" title="Copier" type="button">
          {copied ? <Check size={14} /> : <Copy size={14} />}
       </button>
     </div>
@@ -872,12 +1300,51 @@ export function MessageBubble({
 }
 
 function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
-  const resources = [
-    ...(msg.attachments ?? []).map(item => ({ id: item.id, name: item.name, target: item.path || item.url, kind: item.url ? 'web' as const : 'file' as const })),
-    ...(msg.sources ?? []).map(item => ({ id: item.id, name: item.title, target: item.url || item.path, kind: item.url ? 'web' as const : 'file' as const })),
-  ].filter(item => item.target)
+  const merged = mergeMessageSources(
+    msg.sources,
+    sourcesFromLocalPaths(msg.content),
+    (msg.attachments ?? []).map(item => ({
+      id: item.id,
+      title: item.name,
+      path: item.path,
+      url: item.url,
+    })),
+  )
+  const resources = merged
+    .map(item => ({
+      id: item.id,
+      name: item.title,
+      target: item.url || item.path,
+      kind: item.url && !item.path ? 'web' as const : 'file' as const,
+    }))
+    .filter(item => item.target)
   if (!resources.length) return null
-  return <div className="message-resources">{resources.map(item => <button className="message-resource-chip" key={`${item.kind}-${item.id}`} onClick={() => item.target && onOpen(item.target, item.name, item.kind)}><b>{item.kind === 'web' ? '◎' : '◇'}</b><span>{item.name}</span></button>)}</div>
+  return (
+    <div className="message-resources">
+      {resources.map(item => {
+        const label = item.name || fileNameFromPath(item.target || '')
+        return (
+          <button
+            className="message-resource-chip"
+            key={`${item.kind}-${normalizeLocalFilePathKey(item.target || item.id)}`}
+            onClick={() => item.target && onOpen(item.target, item.name, item.kind)}
+            title={item.target}
+          >
+            {item.kind === 'web' ? (
+              <span className="message-resource-glyph" aria-hidden="true">◎</span>
+            ) : (
+              <PluginIcon
+                icon={iconForFileName(label || item.target || '')}
+                size="sm"
+                className="message-resource-icon"
+              />
+            )}
+            <span>{label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 function PromptQueuePanel({ items, onRemove, onMove, onClear }: {
@@ -937,6 +1404,9 @@ function BobAvatar({ streaming, error }: { streaming?: boolean; error?: boolean 
   )
 }
 
+const FALLBACK_THINKING = 'Analyse de la demande…'
+const THINKING_SWAP_MS = 280
+
 export function appendThinkingText(current: string, chunk: string): string {
   const next = chunk.trim()
   if (!next) return current
@@ -949,9 +1419,72 @@ export function appendThinkingText(current: string, chunk: string): string {
   return `${current}\n${next}`
 }
 
-export function WorkingIndicator({ thinking, loading }: { thinking: string; loading: boolean }) {
+export function latestThinkingLine(text: string): string {
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean)
+  return lines[lines.length - 1] ?? ''
+}
+
+export function isThinkingContinuation(previous: string, next: string): boolean {
+  if (!previous || !next) return false
+  if (previous === next) return true
+  return next.startsWith(previous) || previous.startsWith(next)
+}
+
+function ThinkingStream({ thinking }: { thinking: string }) {
+  const current = latestThinkingLine(thinking) || FALLBACK_THINKING
+  const previousRef = useRef(current)
+  const [displayed, setDisplayed] = useState(current)
+  const [outgoing, setOutgoing] = useState<string | null>(null)
+  const [entering, setEntering] = useState(false)
+
+  useLayoutEffect(() => {
+    const previous = previousRef.current
+    if (current === previous) return
+    previousRef.current = current
+
+    if (isThinkingContinuation(previous, current)) {
+      setDisplayed(current)
+      return
+    }
+
+    setOutgoing(previous)
+    setDisplayed(current)
+    setEntering(true)
+    const timer = window.setTimeout(() => {
+      setOutgoing(null)
+      setEntering(false)
+    }, THINKING_SWAP_MS)
+    return () => window.clearTimeout(timer)
+  }, [current])
+
   return (
-    <div role="status" aria-label="Bob réfléchit" className="working-indicator">
+    <div className="thinking-stream">
+      {outgoing ? (
+        <div className="thinking-stream-line thinking-stream-line--out" aria-hidden="true">
+          {outgoing}
+        </div>
+      ) : null}
+      <div className={entering ? 'thinking-stream-line thinking-stream-line--in' : 'thinking-stream-line'}>
+        {displayed}
+      </div>
+    </div>
+  )
+}
+
+export function WorkingIndicator({
+  thinking,
+  loading,
+  snapshots,
+  onOpenSnapshot,
+}: {
+  thinking: string
+  loading: boolean
+  snapshots?: ChromeSnapshot[]
+  onOpenSnapshot?: (target: string, title?: string, kind?: 'file' | 'web') => void
+}) {
+  const t = useT()
+  return (
+    <div role="status" aria-label={t('chat.thinkingInProgress')} className="working-indicator">
       <BobAvatar streaming />
       <div className="working-indicator-body">
         {loading && (
@@ -960,15 +1493,34 @@ export function WorkingIndicator({ thinking, loading }: { thinking: string; load
           </div>
         )}
         <div className="thinking-stream-wrap">
-          <div className="thinking-stream-label">{loading ? 'Réflexion' : 'Réflexion en cours'}</div>
-          <div className="thinking-stream">{thinking || 'Analyse de la demande…'}</div>
+          <div className="thinking-stream-label">
+            {thinking.trim() ? t('chat.thinking') : t('chat.thinkingInProgress')}
+          </div>
+          <ThinkingStream thinking={thinking} />
         </div>
+        {snapshots && snapshots.length > 0 ? (
+          <div className="chrome-snapshot-stack">
+            {snapshots.map(snapshot => (
+              <ChromeSnapshotCard
+                key={snapshot.id}
+                snapshot={snapshot}
+                onOpen={(url, title) => onOpenSnapshot?.(url, title, 'web')}
+              />
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   )
 }
 
-function EmptyState() {
+function EmptyState({ builderMode }: { builderMode?: 'plugin_builder' | 'skill_builder' | null }) {
+  const t = useT()
+  const hint = builderMode === 'plugin_builder'
+    ? 'Décrivez le plugin (ex. « brief client AXA avec risques à vérifier »). Pas de formulaire.'
+    : builderMode === 'skill_builder'
+      ? 'Décrivez le skill (ex. « relire un contrat et lister les clauses à risque »). Pas de formulaire.'
+      : t('chat.empty')
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', alignItems: 'center',
@@ -978,7 +1530,7 @@ function EmptyState() {
       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity={.4}>
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
       </svg>
-      <span>Posez une question ou démarrez une tâche</span>
+      <span>{hint}</span>
     </div>
   )
 }

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatFileSize,
+  getActiveComposerMentions,
   getActivePluginMention,
+  getActivePluginMentions,
   getFileExtension,
   getFileTypeLabel,
   getFileVisualKind,
   getSuggestedBuiltinPluginId,
   mergeAttachmentPaths,
+  removeComposerMention,
 } from './composerAttachments'
 
 describe('composerAttachments', () => {
@@ -33,6 +36,7 @@ describe('composerAttachments', () => {
     expect(getFileExtension('/tmp/report.pdf')).toBe('pdf')
     expect(getFileTypeLabel('/tmp/report.pdf')).toBe('PDF')
     expect(getFileTypeLabel('/tmp/project', true)).toBe('DOSSIER')
+    expect(getFileTypeLabel('/tmp/a.PDF')).toBe('PDF')
   })
 
   it('suggests builtin plugins from office file extensions', () => {
@@ -46,5 +50,19 @@ describe('composerAttachments', () => {
   it('detects active plugin mentions in composer text', () => {
     expect(getActivePluginMention('Analyse @plugin:builtin-word ce DOCX')).toBe('builtin-word')
     expect(getActivePluginMention('Sans plugin')).toBeNull()
+  })
+
+  it('detects multiple plugin, skill and mcp mentions for preview chips', () => {
+    const text = '@plugin:bob-work-ibm-pursuit @skill:bob-work-github @plugin:bob-work-cto-invest @mcp:custom-tools go'
+    expect(getActivePluginMentions(text)).toEqual(['bob-work-ibm-pursuit', 'bob-work-cto-invest'])
+    expect(getActiveComposerMentions(text)).toEqual([
+      { kind: 'plugin', id: 'bob-work-ibm-pursuit' },
+      { kind: 'skill', id: 'bob-work-github' },
+      { kind: 'plugin', id: 'bob-work-cto-invest' },
+      { kind: 'mcp', id: 'custom-tools' },
+    ])
+    expect(removeComposerMention(text, 'plugin', 'bob-work-ibm-pursuit')).toBe(
+      '@skill:bob-work-github @plugin:bob-work-cto-invest @mcp:custom-tools go',
+    )
   })
 })

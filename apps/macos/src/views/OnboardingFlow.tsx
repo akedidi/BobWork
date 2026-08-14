@@ -1,17 +1,22 @@
 import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { useNavigate } from 'react-router-dom'
 import { bobAuthService, BobInstallationStatus } from '../services/BobAuthService'
 import { useAppStore } from '../stores/appStore'
 import { errorMessage } from '../lib/errorMessage'
+import { getSettings, installBobShell, updateSettings } from '../lib/ipc'
+import { requestStartupPermissions } from '../lib/startupPermissions'
+import { useT } from '../i18n'
 
 type Step = 'SETUP' | 'INSTALLING' | 'SUCCESS' | 'ERROR'
 
 export default function OnboardingFlow() {
+  const t = useT()
   const [step, setStep] = useState<Step>('SETUP')
   const [installation, setInstallation] = useState<BobInstallationStatus | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [enableComputerUse, setEnableComputerUse] = useState(false)
+  const [enableChrome, setEnableChrome] = useState(false)
   const { setBobStatus } = useAppStore()
   const navigate = useNavigate()
 
@@ -24,6 +29,7 @@ export default function OnboardingFlow() {
       if (authentication.active) {
         setBobStatus('ready')
         setStep('SUCCESS')
+        void requestStartupPermissions()
       }
     }).catch(error => {
       setErrorMsg(errorMessage(error, 'Impossible de vérifier la configuration locale.'))
@@ -35,7 +41,7 @@ export default function OnboardingFlow() {
     setStep('INSTALLING')
     setErrorMsg('')
     try {
-      await invoke('install_bob_shell')
+      await installBobShell()
       setInstallation('BOB_READY')
       setStep('SETUP')
     } catch (error) {
@@ -52,13 +58,16 @@ export default function OnboardingFlow() {
       setApiKey('')
       setBobStatus('ready')
       setStep('SUCCESS')
+      void requestStartupPermissions()
     } catch (error) {
       setErrorMsg(errorMessage(error))
     }
   }
 
   return (
-    <div style={{ padding: 48, maxWidth: 600, margin: '0 auto', fontFamily: 'system-ui, sans-serif' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div className="topbar titlebar-drag" data-tauri-drag-region style={{ height: 48, flexShrink: 0 }} />
+      <div style={{ padding: 48, maxWidth: 600, margin: '0 auto', fontFamily: 'system-ui, sans-serif', flex: 1, overflow: 'auto' }}>
       {step === 'SETUP' && (
         <div className="onboarding-step">
           <h1 style={{ fontSize: 24, marginBottom: 16 }}>Configurer IBM Bob</h1>
@@ -77,8 +86,8 @@ export default function OnboardingFlow() {
             <input
               type="password"
               autoFocus
-              aria-label="Clé API IBM Bob"
-              placeholder="Clé d’inférence IBM Bob"
+              aria-label={t('onboarding.apiKeyLabel')}
+              placeholder={t('onboarding.apiKeyLabel')}
               value={apiKey}
               onChange={event => setApiKey(event.target.value)}
               style={inputStyle}
@@ -112,7 +121,31 @@ export default function OnboardingFlow() {
           <p style={{ color: '#555', marginBottom: 24 }}>
             Bob Work peut maintenant exécuter les conversations, projets, tâches et planifications avec <code>bob run</code>.
           </p>
-          <button style={primaryButtonStyle} onClick={() => navigate('/')}>Continuer</button>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 10, fontSize: 13, color: '#333' }}>
+            <input type="checkbox" checked={enableComputerUse} onChange={event => setEnableComputerUse(event.target.checked)} />
+            Activer Computer Use (MCP bob-work-computer-use + Accessibilité)
+          </label>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 18, fontSize: 13, color: '#333' }}>
+            <input type="checkbox" checked={enableChrome} onChange={event => setEnableChrome(event.target.checked)} />
+            Activer le contrôle Chrome (MCP + Automatisation)
+          </label>
+          <button style={primaryButtonStyle} onClick={() => {
+            void (async () => {
+              if (enableComputerUse || enableChrome) {
+                try {
+                  const current = await getSettings()
+                  await updateSettings({
+                    ...current,
+                    computerUseEnabled: enableComputerUse || current.computerUseEnabled,
+                    chromeControlEnabled: enableChrome || current.chromeControlEnabled,
+                  })
+                } catch {
+                  /* settings remain available in Réglages */
+                }
+              }
+              navigate('/')
+            })()
+          }}>Continuer</button>
         </div>
       )}
 
@@ -123,6 +156,7 @@ export default function OnboardingFlow() {
           <button style={primaryButtonStyle} onClick={() => setStep('SETUP')}>Réessayer</button>
         </div>
       )}
+      </div>
     </div>
   )
 }

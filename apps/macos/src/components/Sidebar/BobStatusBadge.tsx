@@ -1,28 +1,42 @@
 import { useAppStore } from '../../stores/appStore';
 import { Zap, AlertCircle, Loader } from 'lucide-react';
-import { clsx } from 'clsx';
+
+const STATUS_STYLE: Record<string, { color: string }> = {
+  detecting: { color: 'var(--text-muted)' },
+  not_found: { color: 'var(--danger)' },
+  incompatible: { color: 'var(--warning)' },
+  unauthenticated: { color: 'var(--warning)' },
+  ready: { color: 'var(--success)' },
+  busy: { color: 'var(--accent)' },
+  error: { color: 'var(--danger)' },
+};
 
 export function BobStatusBadge() {
   const { bobStatus, bobInfo } = useAppStore();
-
   const config = {
-    detecting: { icon: Loader, label: 'Détection...', color: 'text-bw-text-tertiary', spin: true },
-    not_found: { icon: AlertCircle, label: 'Bob introuvable', color: 'text-bw-error', spin: false },
-    incompatible: { icon: AlertCircle, label: 'Version incompatible', color: 'text-bw-warning', spin: false },
-    unauthenticated: { icon: AlertCircle, label: 'Non connecté', color: 'text-bw-warning', spin: false },
-    ready: { icon: Zap, label: 'Bob prêt', color: 'text-bw-success', spin: false },
-    busy: { icon: Loader, label: 'Bob actif', color: 'text-bw-accent-primary', spin: true },
-    error: { icon: AlertCircle, label: 'Erreur Bob', color: 'text-bw-error', spin: false },
+    detecting: { icon: Loader, label: 'Détection…', spin: true },
+    not_found: { icon: AlertCircle, label: 'Bob introuvable', spin: false },
+    incompatible: { icon: AlertCircle, label: 'Version incompatible', spin: false },
+    unauthenticated: { icon: AlertCircle, label: 'Non connecté', spin: false },
+    ready: { icon: Zap, label: 'Bob prêt', spin: false },
+    busy: { icon: Loader, label: 'Bob actif', spin: true },
+    error: { icon: AlertCircle, label: 'Erreur Bob', spin: false },
   };
 
-  const { icon: Icon, label, color, spin } = config[bobStatus] ?? config.detecting;
+  const { icon: Icon, label, spin } = config[bobStatus] ?? config.detecting;
+  const color = (STATUS_STYLE[bobStatus] ?? STATUS_STYLE.detecting).color;
 
   return (
-    <div className={clsx('sidebar-item', color)}>
-      <Icon className={clsx('w-4 h-4 flex-shrink-0', spin && 'animate-spin-slow')} />
-      <span className="text-xs">{label}</span>
+    <div className="sidebar-item" style={{ color }}>
+      <Icon
+        className={spin ? 'animate-spin-slow' : undefined}
+        style={{ width: 16, height: 16, flexShrink: 0 }}
+      />
+      <span style={{ fontSize: 12 }}>{label}</span>
       {bobInfo?.version && (
-        <span className="text-xs text-bw-text-tertiary ml-auto">v{bobInfo.version}</span>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+          v{bobInfo.version}
+        </span>
       )}
     </div>
   );

@@ -3,25 +3,27 @@
 // CRUD for recurring task schedules
 // ============================================================
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { getSchedules, createSchedule, updateScheduleState, deleteSchedule, getScheduleRuns, runScheduleNow, getBobModes, getProjects } from '../lib/ipc'
 import type { Schedule, ScheduleRun, CreateScheduleInput, BobMode, Project } from '@bob-work/shared-types'
 import { listen } from '@tauri-apps/api/event'
 import { useLocation, useNavigate } from 'react-router-dom'
 import type { PluginScheduleTemplate } from '@bob-work/shared-types'
+import { useT } from '../i18n'
+import { useAppDialog } from '../components/AppDialog'
+import { formatScheduleFrequency, showRunAtField } from '../lib/scheduleDisplay'
+import { ModalOverlay, ModalPanel } from '../components/ModalOverlay'
+import { LoadErrorBanner } from '../components/LoadErrorBanner'
+import { errorMessage } from '../lib/errorMessage'
 
 type PluginTemplateState = PluginScheduleTemplate & { pluginId: string; pluginName: string }
 
 function fmtDate(iso: string | undefined | null) {
   if (!iso) return '—'
-  return new Date(iso).toLocaleDateString('fr-FR', {
+  return new Date(iso).toLocaleDateString(document.documentElement.lang || 'en', {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   })
-}
-
-const STATE_LABEL: Record<string, string> = {
-  active: 'Actif', paused: 'Pausé', completed: 'Terminé',
 }
 
 const OFFLINE_LABEL: Record<string, string> = {
@@ -46,6 +48,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
     name: initialTemplate?.name ?? '',
     instructions: initialTemplate?.instructions ?? '',
     cronOrEvent: initialTemplate?.cronOrEvent ?? 'every day',
+    runAt: '09:00',
     timezone: 'Europe/Paris',
     offlineBehavior: initialTemplate?.offlineBehavior ?? 'run_on_wake',
     overlapPolicy: initialTemplate?.overlapPolicy ?? 'queue',
@@ -57,23 +60,28 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
   const [projects, setProjects] = useState<Project[]>([])
 
   useEffect(() => {
-    getBobModes().then(setModes).catch(() => {})
-    getProjects().then(setProjects).catch(() => {})
+    getBobModes().then(setModes).catch(() => setModes([]))
+    getProjects().then(setProjects).catch(() => setProjects([]))
     setForm(current => ({ ...current, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' }))
   }, [])
 
-  const set = (k: keyof CreateScheduleInput, v: string) =>
-    setForm(prev => ({ ...prev, [k]: v }))
+  const set = <K extends keyof CreateScheduleInput>(key: K, value: CreateScheduleInput[K]) =>
+    setForm(prev => ({ ...prev, [key]: value }))
 
   const handleCreate = async () => {
     if (!form.name.trim() || !form.instructions.trim()) return
     setLoading(true)
     setError('')
     try {
-      await createSchedule(form)
+      const payload: CreateScheduleInput = {
+        ...form,
+        projectId: form.projectId?.trim() || undefined,
+        runAt: showRunAtField(form.cronOrEvent) ? form.runAt?.trim() || undefined : undefined,
+      }
+      await createSchedule(payload)
       onDone()
     } catch (e) {
-      setError(String(e))
+      setError(errorMessage(e, 'Impossible de créer la planification.'))
     } finally {
       setLoading(false)
     }
@@ -86,11 +94,8 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
   }
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.45)', zIndex: 200,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div style={{
+    <ModalOverlay onClose={onClose} closeOnBackdrop={!loading}>
+      <ModalPanel style={{
         background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)', padding: 28, width: 480, maxWidth: '90vw',
       }}>
@@ -117,6 +122,21 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
           </select>
         </FormField>
 
+        {showRunAtField(form.cronOrEvent) && (
+          <FormField label="Heure d'exécution">
+            <input
+              type="time"
+              value={form.runAt ?? '09:00'}
+              onChange={e => set('runAt', e.target.value)}
+              style={inputStyle}
+            />
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.45 }}>
+              Fuseau : {form.timezone || 'UTC'}. S&apos;exécute même écran verrouillé si Bob Work tourne en arrière-plan
+              (icône barre de menus) et le Mac reste éveillé.
+            </p>
+          </FormField>
+        )}
+
         <div style={{ display: 'flex', gap: 14 }}>
           <div style={{ flex: 1 }}>
             <FormField label="Mode Bob Shell">
@@ -139,7 +159,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
         <div style={{ display: 'flex', gap: 14 }}>
           <div style={{ flex: 1 }}>
             <FormField label="Si hors ligne">
-              <select value={form.offlineBehavior} onChange={e => set('offlineBehavior', e.target.value)} style={inputStyle}>
+              <select value={form.offlineBehavior} onChange={e => set('offlineBehavior', e.target.value as CreateScheduleInput['offlineBehavior'])} style={inputStyle}>
                 <option value="skip">Ignorer</option>
                 <option value="run_on_wake">Exécuter au réveil</option>
                 <option value="ask">Demander</option>
@@ -148,7 +168,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
           </div>
           <div style={{ flex: 1 }}>
             <FormField label="Si chevauchement">
-              <select value={form.overlapPolicy} onChange={e => set('overlapPolicy', e.target.value)} style={inputStyle}>
+              <select value={form.overlapPolicy} onChange={e => set('overlapPolicy', e.target.value as CreateScheduleInput['overlapPolicy'])} style={inputStyle}>
                 <option value="queue">Mettre en file</option>
                 <option value="ignore">Ignorer</option>
                 <option value="cancel_old">Annuler l'ancien</option>
@@ -173,26 +193,39 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
             {loading ? 'Création…' : 'Créer'}
           </button>
         </div>
-      </div>
-    </div>
+      </ModalPanel>
+    </ModalOverlay>
   )
 }
 
 // ── Log Modal ──────────────────────────────────────────────────
 
 function LogModal({ schedule, onClose }: { schedule: Schedule; onClose: () => void }) {
+  const t = useT()
   const [runs, setRuns] = useState<ScheduleRun[] | null>(null)
+  const [runsError, setRunsError] = useState<unknown>(null)
+
+  const loadRuns = () => {
+    setRuns(null)
+    setRunsError(null)
+    getScheduleRuns(schedule.id)
+      .then(items => {
+        setRunsError(null)
+        setRuns(items)
+      })
+      .catch(error => {
+        setRuns([])
+        setRunsError(error)
+      })
+  }
 
   useEffect(() => {
-    getScheduleRuns(schedule.id).then(setRuns).catch(() => setRuns([]))
+    loadRuns()
   }, [schedule.id])
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.45)', zIndex: 200,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div style={{
+    <ModalOverlay onClose={onClose}>
+      <ModalPanel style={{
         background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)', padding: 24, width: 800, maxWidth: '90vw',
         display: 'flex', flexDirection: 'column', maxHeight: '85vh',
@@ -205,7 +238,9 @@ function LogModal({ schedule, onClose }: { schedule: Schedule; onClose: () => vo
         </div>
         
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {runs === null ? <div className="task-empty"><span className="task-spinner" />Chargement…</div> : runs.length === 0 ? <div className="task-empty">Aucune exécution.</div> : runs.map(run => (
+          {runsError ? (
+            <LoadErrorBanner error={runsError} onRetry={loadRuns} fallback={t('schedules.runsLoadFailed')} />
+          ) : runs === null ? <div className="task-empty"><span className="task-spinner" />Chargement…</div> : runs.length === 0 ? <div className="task-empty">Aucune exécution.</div> : runs.map(run => (
             <div key={run.id} className="task-card" style={{ marginBottom: 8, cursor: 'default' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {run.state === 'running' && <span className="task-spinner" />}
@@ -222,16 +257,26 @@ function LogModal({ schedule, onClose }: { schedule: Schedule; onClose: () => vo
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
           <button onClick={onClose} className="btn-secondary">Fermer</button>
         </div>
-      </div>
-    </div>
+      </ModalPanel>
+    </ModalOverlay>
   )
 }
 
 // ── Main view ─────────────────────────────────────────────────
 
 export default function ScheduleView() {
+  const t = useT()
+  const dialog = useAppDialog()
+  const stateLabel: Record<string, string> = {
+    active: t('schedules.active'),
+    paused: t('schedules.paused'),
+    completed: t('schedules.completed'),
+  }
   const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [actionError, setActionError] = useState<unknown>(null)
   const [showModal, setShowModal] = useState(false)
   const [viewingLogsFor, setViewingLogsFor] = useState<Schedule | null>(null)
   const [runningId, setRunningId] = useState<string | null>(null)
@@ -240,12 +285,25 @@ export default function ScheduleView() {
   const [initialTemplate, setInitialTemplate] = useState<PluginTemplateState | undefined>(() => (location.state as { pluginTemplate?: PluginTemplateState } | null)?.pluginTemplate)
 
   const load = async () => {
+    setLoadError(null)
     try {
-      const list = await getSchedules()
+      const [list, projectList] = await Promise.all([
+        getSchedules(),
+        getProjects().catch(() => []),
+      ])
       setSchedules(list)
-    } catch { /* ignore */ }
-    setLoading(false)
+      setProjects(projectList)
+    } catch (error) {
+      setLoadError(error)
+    } finally {
+      setLoading(false)
+    }
   }
+
+  const projectNameById = useMemo(
+    () => new Map(projects.map(project => [project.id, project.name])),
+    [projects],
+  )
 
   useEffect(() => { 
     load() 
@@ -267,36 +325,43 @@ export default function ScheduleView() {
 
   const handleToggle = async (s: Schedule) => {
     const next = s.state === 'active' ? 'paused' : 'active'
+    setActionError(null)
     try {
       await updateScheduleState(s.id, next)
       setSchedules(prev => prev.map(x => x.id === s.id ? { ...x, state: next as Schedule['state'] } : x))
-    } catch { /* ignore */ }
+    } catch (error) {
+      setActionError(error)
+    }
   }
 
   const handleDelete = async (s: Schedule) => {
-    if (!confirm(`Supprimer la planification « ${s.name} » ?`)) return
+    if (!await dialog.confirm({ message: t('schedules.deleteConfirm', { name: s.name }), confirmLabel: t('common.delete'), destructive: true })) return
+    setActionError(null)
     try {
       await deleteSchedule(s.id)
       setSchedules(prev => prev.filter(x => x.id !== s.id))
-    } catch { /* ignore */ }
+    } catch (error) {
+      setActionError(error)
+    }
   }
 
   const handleRunNow = async (schedule: Schedule) => {
     setRunningId(schedule.id)
+    setActionError(null)
     try {
       await runScheduleNow(schedule.id)
       await load()
       setViewingLogsFor(schedule)
     } catch (error) {
-      alert(`Impossible de démarrer la tâche : ${String(error)}`)
+      setActionError(error)
     } finally { setRunningId(null) }
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Topbar */}
-      <div className="topbar titlebar-drag" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span className="titlebar-no-drag" style={{ fontWeight: 600, fontSize: 14 }}>Planifications</span>
+      <div className="topbar titlebar-drag" data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{t('schedules.title')}</span>
         <button
           onClick={() => setShowModal(true)}
           className="btn-primary titlebar-no-drag"
@@ -306,11 +371,18 @@ export default function ScheduleView() {
         </button>
       </div>
 
+      <LoadErrorBanner
+        error={loadError}
+        onRetry={() => { setLoading(true); void load() }}
+        fallback={t('schedules.loadFailed')}
+      />
+      <LoadErrorBanner error={actionError} fallback={t('schedules.actionFailed')} />
+
       {/* List */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px 24px' }}>
-        {loading ? (
+        {loading && !loadError ? (
           <EmptyMsg icon="⏳" text="Chargement…" />
-        ) : schedules.length === 0 ? (
+        ) : loadError ? null : schedules.length === 0 ? (
           <EmptyMsg
             icon="🕐"
             text="Aucune planification"
@@ -322,6 +394,8 @@ export default function ScheduleView() {
               <ScheduleCard
                 key={s.id}
                 schedule={s}
+                projectName={s.projectId ? projectNameById.get(s.projectId) : undefined}
+                stateLabel={stateLabel}
                 onToggle={() => handleToggle(s)}
                 onDelete={() => handleDelete(s)}
                 onViewLogs={() => setViewingLogsFor(s)}
@@ -354,9 +428,11 @@ export default function ScheduleView() {
 // ── Schedule card ─────────────────────────────────────────────
 
 function ScheduleCard({
-  schedule, onToggle, onDelete, onViewLogs, onRunNow, running
+  schedule, projectName, stateLabel, onToggle, onDelete, onViewLogs, onRunNow, running
 }: {
   schedule: Schedule
+  projectName?: string
+  stateLabel: Record<string, string>
   onToggle: () => void
   onDelete: () => void
   onViewLogs: () => void
@@ -402,14 +478,15 @@ function ScheduleCard({
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-            <span>🔁 {schedule.cronOrEvent}</span>
+            <span>🔁 {formatScheduleFrequency(schedule.cronOrEvent, schedule.runAt)}</span>
+            {projectName && <span>📁 {projectName}</span>}
             <span>🌍 {schedule.timezone}</span>
             <span>📶 Si hors ligne : {OFFLINE_LABEL[schedule.offlineBehavior] ?? schedule.offlineBehavior}</span>
             <span style={{
               fontWeight: 600,
               color: isActive ? 'var(--accent)' : 'var(--text-muted)',
             }}>
-              {STATE_LABEL[schedule.state] ?? schedule.state}
+              {stateLabel[schedule.state] ?? schedule.state}
             </span>
           </div>
 
