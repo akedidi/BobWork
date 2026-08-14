@@ -11,6 +11,7 @@ import { useAppStore } from '../stores/appStore'
 import { PLUGIN_CONVERSATION_PROMPT } from '../lib/pluginBuilder'
 import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, PluginVersion, PluginVersionDiff } from '@bob-work/shared-types'
 import { useAppDialog } from '../components/AppDialog'
+import { statusTone } from '../lib/statusTone'
 import { ModalOverlay, ModalPanel } from '../components/ModalOverlay'
 
 type PluginFilter = 'all' | 'enabled' | 'disabled'
@@ -357,7 +358,7 @@ export default function PluginsView() {
         </ModalPanel>
       </ModalOverlay>
     )}
-    {status && <div className="settings-status">{status}</div>}
+    {status && <div className={`settings-status settings-status--${statusTone(status)}`} role="status" aria-live="polite">{status}</div>}
   </div>
 }
 

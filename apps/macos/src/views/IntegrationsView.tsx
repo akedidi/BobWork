@@ -27,6 +27,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import { useT } from '../i18n'
 import { useAppDialog } from '../components/AppDialog'
+import { statusTone } from '../lib/statusTone'
 
 const MCP_BY_PROVIDER: Record<string, string> = {
   github: 'bob-work-github',
@@ -1199,7 +1200,7 @@ export default function IntegrationsView() {
         </div>
       )}
 
-      {status && <div className="settings-status">{status}</div>}
+      {status && <div className={`settings-status settings-status--${statusTone(status)}`} role="status" aria-live="polite">{status}</div>}
     </div>
   )
 }

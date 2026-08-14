@@ -1257,6 +1257,9 @@
   .settings-warning, .settings-status { max-width: 760px; padding: 11px 13px; border-radius: 8px; font-size: 11.5px; line-height: 1.5; }
   .settings-warning { background: color-mix(in srgb, var(--warning) 12%, transparent); color: color-mix(in srgb, var(--warning) 80%, var(--text-primary)); border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent); }
   .settings-status { position: fixed; right: 28px; bottom: 76px; background: var(--bg-surface); border: 1px solid var(--border); box-shadow: var(--shadow-md); }
+  .settings-status--success { background: color-mix(in srgb, var(--success) 8%, var(--bg-surface)); border-color: color-mix(in srgb, var(--success) 42%, var(--border)); box-shadow: var(--shadow-md), inset 3px 0 0 var(--success); }
+  .settings-status--success::before { content: '✓'; display: inline-grid; place-items: center; width: 17px; height: 17px; margin-right: 8px; border-radius: 50%; background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); font-weight: 800; }
+  .settings-status--error { border-color: color-mix(in srgb, var(--danger) 38%, var(--border)); box-shadow: var(--shadow-md), inset 3px 0 0 var(--danger); }
   .btn-primary { padding: 7px 12px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: white; cursor: pointer; font-size: 12px; }
   .btn-primary:disabled { opacity: .5; cursor: default; }
   .danger-link, .link-btn { border: 0; background: transparent; cursor: pointer; font-size: 11.5px; padding: 6px 0; margin-right: 12px; }
