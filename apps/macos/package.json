@@ -13,6 +13,7 @@
     "ensure:dev-app": "bash scripts/ensure-dev-app.sh debug",
     "install:dev-app": "INSTALL_APPS=1 bash scripts/ensure-dev-app.sh debug",
     "build:tauri": "tauri build",
+    "clean:rust": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
