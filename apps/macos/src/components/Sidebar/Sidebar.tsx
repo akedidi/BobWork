@@ -3,7 +3,7 @@
 // Navigation principale + données réelles via IPC
 // ============================================================
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Archive, FolderTree } from 'lucide-react'
@@ -15,6 +15,7 @@ import { listen } from '@tauri-apps/api/event'
 import type { SearchResult, UsageStatus } from '@bob-work/shared-types'
 import { UsageMeter } from '../UsageMeter/UsageMeter'
 import { activeTasksByConversationId, conversationActivity } from '../../lib/activeTasks'
+import { ModalOverlay, ModalPanel } from '../ModalOverlay'
 
 const CONTEXT_MENU_WIDTH = 220
 const CONTEXT_MENU_HEIGHT = 168
@@ -58,6 +59,7 @@ export default function Sidebar() {
   const [projectPicker, setProjectPicker] = useState<{ conversationId: string } | null>(null)
   const [usage, setUsage] = useState<UsageStatus | null>(null)
   const [sidebarLoadError, setSidebarLoadError] = useState<string | null>(null)
+  const searchTriggerRef = useRef<HTMLButtonElement>(null)
 
   const activeTasksByConversation = useMemo(
     () => activeTasksByConversationId(tasks),
@@ -366,6 +368,7 @@ export default function Sidebar() {
         <span className="sidebar-brand titlebar-no-drag">Bob Work</span>
         <div className="sidebar-header-spacer" data-tauri-drag-region />
         <button
+          ref={searchTriggerRef}
           type="button"
           className="icon-btn titlebar-no-drag sidebar-header-btn"
           title={t('nav.search')}
@@ -678,13 +681,12 @@ export default function Sidebar() {
       </div>
 
       {searchOpen && createPortal(
-        <div className="search-overlay" onMouseDown={closeSearch}>
-          <div className="search-dialog" role="dialog" aria-label={t('nav.search')} onMouseDown={event => event.stopPropagation()}>
+        <ModalOverlay className="search-overlay" onClose={closeSearch} restoreFocusTo={searchTriggerRef}>
+          <ModalPanel className="search-dialog" aria-label={t('nav.search')}>
             <input
               autoFocus
               value={searchQuery}
               onChange={event => setSearchQuery(event.target.value)}
-              onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeSearch() } }}
               placeholder={t('search.chatsPlaceholder')}
             />
             <div className="search-results">
@@ -738,8 +740,8 @@ export default function Sidebar() {
                 </>
               )}
             </div>
-          </div>
-        </div>,
+          </ModalPanel>
+        </ModalOverlay>,
         document.body,
       )}
 

@@ -55,6 +55,21 @@ describe('Sidebar', () => {
     ).toBeVisible()
   })
 
+  it('ferme la recherche avec Échap et rend le focus au bouton', async () => {
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+    const trigger = screen.getByTitle('Rechercher')
+    trigger.focus()
+    fireEvent.click(trigger)
+    expect(await screen.findByRole('dialog', { name: 'Rechercher' })).toBeVisible()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rechercher' })).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
   it('garde le panneau Priorité ouvert après le clic d’ouverture', async () => {
     useAppStore.setState({
       notifications: [{

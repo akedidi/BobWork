@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, type CSSProperties, type ReactNode, type RefObject } from 'react'
 
 type ModalOverlayProps = {
   onClose: () => void
@@ -9,6 +9,8 @@ type ModalOverlayProps = {
   closeOnEscape?: boolean
   zIndex?: number
   className?: string
+  /** Optional explicit focus target restored when the modal closes. */
+  restoreFocusTo?: RefObject<HTMLElement | null>
 }
 
 type ModalPanelProps = {
@@ -16,6 +18,7 @@ type ModalPanelProps = {
   className?: string
   style?: CSSProperties
   role?: string
+  'aria-label'?: string
   'aria-labelledby'?: string
   'aria-describedby'?: string
 }
@@ -28,6 +31,7 @@ export function ModalOverlay({
   closeOnEscape = closeOnBackdrop,
   zIndex,
   className,
+  restoreFocusTo,
 }: ModalOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
@@ -73,9 +77,9 @@ export function ModalOverlay({
     document.addEventListener('keydown', onKeyDown)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus()
+      ;(restoreFocusTo?.current ?? previouslyFocused)?.focus()
     }
-  }, [closeOnEscape])
+  }, [closeOnEscape, restoreFocusTo])
 
   return (
     <div
@@ -100,6 +104,7 @@ export function ModalPanel({
   className,
   style,
   role = 'dialog',
+  'aria-label': ariaLabel,
   'aria-labelledby': ariaLabelledby,
   'aria-describedby': ariaDescribedby,
 }: ModalPanelProps) {
@@ -109,6 +114,7 @@ export function ModalPanel({
       style={style}
       role={role}
       aria-modal={role === 'dialog' || role === 'alertdialog' ? true : undefined}
+      aria-label={ariaLabel}
       aria-labelledby={ariaLabelledby}
       aria-describedby={ariaDescribedby}
       onMouseDown={event => event.stopPropagation()}
