@@ -35,8 +35,6 @@ export function isLocalDevelopmentBrowserUrl(value: string): boolean {
   try {
     const parsed = new URL(value)
     return ['http:', 'https:'].includes(parsed.protocol)
-      && parsed.username === ''
-      && parsed.password === ''
       && LOCAL_DEVELOPMENT_HOSTS.has(parsed.hostname.toLowerCase())
   } catch {
     return false
@@ -49,8 +47,6 @@ export function isTrustedEmbeddedBrowserUrl(value: string): boolean {
     const parsed = new URL(value)
     return isLocalDevelopmentBrowserUrl(value) || (parsed.protocol === 'https:'
       && parsed.port === ''
-      && parsed.username === ''
-      && parsed.password === ''
       && TRUSTED_EMBEDDED_HOSTS.has(parsed.hostname.toLowerCase()))
   } catch {
     return false

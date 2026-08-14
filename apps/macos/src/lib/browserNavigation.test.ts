@@ -24,8 +24,10 @@ describe('isTrustedEmbeddedBrowserUrl', () => {
     'https://github.com/openai/codex',
     'https://learn.microsoft.com/fr-fr/',
     'http://localhost:3000/',
+    'http://dev:secret@localhost:3000/private',
     'https://127.0.0.1:8443/',
     'http://[::1]:5173/',
+    'https://reader:secret@github.com/private',
   ])('allows an explicitly trusted HTTPS documentation host: %s', value => {
     expect(isTrustedEmbeddedBrowserUrl(value)).toBe(true)
   })
@@ -34,8 +36,6 @@ describe('isTrustedEmbeddedBrowserUrl', () => {
     'http://github.com/openai/codex',
     'https://evil.github.com.example.test/',
     'https://login.microsoftonline.com/common/oauth2/authorize',
-    'https://user:password@github.com/',
-    'http://user:password@localhost:3000/',
     'http://localhost.example.test:3000/',
     'about:blank',
   ])('keeps untrusted or sensitive navigation outside the WebView: %s', value => {
@@ -44,6 +44,7 @@ describe('isTrustedEmbeddedBrowserUrl', () => {
 
   it('classifies only exact loopback hosts as local development pages', () => {
     expect(isLocalDevelopmentBrowserUrl('http://localhost:1420/')).toBe(true)
+    expect(isLocalDevelopmentBrowserUrl('http://dev:secret@localhost:1420/')).toBe(true)
     expect(isLocalDevelopmentBrowserUrl('http://127.0.0.1:5173/')).toBe(true)
     expect(isLocalDevelopmentBrowserUrl('https://example.com/')).toBe(false)
   })
