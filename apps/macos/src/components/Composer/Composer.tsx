@@ -63,6 +63,7 @@ interface SpeechRecognitionLike {
   continuous: boolean
   start: () => void
   stop: () => void
+  abort?: () => void
   onresult: ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null
   onend: (() => void) | null
   onerror: (() => void) | null
@@ -115,11 +116,13 @@ export default function Composer({
   const [modeSearch, setModeSearch] = useState('')
   const [projectMenu, setProjectMenu] = useState(false)
   const [listening, setListening] = useState(false)
+  const [dictationStarting, setDictationStarting] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const attachButtonRef = useRef<HTMLButtonElement>(null)
   const projectButtonRef = useRef<HTMLButtonElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  const dictationStartingRef = useRef(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
   const [isDragging, setIsDragging] = useState(false)
@@ -128,6 +131,20 @@ export default function Composer({
   useEffect(() => {
     if (initialProjectId !== undefined) setProjectId(initialProjectId)
   }, [initialProjectId])
+
+  useEffect(() => () => {
+    const recognition = recognitionRef.current
+    recognitionRef.current = null
+    if (!recognition) return
+    recognition.onresult = null
+    recognition.onend = null
+    recognition.onerror = null
+    try {
+      recognition.abort?.()
+    } catch {
+      // WebKit may already have disposed the native recognition session.
+    }
+  }, [])
 
   const insertPluginMention = useCallback((pluginId: string) => {
     const mentionValue = `@plugin:${pluginId}`
@@ -335,15 +352,26 @@ export default function Composer({
   }
 
   const toggleDictation = async () => {
-    if (listening) {
-      recognitionRef.current?.stop()
+    const activeRecognition = recognitionRef.current
+    if (activeRecognition) {
+      try {
+        activeRecognition.stop()
+      } catch {
+        recognitionRef.current = null
+        setListening(false)
+      }
       return
     }
+    if (dictationStartingRef.current) return
+    dictationStartingRef.current = true
+    setDictationStarting(true)
     let availability
     try {
       availability = await getVoiceDictationAvailability()
     } catch (error) {
       await dialog.alert({ message: t('composer.dictationCheckFailed', { error: errorMessage(error) }) })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
       return
     }
     if (!availability.available) {
@@ -351,6 +379,8 @@ export default function Composer({
         ? t('composer.dictationRequiresApp')
         : t('composer.dictationUnavailable')
       await dialog.alert({ message })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
       return
     }
     const SpeechRecognition = (window as unknown as {
@@ -359,6 +389,8 @@ export default function Composer({
     }).SpeechRecognition ?? (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike }).webkitSpeechRecognition
     if (!SpeechRecognition) {
       await dialog.alert({ message: t('composer.dictationWebkitUnavailable') })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
       return
     }
     try {
@@ -366,18 +398,21 @@ export default function Composer({
       recognition.lang = localeToBcp47(locale)
       recognition.interimResults = true
       recognition.continuous = false
-      let finalTranscript = ''
+      const baseText = text
       recognition.onresult = event => {
-        let interim = ''
+        let transcript = ''
         for (let index = 0; index < event.results.length; index += 1) {
-          const result = event.results[index]
-          if (result.isFinal) finalTranscript += result[0].transcript
-          else interim += result[0].transcript
+          transcript += event.results[index][0].transcript
         }
-        setText(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${finalTranscript || interim}`)
+        const separator = baseText && !baseText.endsWith(' ') && transcript ? ' ' : ''
+        setText(`${baseText}${separator}${transcript}`)
       }
-      recognition.onend = () => setListening(false)
-      recognition.onerror = () => setListening(false)
+      const finish = () => {
+        if (recognitionRef.current === recognition) recognitionRef.current = null
+        setListening(false)
+      }
+      recognition.onend = finish
+      recognition.onerror = finish
       recognitionRef.current = recognition
       setListening(true)
       recognition.start()
@@ -385,6 +420,9 @@ export default function Composer({
       recognitionRef.current = null
       setListening(false)
       await dialog.alert({ message: t('composer.dictationStartFailed', { error: errorMessage(error) }) })
+    } finally {
+      dictationStartingRef.current = false
+      setDictationStarting(false)
     }
   }
 
@@ -784,7 +822,15 @@ export default function Composer({
             )}
           </div>
 
-          <button className={`icon-btn ${listening ? 'recording' : ''}`} title="Dictée Apple" onClick={toggleDictation}>
+          <button
+            type="button"
+            className={`icon-btn ${listening ? 'recording' : ''}`}
+            title={t('composer.dictationLabel')}
+            aria-label={t('composer.dictationLabel')}
+            aria-pressed={listening}
+            disabled={dictationStarting}
+            onClick={toggleDictation}
+          >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
           </button>
 

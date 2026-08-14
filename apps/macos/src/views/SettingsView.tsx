@@ -805,7 +805,7 @@ export default function SettingsView() {
                 />
                 <ToggleRow
                   title="Contrôle de Chrome"
-                  description="Installe le MCP bob-work-chrome-control. L’Automatisation Chrome est demandée pour Bob Work (pas le CLI)."
+                  description={t('settings.chromeControlPermissionTiming')}
                   value={s.chromeControlEnabled}
                   onChange={value => change('chromeControlEnabled', value)}
                   disabled={s.sandboxMode}

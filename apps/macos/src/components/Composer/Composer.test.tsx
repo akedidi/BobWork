@@ -137,6 +137,55 @@ describe('Composer popovers', () => {
     expect(await screen.findByRole('alertdialog')).toHaveTextContent('véritable application Bob Work')
   })
 
+  it('n’ouvre qu’une session de dictée, remplace l’intermédiaire et arrête proprement', async () => {
+    let constructorCalls = 0
+    class Recognition {
+      lang = ''
+      interimResults = false
+      continuous = true
+      start = vi.fn()
+      stop = vi.fn()
+      abort = vi.fn()
+      onresult: null | ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) = null
+      onend: null | (() => void) = null
+      onerror: null | (() => void) = null
+
+      constructor() {
+        constructorCalls += 1
+      }
+    }
+    let recognition: Recognition | undefined
+    class TrackedRecognition extends Recognition {
+      constructor() {
+        super()
+        recognition = this
+      }
+    }
+    Object.defineProperty(window, 'webkitSpeechRecognition', {
+      configurable: true,
+      value: TrackedRecognition,
+    })
+    await renderComposer()
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'Bonjour' } })
+
+    const mic = screen.getByRole('button', { name: 'Dictée Apple' })
+    fireEvent.click(mic)
+    fireEvent.click(mic)
+
+    await waitFor(() => expect(recognition?.start).toHaveBeenCalledOnce())
+    expect(constructorCalls).toBe(1)
+    act(() => recognition?.onresult?.({ results: [{ 0: { transcript: 'le mon' }, isFinal: false }] }))
+    expect(input).toHaveValue('Bonjour le mon')
+    act(() => recognition?.onresult?.({ results: [{ 0: { transcript: 'le monde' }, isFinal: true }] }))
+    expect(input).toHaveValue('Bonjour le monde')
+
+    fireEvent.click(mic)
+    expect(recognition?.stop).toHaveBeenCalledOnce()
+    act(() => recognition?.onend?.())
+    expect(mic).toHaveAttribute('aria-pressed', 'false')
+  })
+
   it('joint plusieurs fichiers, déduplique les chemins et transmet les pièces jointes', async () => {
     const onSend = vi.fn()
     vi.mocked(open).mockResolvedValue(['/tmp/rapport.pdf', '/tmp/tableau.xlsx', '/tmp/rapport.pdf'])

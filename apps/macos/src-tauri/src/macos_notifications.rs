@@ -152,6 +152,17 @@ pub fn send(
     task_id: Option<&str>,
 ) -> Result<(), String> {
     require_app_bundle()?;
+    // A completion event can arrive immediately after startup, before the
+    // best-effort permission request has completed. Resolve that race here so
+    // a successful `send` always means macOS has accepted notifications for
+    // Bob Work instead of silently dropping the banner.
+    let auth = match authorization_state()? {
+        AuthState::NotDetermined => request_authorization()?,
+        state => state,
+    };
+    if !auth.is_granted() {
+        return Err("Les notifications système sont désactivées pour Bob Work dans Réglages Système → Notifications.".into());
+    }
     // Required to opt into Banner/List/Sound while Bob Work is foregrounded.
     install_delegate();
     let center = UNUserNotificationCenter::currentNotificationCenter();

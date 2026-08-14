@@ -80,6 +80,7 @@ export const fr: MessageTree = {
     dictationUnavailable: 'La dictée est indisponible dans cette version de Bob Work. Réinstallez ou reconstruisez l’application avant de réessayer.',
     dictationWebkitUnavailable: 'La dictée Apple n’est pas disponible dans cette version de WebKit. Activez la dictée macOS ou utilisez le collage vocal.',
     dictationStartFailed: 'Impossible de démarrer la dictée Apple : {{error}}',
+    dictationLabel: 'Dictée Apple',
   },
   chat: {
     placeholder: 'Sur quoi travailler ?',
@@ -211,6 +212,7 @@ export const fr: MessageTree = {
     accessibilityPrompted: 'Invite Accessibilité ouverte — activez Bob Work dans Réglages Système, puis Revérifier.',
     requestAutomation: 'Demander Automatisation Chrome',
     automationGranted: 'Automatisation Bob Work → Google Chrome accordée.',
+    chromeControlPermissionTiming: 'Installe le MCP bob-work-chrome-control. macOS ne peut afficher Bob Work dans Automatisation qu’après un premier ordre Apple Event : il est envoyé lorsque vous activez cette option. Chrome doit être installé et Bob Work lancé comme application.',
     sandboxBlocksElevated: 'Mode sandbox actif : Computer Use et Contrôle Chrome sont ignorés pour les sessions bob run tant que le sandbox n’est pas désactivé.',
     computerUseLoadFailed: 'Impossible de charger le statut Computer Use.',
     chromeLoadFailed: 'Impossible de charger le statut Contrôle Chrome.',
