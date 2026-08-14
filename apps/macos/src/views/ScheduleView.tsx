@@ -18,6 +18,10 @@ import { errorMessage } from '../lib/errorMessage'
 
 type PluginTemplateState = PluginScheduleTemplate & { pluginId: string; pluginName: string }
 
+export function currentLocalTime(now = new Date()) {
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+}
+
 function fmtDate(iso: string | undefined | null) {
   if (!iso) return '—'
   return new Date(iso).toLocaleDateString(document.documentElement.lang || 'en', {
@@ -48,7 +52,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
     name: initialTemplate?.name ?? '',
     instructions: initialTemplate?.instructions ?? '',
     cronOrEvent: initialTemplate?.cronOrEvent ?? 'every day',
-    runAt: '09:00',
+    runAt: currentLocalTime(),
     timezone: 'Europe/Paris',
     offlineBehavior: initialTemplate?.offlineBehavior ?? 'run_on_wake',
     overlapPolicy: initialTemplate?.overlapPolicy ?? 'queue',
@@ -126,7 +130,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
           <FormField label="Heure d'exécution">
             <input
               type="time"
-              value={form.runAt ?? '09:00'}
+              value={form.runAt ?? ''}
               onChange={e => set('runAt', e.target.value)}
               style={inputStyle}
             />

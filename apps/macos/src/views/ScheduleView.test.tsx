@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { CreateModal } from './ScheduleView'
+import { CreateModal, currentLocalTime } from './ScheduleView'
 
 const mocks = vi.hoisted(() => ({
   getBobModes: vi.fn(),
@@ -27,6 +27,11 @@ describe('CreateModal', () => {
   beforeEach(() => {
     mocks.getBobModes.mockResolvedValue([])
     mocks.getProjects.mockResolvedValue([])
+  })
+
+  it('formats the current local time for a new schedule', () => {
+    expect(currentLocalTime(new Date(2026, 7, 15, 4, 7))).toBe('04:07')
+    expect(currentLocalTime(new Date(2026, 7, 15, 19, 42))).toBe('19:42')
   })
 
   it('keeps focus while typing complete schedule fields', async () => {
