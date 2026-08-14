@@ -125,6 +125,58 @@ describe('appStore', () => {
     expect(useAppStore.getState().tasks).toHaveLength(1)
     expect(useAppStore.getState().tasks[0].progress).toBe(50)
   })
+
+  it('pushNotification prepends and ignores duplicates', async () => {
+    const { useAppStore } = await import('../stores/appStore')
+    useAppStore.setState({ notifications: [] })
+    const note = {
+      id: 'n1',
+      title: 'Réponse de Bob',
+      body: 'Brief prêt.',
+      kind: 'bob_completed',
+      createdAt: '2026-08-13T00:00:00Z',
+    }
+    useAppStore.getState().pushNotification(note)
+    useAppStore.getState().pushNotification(note)
+    useAppStore.getState().pushNotification({ ...note, id: 'n2', body: 'Autre.' })
+    expect(useAppStore.getState().notifications.map(item => item.id)).toEqual(['n2', 'n1'])
+    expect(useAppStore.getState().notifications[0].read).toBe(false)
+  })
+
+  it('revealNotificationCenter opens the in-app notification inbox', async () => {
+    const { useAppStore } = await import('../stores/appStore')
+    useAppStore.setState({ notificationsOpen: false, sidebarVisible: false })
+    useAppStore.getState().revealNotificationCenter()
+    expect(useAppStore.getState().notificationsOpen).toBe(true)
+    expect(useAppStore.getState().sidebarVisible).toBe(true)
+  })
+
+  it('records Bob replies without any ingestion option opening the in-app notification inbox', async () => {
+    const { useAppStore } = await import('../stores/appStore')
+    const { ingestAppNotification } = await import('../components/Layout/MainLayout')
+    useAppStore.setState({ notifications: [], notificationsOpen: false, sidebarVisible: true })
+    ingestAppNotification({
+      id: 'bob-done-1',
+      title: 'Réponse de Bob',
+      body: 'Le travail est terminé.',
+      kind: 'bob_completed',
+      createdAt: '2026-08-13T18:00:00Z',
+      conversationId: 'conversation-1',
+    })
+    expect(useAppStore.getState().notifications).toHaveLength(1)
+    expect(useAppStore.getState().notificationsOpen).toBe(false)
+  })
+
+  it('tracks unread conversations until they are opened', async () => {
+    const { useAppStore } = await import('../stores/appStore')
+    const store = useAppStore.getState()
+    store.markConversationUnread('c1')
+    store.markConversationUnread('c2')
+    store.markConversationUnread('c1')
+    expect(useAppStore.getState().unreadConversationIds).toEqual(['c1', 'c2'])
+    store.markConversationRead('c1')
+    expect(useAppStore.getState().unreadConversationIds).toEqual(['c2'])
+  })
 })
 
 // ── IPC Wrappers ──────────────────────────────────────────────
@@ -188,6 +240,14 @@ describe('ipc wrappers', () => {
     // Settings
     expect(typeof ipc.getSettings).toBe('function')
     expect(typeof ipc.updateSettings).toBe('function')
+    expect(typeof ipc.listAppNotifications).toBe('function')
+    expect(typeof ipc.getUsageStatus).toBe('function')
+    expect(typeof ipc.getBobalytics).toBe('function')
+    expect(typeof ipc.exportBobalytics).toBe('function')
+    expect(typeof ipc.installBobShell).toBe('function')
+    expect(typeof ipc.openDataDir).toBe('function')
+    expect(typeof ipc.exportDiagnostics).toBe('function')
+    expect(typeof ipc.createPermissionGrant).toBe('function')
   })
 
   it('detectBob calls invoke with correct command', async () => {

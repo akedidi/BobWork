@@ -10,6 +10,24 @@ import type {
   AppSettings, BobDetectionResult, BusinessMode,
 } from '@bob-work/shared-types';
 
+export interface BuilderSession {
+  kind: 'plugin_builder' | 'skill_builder'
+  brief: string
+  /** Wizard already collected the spec; Bob should generate, not interview. */
+  guided?: boolean
+}
+
+export interface AppNotification {
+  id: string
+  title: string
+  body: string
+  kind: string
+  createdAt: string
+  taskId?: string | null
+  conversationId?: string | null
+  read: boolean
+}
+
 // ── App Store ─────────────────────────────────────────────────
 
 interface AppState {
@@ -30,6 +48,10 @@ interface AppState {
   tasks: Task[];
   plugins: Plugin[];
   pendingApprovals: Approval[];
+  notifications: AppNotification[];
+  notificationsOpen: boolean;
+  builderSession: BuilderSession | null;
+  unreadConversationIds: string[];
 
   // UI State
   settings: AppSettings | null;
@@ -70,6 +92,15 @@ interface AppState {
   removePlugin: (id: string) => void;
   setPendingApprovals: (approvals: Approval[]) => void;
   removeApproval: (id: string) => void;
+  pushNotification: (notification: Omit<AppNotification, 'read'>) => void;
+  setNotificationsOpen: (open: boolean) => void;
+  revealNotificationCenter: () => void;
+  setBuilderSession: (session: BuilderSession | null) => void;
+  clearBuilderSession: () => void;
+  markNotificationsRead: () => void;
+  clearNotifications: () => void;
+  markConversationUnread: (id: string) => void;
+  markConversationRead: (id: string) => void;
   setSettings: (settings: AppSettings) => void;
   setLoading: (loading: boolean) => void;
   setGlobalError: (error: string | null) => void;
@@ -97,6 +128,10 @@ export const useAppStore = create<AppState>()(
       tasks: [],
       plugins: [],
       pendingApprovals: [],
+      notifications: [],
+      notificationsOpen: false,
+      builderSession: null,
+      unreadConversationIds: [],
       settings: null,
       isLoading: false,
       globalError: null,
@@ -151,6 +186,26 @@ export const useAppStore = create<AppState>()(
       removeApproval: (id) => set((s) => ({
         pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id),
       })),
+      pushNotification: (notification) => set((s) => {
+        if (s.notifications.some(item => item.id === notification.id)) return s
+        return {
+          notifications: [{ ...notification, read: false }, ...s.notifications].slice(0, 40),
+        }
+      }),
+      setNotificationsOpen: (notificationsOpen) => set({ notificationsOpen }),
+      revealNotificationCenter: () => set({ notificationsOpen: true, sidebarVisible: true }),
+      setBuilderSession: (builderSession) => set({ builderSession }),
+      clearBuilderSession: () => set({ builderSession: null }),
+      markNotificationsRead: () => set((s) => ({
+        notifications: s.notifications.map(item => ({ ...item, read: true })),
+      })),
+      clearNotifications: () => set({ notifications: [] }),
+      markConversationUnread: (id) => set((s) => ({
+        unreadConversationIds: [id, ...s.unreadConversationIds.filter(item => item !== id)].slice(0, 50),
+      })),
+      markConversationRead: (id) => set((s) => ({
+        unreadConversationIds: s.unreadConversationIds.filter(item => item !== id),
+      })),
       setSettings: (settings) => set({ settings }),
       setLoading: (isLoading) => set({ isLoading }),
       setGlobalError: (globalError) => set({ globalError }),
@@ -180,6 +235,8 @@ export const useAppStore = create<AppState>()(
         sidebarWidth: state.sidebarWidth,
         inspectorWidth: state.inspectorWidth,
         activeMode: state.activeMode,
+        unreadConversationIds: state.unreadConversationIds,
+        notifications: state.notifications,
       }),
     }
   )

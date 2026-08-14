@@ -1,11 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import ChatView from './ChatView'
+import ChatView, { conversationTitleForMode, isPlaceholderConversationTitle } from './ChatView'
+import { useAppStore } from '../stores/appStore'
 
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: Record<string, unknown> }) => unknown>(),
   sendMessage: vi.fn(),
+  createConversation: vi.fn(),
   updateConversation: vi.fn(),
 }))
 
@@ -27,7 +29,7 @@ vi.mock('../lib/ipc', () => ({
   stopTask: vi.fn().mockResolvedValue(undefined),
   getConversation: vi.fn().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false }),
   getMessages: vi.fn().mockResolvedValue([]),
-  createConversation: vi.fn(),
+  createConversation: mocks.createConversation,
   updateConversation: mocks.updateConversation,
   getTaskDetail: vi.fn().mockResolvedValue(null),
   cancelTask: vi.fn().mockResolvedValue(undefined),
@@ -35,10 +37,14 @@ vi.mock('../lib/ipc', () => ({
   getBobModes: vi.fn().mockResolvedValue([
     { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'test' },
   ]),
+  getSettings: vi.fn().mockResolvedValue({ defaultMode: 'agent' }),
   getProjects: vi.fn().mockResolvedValue([]),
   getSkills: vi.fn().mockResolvedValue([]),
   getPlugins: vi.fn().mockResolvedValue([]),
   getPlugin: vi.fn().mockResolvedValue(null),
+  getIntegrationStatuses: vi.fn().mockResolvedValue([]),
+  getMcpServers: vi.fn().mockResolvedValue([]),
+  allowComposerAttachments: vi.fn(async (paths: string[]) => paths),
 }))
 
 describe('Chat prompt queue', () => {
@@ -47,8 +53,12 @@ describe('Chat prompt queue', () => {
   })
 
   beforeEach(() => {
+    useAppStore.setState({ builderSession: null })
     mocks.listeners.clear()
     mocks.updateConversation.mockReset().mockResolvedValue(undefined)
+    mocks.createConversation.mockReset().mockResolvedValue({
+      id: 'conv-builder', title: 'Création de skill', pinned: false,
+    })
     mocks.sendMessage.mockReset()
       .mockResolvedValueOnce({ sessionId: 'session-1', taskId: 'task-1' })
       .mockResolvedValueOnce({ sessionId: 'session-2', taskId: 'task-2' })
@@ -56,12 +66,12 @@ describe('Chat prompt queue', () => {
 
   it('waits for the active Shell session before dispatching the next prompt', async () => {
     render(
-      <MemoryRouter initialEntries={['/chat/conv-1']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
         <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
       </MemoryRouter>,
     )
 
-    const input = await screen.findByPlaceholderText('Travailler avec Bob…')
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
     fireEvent.change(input, { target: { value: 'Premier prompt' } })
     fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
     await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledTimes(1))
@@ -91,7 +101,7 @@ describe('Chat prompt queue', () => {
 
   it('pins the open conversation from its always-visible header action', async () => {
     render(
-      <MemoryRouter initialEntries={['/chat/conv-1']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
         <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
       </MemoryRouter>,
     )
@@ -101,5 +111,37 @@ describe('Chat prompt queue', () => {
 
     await waitFor(() => expect(mocks.updateConversation).toHaveBeenCalledWith('conv-1', { pinned: true }))
     expect(screen.getByRole('button', { name: 'Désépingler la conversation' })).toBeVisible()
+  })
+
+  it('persists the skill builder title on the first prompt', async () => {
+    useAppStore.setState({
+      builderSession: { kind: 'skill_builder', brief: '', guided: false },
+    })
+    render(
+      <MemoryRouter
+        initialEntries={[{ pathname: '/chat', state: { mode: 'skill_builder' } }]}
+
+      >
+        <Routes><Route path="/chat" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Décrivez le skill à créer…')
+    fireEvent.change(input, { target: { value: 'Créer un skill juridique' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+
+    await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Création de skill' }),
+    ))
+  })
+})
+
+describe('conversationTitleForMode', () => {
+  it('uses the builder context as the persisted conversation title', () => {
+    expect(conversationTitleForMode('skill_builder')).toBe('Création de skill')
+    expect(conversationTitleForMode('plugin_builder')).toBe('Création de plugin')
+    expect(conversationTitleForMode('agent')).toBe('')
+    expect(isPlaceholderConversationTitle('Nouvelle conversation')).toBe(true)
+    expect(isPlaceholderConversationTitle('Mon titre personnalisé')).toBe(false)
   })
 })

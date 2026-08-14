@@ -18,6 +18,11 @@ vi.mock('../services/BobAuthService', () => ({
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+vi.mock('../lib/ipc', () => ({
+  installBobShell: vi.fn().mockResolvedValue(true),
+  getSettings: vi.fn().mockResolvedValue({ computerUseEnabled: false, chromeControlEnabled: false }),
+  updateSettings: vi.fn().mockResolvedValue({}),
+}))
 
 describe('OnboardingFlow session-only Bob configuration', () => {
   beforeEach(() => {
@@ -29,7 +34,7 @@ describe('OnboardingFlow session-only Bob configuration', () => {
 
   it('configures bob run directly without proposing IBM browser SSO', async () => {
     render(
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter>
         <OnboardingFlow />
       </MemoryRouter>,
     )
@@ -39,7 +44,7 @@ describe('OnboardingFlow session-only Bob configuration', () => {
     expect(screen.queryByText(/IBMid/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/navigateur/i)).not.toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('Clé API IBM Bob'), { target: { value: 'api-key-test' } })
+    fireEvent.change(screen.getByLabelText('Clé d’inférence IBM Bob'), { target: { value: 'api-key-test' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enregistrer dans le coffre' }))
 
     await waitFor(() => expect(mocks.setSessionApiKey).toHaveBeenCalledWith('api-key-test'))
@@ -49,12 +54,12 @@ describe('OnboardingFlow session-only Bob configuration', () => {
   it('recognizes an already active environment key without asking for a secret', async () => {
     mocks.getSessionApiKeyStatus.mockResolvedValue({ active: true, source: 'environment' })
     render(
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter>
         <OnboardingFlow />
       </MemoryRouter>,
     )
 
     expect(await screen.findByRole('heading', { name: 'IBM Bob est prêt' })).toBeVisible()
-    expect(screen.queryByLabelText('Clé API IBM Bob')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Clé d’inférence IBM Bob')).not.toBeInTheDocument()
   })
 })

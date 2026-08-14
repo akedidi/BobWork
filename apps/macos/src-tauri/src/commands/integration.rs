@@ -12,6 +12,7 @@ use crate::services::integration_oauth::{
 use crate::services::workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,8 +29,10 @@ pub struct OAuthStartResult {
 #[tauri::command]
 pub async fn get_integration_statuses(
     bob_service: State<'_, BobService>,
+    db: State<'_, Database>,
 ) -> Result<Vec<IntegrationConnectionStatus>, AppError> {
     let oauth = IntegrationOAuthService::new();
+    let tests = crate::services::connection_test::ConnectionTestService::new().list(&db)?;
     let ids = [
         "github",
         "slack",
@@ -38,12 +41,32 @@ pub async fn get_integration_statuses(
         "teams",
         "outlook-calendar",
         "onedrive",
+        "onenote",
     ];
     Ok(ids
         .into_iter()
         .map(|integration_id| {
             let legacy = legacy_secret_exists(&bob_service, integration_id);
-            oauth.connection_status(integration_id, legacy)
+            let mut status = oauth.connection_status(integration_id, legacy);
+            status.last_test = tests
+                .get(
+                    &crate::services::connection_test::ConnectionTestService::integration_key(
+                        integration_id,
+                    ),
+                )
+                .or_else(|| {
+                    IntegrationOAuthService::provider_for(integration_id)
+                        .and_then(IntegrationMcpService::mcp_name_for_provider)
+                        .and_then(|name| {
+                            tests.get(
+                                &crate::services::connection_test::ConnectionTestService::mcp_key(
+                                    name,
+                                ),
+                            )
+                        })
+                })
+                .map(|record| record.summary());
+            status
         })
         .collect())
 }
@@ -65,11 +88,7 @@ pub async fn set_oauth_client_config(
 ) -> Result<(), AppError> {
     let provider = IntegrationOAuthService::provider_for(&integration_id)
         .ok_or_else(|| AppError::ValidationFailed("Intégration OAuth inconnue.".into()))?;
-    IntegrationOAuthService::new().set_client_config(
-        provider,
-        &client_id,
-        client_secret.as_deref(),
-    )
+    IntegrationOAuthService::new().set_client_config(provider, &client_id, client_secret.as_deref())
 }
 
 #[tauri::command]
@@ -81,27 +100,47 @@ pub async fn start_integration_oauth(
         .ok_or_else(|| AppError::ValidationFailed("Intégration OAuth inconnue.".into()))?;
     let oauth = IntegrationOAuthService::new();
 
-    // Classic web OAuth when a client app is configured: the browser opens
-    // directly on the provider's authorization page (ChatGPT-style). GitHub,
-    // Slack and Monday require a client secret for the code exchange; without
-    // one the web flow cannot complete, so skip it when a device flow exists.
-    if let Some(client) = oauth.get_client_config(provider)? {
-        let secret_available = client
-            .client_secret
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some();
-        if secret_available
-            || !crate::services::integration_catalog::web_flow_requires_secret(provider)
-        {
-            return start_web_oauth(app_handle, integration_id, oauth);
+    // Prefer web authorize + PKCE (ChatGPT-style). Slack / Microsoft: public
+    // Client ID. Monday MCP: Dynamic Client Registration + PKCE on
+    // mcp.monday.com (no Developer Center secret). GitHub web still needs a secret.
+    let web_ready = match oauth.get_client_config(provider)? {
+        Some(client) => {
+            let secret_available = client
+                .client_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some();
+            secret_available
+                || !crate::services::integration_catalog::web_flow_requires_secret(provider)
         }
+        // Monday registers a public MCP client on demand (DCR).
+        None => provider == "monday",
+    };
+    if web_ready {
+        return start_web_oauth(app_handle, integration_id, oauth).await;
     }
 
-    // Zero-configuration fallback: vendor-published public device-flow client.
+    // GitHub only: vendor-published device-flow client as zero-config fallback.
+    // Microsoft no longer uses Graph PowerShell / Command Line Tools.
     if IntegrationOAuthService::device_flow_available(provider) {
         return start_device_oauth(app_handle, integration_id, oauth).await;
+    }
+
+    // No Bob Work Client ID yet: open the provider console so the user can
+    // create the public app once. Slack has no DCR (unlike Monday) — after the
+    // app exists, the UI asks for the Client ID once, then every later Connect
+    // opens slack.com/oauth/v2/authorize like ChatGPT.
+    if let Some(setup_url) = crate::services::integration_catalog::provider_setup_url(provider) {
+        open::that(&setup_url).map_err(|error| AppError::Io(error.to_string()))?;
+        return Ok(OAuthStartResult {
+            integration_id,
+            auth_url: setup_url,
+            state: String::new(),
+            mode: "setup".into(),
+            user_code: None,
+            verification_uri: None,
+        });
     }
 
     Err(AppError::ValidationFailed(format!(
@@ -109,12 +148,12 @@ pub async fn start_integration_oauth(
     )))
 }
 
-fn start_web_oauth(
+async fn start_web_oauth(
     app_handle: AppHandle,
     integration_id: String,
     oauth: IntegrationOAuthService,
 ) -> Result<OAuthStartResult, AppError> {
-    let auth_url = oauth.begin_authorization(&integration_id)?;
+    let auth_url = oauth.begin_authorization(&integration_id).await?;
     let state = url::Url::parse(&auth_url)
         .ok()
         .and_then(|parsed| {
@@ -187,6 +226,10 @@ fn finish_connection(
     match result {
         Ok(status) => {
             if let Err(error) = WorkspaceService::new().install_builtin_integration(integration) {
+                warn!(
+                    "Integration {} connected but skill install failed: {}",
+                    integration, error
+                );
                 let _ = app.emit(
                     "integration-oauth-error",
                     format!("Connecté, mais skill local non installé : {error}"),
@@ -201,6 +244,10 @@ fn finish_connection(
                     &IntegrationOAuthService::new(),
                     legacy,
                 ) {
+                    warn!(
+                        "Integration {} connected but MCP sync failed: {}",
+                        integration, error
+                    );
                     let _ = app.emit(
                         "integration-oauth-error",
                         format!("Connecté, mais serveur MCP non synchronisé : {error}"),
@@ -212,6 +259,10 @@ fn finish_connection(
             let _ = app.emit("integration-oauth-done", status);
         }
         Err(error) => {
+            warn!(
+                "Integration {} authorization failed: {}",
+                integration, error
+            );
             let _ = app.emit("integration-oauth-error", error.to_string());
         }
     }
@@ -246,9 +297,8 @@ pub async fn connect_integration_token(
     account_label: Option<String>,
     bob_service: State<'_, BobService>,
 ) -> Result<IntegrationConnectionStatus, AppError> {
-    let provider = IntegrationOAuthService::provider_for(&integration_id).ok_or_else(|| {
-        AppError::ValidationFailed("Intégration inconnue.".into())
-    })?;
+    let provider = IntegrationOAuthService::provider_for(&integration_id)
+        .ok_or_else(|| AppError::ValidationFailed("Intégration inconnue.".into()))?;
     let oauth = IntegrationOAuthService::new();
     oauth.store_personal_access_token(provider, &access_token, account_label.as_deref())?;
     if let Some(secret_id) = legacy_secret_id(&integration_id) {
@@ -282,9 +332,8 @@ pub async fn e2e_connect_integration(
             "Cette commande est réservée aux builds E2E.".into(),
         ));
     }
-    let provider = IntegrationOAuthService::provider_for(&integration_id).ok_or_else(|| {
-        AppError::ValidationFailed("Intégration OAuth inconnue.".into())
-    })?;
+    let provider = IntegrationOAuthService::provider_for(&integration_id)
+        .ok_or_else(|| AppError::ValidationFailed("Intégration OAuth inconnue.".into()))?;
     let oauth = IntegrationOAuthService::new();
     oauth.seed_e2e_oauth_token(provider, &access_token, account_label.as_deref())?;
     WorkspaceService::new().install_builtin_integration(&integration_id)?;

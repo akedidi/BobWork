@@ -23,7 +23,8 @@ export const config: Options.Testrunner = {
         BOBWORK_OAUTH_GITHUB_CLIENT_ID: 'e2e-github-client',
         BOBWORK_OAUTH_SLACK_CLIENT_ID: 'e2e-slack-client',
         BOBWORK_OAUTH_MONDAY_CLIENT_ID: 'e2e-monday-client',
-        BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: 'e2e-microsoft-client',
+        BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: '00000000-0000-4000-8000-000000000001',
+        TMDB_API_KEY: process.env.TMDB_API_KEY || 'f3d757824f08ea2cff45eb8f47ca3a1e',
         RUST_LOG: 'bob_work=debug,tauri=warn',
       },
     },
@@ -37,7 +38,7 @@ export const config: Options.Testrunner = {
   // The embedded macOS provider does not use tauri-driver. Service 1.3 still
   // diagnoses that external binary and logs a false error even when tests pass.
   logLevel: 'silent',
-  bail: 1,
+  bail: 0,
   waitforTimeout: 12_000,
   connectionRetryTimeout: 120_000,
   connectionRetryCount: 2,

@@ -60,11 +60,11 @@ def slack_api(method: str, token: str, params: dict | None = None, body: dict | 
 
 
 def handle_call(name: str, arguments: dict) -> dict:
-    token = token_from_env("SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN")
+    token = token_from_env("SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN", "SLACK_USER_TOKEN")
     if not token:
-        raise RuntimeError("SLACK_BOT_TOKEN or SLACK_ACCESS_TOKEN is required")
+        raise RuntimeError("SLACK_BOT_TOKEN, SLACK_ACCESS_TOKEN or SLACK_USER_TOKEN is required")
 
-    if e2e_mode("SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN"):
+    if e2e_mode("SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN", "SLACK_USER_TOKEN"):
         if name == "slack_search_messages":
             return tool_result(
                 {

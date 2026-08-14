@@ -5,9 +5,19 @@ function formatAmount(value?: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
+function resolvedTotal(usage: UsageStatus) {
+  if (usage.totalAmount != null && usage.totalAmount > 0) return usage.totalAmount
+  if (usage.usedAmount != null && usage.remainingAmount != null) {
+    const total = usage.usedAmount + usage.remainingAmount
+    return total > 0 ? total : null
+  }
+  return null
+}
+
 function usagePercent(usage: UsageStatus) {
-  if (usage.usedAmount == null || usage.totalAmount == null || usage.totalAmount <= 0) return null
-  return Math.min(100, Math.max(0, (usage.usedAmount / usage.totalAmount) * 100))
+  const total = resolvedTotal(usage)
+  if (usage.usedAmount == null || total == null) return null
+  return Math.min(100, Math.max(0, (usage.usedAmount / total) * 100))
 }
 
 function barTone(percent: number | null) {
@@ -15,6 +25,13 @@ function barTone(percent: number | null) {
   if (percent >= 95) return 'critical'
   if (percent >= 80) return 'warning'
   return 'normal'
+}
+
+const TONE_COLOR: Record<string, string> = {
+  normal: 'var(--accent)',
+  warning: 'var(--warning)',
+  critical: 'var(--danger)',
+  neutral: 'var(--text-muted)',
 }
 
 export function UsageMeter({
@@ -30,10 +47,12 @@ export function UsageMeter({
 
   const percent = usagePercent(usage)
   const tone = barTone(percent)
+  const total = resolvedTotal(usage)
   const usedLabel = formatAmount(usage.usedAmount)
-  const totalLabel = usage.totalAmount != null ? formatAmount(usage.totalAmount) : null
+  const totalLabel = total != null ? formatAmount(total) : null
   const remainingLabel = formatAmount(usage.remainingAmount)
   const unit = usage.unit ?? 'Bobcoins'
+  const fillColor = TONE_COLOR[tone] ?? TONE_COLOR.normal
 
   const body = (
     <>
@@ -48,9 +67,17 @@ export function UsageMeter({
         )}
       </div>
       {percent != null && (
-        <div className="usage-meter-track" aria-hidden="true">
-          <div className={`usage-meter-fill usage-meter-fill--${tone}`} style={{ width: `${percent}%` }} />
-        </div>
+        <div
+          className={`usage-meter-track usage-meter-track--${tone}`}
+          role="progressbar"
+          aria-label={`${unit} ${usedLabel} / ${totalLabel}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(percent)}
+          style={{
+            backgroundImage: `linear-gradient(to right, ${fillColor} ${percent}%, var(--bg-active) ${percent}%)`,
+          }}
+        />
       )}
       {!compact && (
         <div className="usage-meter-meta">
@@ -64,13 +91,14 @@ export function UsageMeter({
     </>
   )
 
+  const className = `usage-meter ${compact ? 'usage-meter--compact' : ''}`
   if (onClick) {
     return (
-      <button type="button" className={`usage-meter ${compact ? 'usage-meter--compact' : ''}`} onClick={onClick} title={usage.message}>
+      <button type="button" className={className} onClick={onClick} title={usage.message}>
         {body}
       </button>
     )
   }
 
-  return <div className={`usage-meter ${compact ? 'usage-meter--compact' : ''}`}>{body}</div>
+  return <div className={className}>{body}</div>
 }

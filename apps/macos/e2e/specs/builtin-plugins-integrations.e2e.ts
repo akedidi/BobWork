@@ -11,6 +11,7 @@ import {
   registerMcpServer,
   seedOAuthProvider,
   sendHomePrompt,
+  waitForVisible,
 } from '../helpers'
 
 const MCP_ECHO = 'mcp-e2e-echo'
@@ -29,7 +30,7 @@ const BUILTIN_PLUGINS = [
   },
   {
     label: 'Microsoft Word',
-    token: '@skill:bob-work-microsoft-word',
+    token: /@plugin:builtin-word|@skill:bob-work-microsoft-word/,
     iconClass: 'plugin-icon--word',
     marker: 'USE_BUILTIN_WORD_PLUGIN_E2E',
     success: 'Plugin Microsoft Word utilisé',
@@ -37,7 +38,7 @@ const BUILTIN_PLUGINS = [
   },
   {
     label: 'Microsoft Excel',
-    token: '@skill:bob-work-microsoft-excel',
+    token: /@plugin:builtin-excel|@skill:bob-work-microsoft-excel/,
     iconClass: 'plugin-icon--excel',
     marker: 'USE_BUILTIN_EXCEL_PLUGIN_E2E',
     success: 'Plugin Microsoft Excel utilisé',
@@ -45,7 +46,7 @@ const BUILTIN_PLUGINS = [
   },
   {
     label: 'Microsoft PowerPoint',
-    token: '@skill:bob-work-microsoft-powerpoint',
+    token: /@plugin:builtin-powerpoint|@skill:bob-work-microsoft-powerpoint/,
     iconClass: 'plugin-icon--powerpoint',
     marker: 'USE_BUILTIN_POWERPOINT_PLUGIN_E2E',
     success: 'Plugin Microsoft PowerPoint utilisé',
@@ -53,12 +54,20 @@ const BUILTIN_PLUGINS = [
   },
   {
     label: 'Microsoft OneNote',
-    token: '@skill:bob-work-microsoft-onenote',
+    token: /@plugin:builtin-onenote|@skill:bob-work-microsoft-onenote/,
     iconClass: 'plugin-icon--onenote',
     marker: 'USE_BUILTIN_ONENOTE_PLUGIN_E2E',
     success: 'Plugin Microsoft OneNote utilisé',
     toolHint: 'page-one.onenote',
     requiresMicrosoft: true,
+  },
+  {
+    label: 'CTO Investissements',
+    token: '@plugin:bob-work-cto-invest',
+    iconClass: 'plugin-icon--invest',
+    marker: 'USE_BUILTIN_CTO_INVEST_PLUGIN_E2E',
+    success: 'Plugin CTO Investissements utilisé',
+    toolHint: 'cto_market_snapshot',
   },
 ] as const
 
@@ -67,7 +76,7 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
     await ensureHomeReady()
   })
 
-  it('affiche les cinq plugins documentaires intégrés avec leurs icônes officielles', async () => {
+  it('affiche les plugins documentaires et CTO avec leurs icônes', async () => {
     await clickSidebar('Plugins')
     for (const plugin of BUILTIN_PLUGINS) {
       await expect($(`strong=${plugin.label}`)).toBeDisplayed()
@@ -75,10 +84,13 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
       await expect(row.$(`.${plugin.iconClass}`)).toBeDisplayed()
     }
     await expect($('strong=Microsoft OneNote')).toBeDisplayed()
+    await expect($('strong=CTO Investissements')).toBeDisplayed()
+    const ctoRow = $('//div[contains(@class, "skill-list-row")][contains(., "CTO Investissements")]')
+    expect(await ctoRow.getText()).not.toContain('Intégré')
   })
 
   for (const plugin of BUILTIN_PLUGINS) {
-    it(`exécute le plugin intégré ${plugin.label} via le composeur`, async () => {
+    it(`exécute le plugin ${plugin.label} via le composeur`, async () => {
       if ('requiresMicrosoft' in plugin && plugin.requiresMicrosoft) {
         await seedOAuthProvider('microsoft', 'e2e-microsoft-token', 'e2e@contoso.com')
         await invokeTauri('install_builtin_integration', { integrationId: 'outlook-mail' })
@@ -135,10 +147,12 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
     await expect($('p*=Connecteur MCP Monday.com opérationnel')).toBeDisplayed({ wait: 25_000 })
 
     await sendHomePrompt('USE_MICROSOFT_CONNECTOR_MCP_E2E Liste les équipes via le connecteur MCP Microsoft.')
-    await expect($('p*=Connecteur MCP Microsoft 365 opérationnel')).toBeDisplayed({ wait: 25_000 })
+    await waitForVisible('p*=Connecteur MCP Microsoft 365 opérationnel')
   })
 
   it('injecte Slack et Monday dans Bob Shell lors de tâches réelles', async () => {
+    await connectIntegrationOAuth('slack', 'e2e-slack-token', 'e2e-workspace')
+    await connectIntegrationOAuth('monday', 'e2e-monday-token', 'e2e@monday.com')
     await sendHomePrompt('SLACK_INTEGRATION_E2E @skill:bob-work-slack Recherche les messages récents.')
     await expect($('p*=Intégration Slack active')).toBeDisplayed({ wait: 25_000 })
 
@@ -147,6 +161,8 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
   })
 
   it('simule une connexion Microsoft OAuth et exécute Outlook via Graph', async () => {
+    await seedOAuthProvider('microsoft', 'e2e-microsoft-token', 'e2e@contoso.com')
+    await connectIntegrationOAuth('outlook-mail', 'e2e-microsoft-token', 'e2e@contoso.com')
     await clickSidebar('Intégrations et MCP')
     await $('button=Intégrations').click()
     await $('button=Microsoft 365').click()
@@ -166,7 +182,7 @@ describe('Bob Work — plugins intégrés, intégrations OAuth et MCP connus', (
 
   it('exécute le serveur MCP echo_text', async () => {
     await sendHomePrompt('USE_MCP_ECHO_E2E Vérifie que le serveur MCP echo_text répond correctement.')
-    await expect($('p*=Serveur MCP mcp-e2e-echo opérationnel')).toBeDisplayed({ wait: 25_000 })
+    await $('p*=Serveur MCP mcp-e2e-echo opérationnel').waitForDisplayed({ timeout: 25_000 })
     await expect($('p*=echo:integration-mcp')).toBeDisplayed()
   })
 

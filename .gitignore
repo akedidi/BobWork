@@ -17,6 +17,7 @@ pnpm-debug.log*
 
 # Rust / Tauri
 **/src-tauri/target/
+**/src-tauri/tauri.release.conf.json
 
 # Secrets
 .env

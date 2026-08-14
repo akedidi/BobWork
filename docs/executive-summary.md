@@ -5,7 +5,7 @@
 **Status**: Planning Phase Complete  
 **Version**: 0.1.0 (Pre-Alpha)
 
-> **Mise à jour d’architecture 0.1.4 (9 août 2026)** — Le Trousseau macOS et le coffre local ont été retirés. Les clés manuelles ne vivent que pendant la session active de Bob Work.
+> **Mise à jour d’architecture 0.1.4+** — Pas de Trousseau macOS. La clé Bob et les jetons d’intégration sont dans un **coffre local AES-256-GCM** (persistants jusqu’à effacement). Voir `keychain-security.md` et `limitations.md`.
 
 ---
 

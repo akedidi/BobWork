@@ -7,6 +7,12 @@
 mod commands;
 mod db;
 mod error;
+#[cfg(target_os = "macos")]
+mod macos_applescript_bridge;
+#[cfg(target_os = "macos")]
+mod macos_notifications;
+#[cfg(target_os = "macos")]
+mod macos_permissions;
 mod models;
 mod security;
 mod services;
@@ -51,6 +57,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -87,7 +94,16 @@ pub fn run() {
             let db = db::Database::new(&db_path).expect("Failed to initialize database");
             db.run_migrations().expect("Failed to run migrations");
 
+            let backup_dir = data_dir.join("backups");
+            if let Err(error) = db
+                .create_backup(&backup_dir, true)
+                .and_then(|_| db::Database::prune_backups(&backup_dir, 7))
+            {
+                tracing::warn!("Unable to create automatic database backup: {error}");
+            }
+
             app_handle.manage(db);
+            app_handle.manage(services::notify::NotificationInbox::new());
 
             if let Ok(settings) = services::settings::SettingsService::new().get(&app_handle.state::<db::Database>()) {
                 if let Some(tray) = app_handle.tray_by_id("main") {
@@ -98,6 +114,25 @@ pub fn run() {
             // Initialize Bob service
             let bob_service = services::bob::BobService::new(&data_dir);
             app_handle.manage(bob_service);
+
+            #[cfg(target_os = "macos")]
+            {
+                // Run AppleScript inside Bob Work so TCC attaches to the app,
+                // not python3/osascript used by MCP helpers.
+                macos_applescript_bridge::start();
+                macos_notifications::set_open_handler({
+                    let app = app_handle.clone();
+                    move |payload| {
+                        use tauri::{Emitter, Manager};
+                        let _ = app.emit("notification-open", &payload);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+            }
 
             // Initialize project service
             let project_service = services::project::ProjectService::new();
@@ -111,6 +146,65 @@ pub fn run() {
             let plugin_service = services::plugin::PluginService::new();
             if let Err(error) = plugin_service.ensure_builtin_plugins(&app_handle.state::<db::Database>()) {
                 tracing::warn!("Unable to refresh built-in document plugins: {:?}", error);
+            }
+            if let Some(bob_path) = app_handle.state::<services::bob::BobService>().get_binary_path() {
+                if let Err(error) = plugin_service.sync_installed_office_mcps(
+                    &app_handle.state::<db::Database>(),
+                    &bob_path,
+                ) {
+                    tracing::warn!("Unable to sync built-in Office MCP tools: {:?}", error);
+                }
+                if let Ok(settings) =
+                    services::settings::SettingsService::new().get(&app_handle.state::<db::Database>())
+                {
+                    if settings.chrome_control_enabled {
+                        if let Err(error) =
+                            services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
+                        {
+                            tracing::warn!("Unable to sync built-in Chrome MCP tools: {:?}", error);
+                        }
+                    }
+                    if settings.computer_use_enabled {
+                        if let Err(error) = services::computer_use_mcp::ComputerUseMcpService::new()
+                            .sync(&bob_path, true)
+                        {
+                            tracing::warn!(
+                                "Unable to sync built-in Computer Use MCP tools: {:?}",
+                                error
+                            );
+                        }
+                    }
+                }
+                if let Err(error) = services::integration_mcp::IntegrationMcpService::new()
+                    .sync_all_connected(&bob_path, &app_handle.state::<services::bob::BobService>())
+                {
+                    tracing::warn!("Unable to sync integration MCP connectors: {:?}", error);
+                }
+                // Refresh already-installed connector skills (e.g. GitHub MCP-first, no gh CLI).
+                let workspace = services::workspace::WorkspaceService::new();
+                let existing: std::collections::HashSet<String> = workspace
+                    .list_skills(None)
+                    .into_iter()
+                    .map(|skill| skill.slug)
+                    .collect();
+                for (integration_id, slug) in [
+                    ("github", "bob-work-github"),
+                    ("slack", "bob-work-slack"),
+                    ("monday", "bob-work-monday"),
+                    ("outlook-mail", "bob-work-outlook-mail"),
+                    ("outlook-calendar", "bob-work-outlook-calendar"),
+                    ("teams", "bob-work-teams"),
+                    ("onedrive", "bob-work-onedrive"),
+                ] {
+                    if existing.contains(slug) {
+                        if let Err(error) = workspace.install_builtin_integration(integration_id) {
+                            tracing::debug!(
+                                "Unable to refresh builtin skill {slug}: {:?}",
+                                error
+                            );
+                        }
+                    }
+                }
             }
             if let Some(bob_path) = app_handle.state::<services::bob::BobService>().get_binary_path() {
                 if let Err(error) = plugin_service.sync_installed_office_mcps(
@@ -179,6 +273,16 @@ pub fn run() {
                 app_handle.listen("bob-session-done", move |event| {
                     let payload_str = event.payload();
                     if let Ok(done) = serde_json::from_str::<BobSessionDoneEvent>(payload_str) {
+                        {
+                            use tauri::Emitter;
+                            let ah_usage = ah2.clone();
+                            std::thread::spawn(move || {
+                                let db = ah_usage.state::<db::Database>();
+                                let status = services::workspace::WorkspaceService::new()
+                                    .usage_status_with_refresh(&db, true);
+                                let _ = ah_usage.emit("usage-updated", &status);
+                            });
+                        }
                         let db = ah2.state::<db::Database>();
                         let conv_service = ConversationService::new();
                         let content = if done.success {
@@ -187,10 +291,71 @@ pub fn run() {
                             done.error.clone().unwrap_or_else(|| done.full_output.clone())
                         };
                         let task_service = services::task::TaskService::new();
-                        let task_cancelled = done.task_id.as_deref().and_then(|task_id| {
-                            task_service.get_by_id(&db, task_id).ok().flatten()
-                        }).is_some_and(|task| task.state == "cancelled");
+                        let task_cancelled = done.cancelled
+                            || done.task_id.as_deref().and_then(|task_id| {
+                                task_service.get_by_id(&db, task_id).ok().flatten()
+                            }).is_some_and(|task| task.state == "cancelled");
+
+                        // Capture deliverables Bob wrote (Desktop PPTX, etc.) → task IO + gallery.
+                        let deliverable_paths =
+                            services::bob::collect_deliverable_file_paths(&content);
+                        let mut source_items = Vec::new();
+                        let mut associated_artifact_ids = Vec::new();
+                        for path in &deliverable_paths {
+                            if let Some(task_id) = done.task_id.as_deref() {
+                                let file = std::path::Path::new(path);
+                                let metadata = file.metadata().ok();
+                                let _ = task_service.add_io(
+                                    &db,
+                                    task_id,
+                                    done.run_id.as_deref(),
+                                    "output",
+                                    if file.is_dir() { "directory" } else { "file" },
+                                    file.file_name()
+                                        .and_then(|value| value.to_str())
+                                        .unwrap_or(path),
+                                    Some(path),
+                                    None,
+                                    metadata
+                                        .as_ref()
+                                        .filter(|value| value.is_file())
+                                        .map(|value| value.len() as i64),
+                                    None,
+                                    &serde_json::json!({ "capturedBy": "bob-shell-reply" }),
+                                );
+                            }
+                            if let Ok(Some(artifact)) = services::artifact::ArtifactService::new()
+                                .register_external(&db, path, Some(done.conversation_id.as_str()))
+                            {
+                                associated_artifact_ids.push(artifact.id.clone());
+                                source_items.push(serde_json::json!({
+                                    "id": artifact.id,
+                                    "title": artifact.title,
+                                    "path": artifact.file_path,
+                                }));
+                            } else {
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or(path);
+                                source_items.push(serde_json::json!({
+                                    "id": path,
+                                    "title": name,
+                                    "path": path,
+                                }));
+                            }
+                        }
+                        if !associated_artifact_ids.is_empty() {
+                            use tauri::Emitter;
+                            let _ = ah2.emit("artifacts-updated", &associated_artifact_ids);
+                        }
+
                         if !content.trim().is_empty() && !task_cancelled {
+                            let sources = if source_items.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Array(source_items))
+                            };
                             let _ = conv_service.add_message(
                                 &db,
                                 AddMessageInput {
@@ -198,14 +363,19 @@ pub fn run() {
                                     author: "assistant".to_string(),
                                     content: content.clone(),
                                     attachments: None,
-                                    sources: None,
+                                    sources,
                                 },
                             );
                         }
-                        if let Some(task_id) = done.task_id.as_deref() {
-                            if task_cancelled {
-                                return;
+                        if task_cancelled {
+                            if let Some(task_id) = done.task_id.as_deref() {
+                                let _ = task_service.update_state(&db, task_id, "cancelled");
+                                use tauri::Emitter;
+                                let _ = ah2.emit("task-updated", task_id);
                             }
+                            return;
+                        }
+                        if let Some(task_id) = done.task_id.as_deref() {
                             let _ = task_service.finish_run(
                                 &db,
                                 task_id,
@@ -238,21 +408,16 @@ pub fn run() {
                             );
                             use tauri::Emitter;
                             let _ = ah2.emit("task-updated", task_id);
-
-                            if let Ok(settings) = services::settings::SettingsService::new().get(&db) {
-                                if settings.notifications_enabled && settings.notify_task_complete {
-                                    use tauri_plugin_notification::NotificationExt;
-                                    let title = if done.success { "Tâche Bob terminée" } else { "Tâche Bob en échec" };
-                                    let body = if content.trim().is_empty() {
-                                        done.error.as_deref().unwrap_or("Aucun résultat disponible")
-                                    } else {
-                                        content.trim()
-                                    };
-                                    let body: String = body.chars().take(180).collect();
-                                    let _ = ah2.notification().builder().title(title).body(body).show();
-                                }
-                            }
                         }
+                        // Sidebar + macOS banner: actual assistant reply and/or error text.
+                        services::notify::notify_task_finished(
+                            &ah2,
+                            done.success,
+                            &done.full_output,
+                            done.error.as_deref(),
+                            done.task_id.as_deref(),
+                            Some(done.conversation_id.as_str()),
+                        );
                         if done.success {
                             match services::plugin::PluginService::new().sync_agentic_bundles(&db) {
                                 Ok(plugins) if !plugins.is_empty() => {
@@ -295,15 +460,20 @@ pub fn run() {
                 });
             }
 
+            commands::updater::start_updater_smoke_if_requested(app_handle.clone());
             info!("Bob Work initialized successfully");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Bob commands
             commands::bob::detect_bob,
+            commands::bob::get_bob_auth_snapshot,
             commands::bob::get_bob_capabilities,
             commands::bob::get_bob_profile,
             commands::bob::get_bob_modes,
+            commands::mode::list_mode_marketplace,
+            commands::mode::install_bob_mode,
+            commands::mode::uninstall_bob_mode,
+            commands::mode::import_bob_mode_yaml,
             commands::bob::install_bob_shell,
             commands::bob::set_session_secret,
             commands::bob::has_session_secret,
@@ -351,18 +521,28 @@ pub fn run() {
             commands::plugin::uninstall_plugin,
             commands::plugin::toggle_plugin,
             commands::plugin::get_plugin_mcp_status,
+            commands::plugin::test_plugin_mcp,
             commands::plugin::get_plugin_extension_status,
+            commands::plugin::get_plugin_resource_status,
             commands::plugin::validate_plugin,
+            commands::plugin::export_plugin_zip,
+            commands::plugin::import_plugin_zip,
             commands::preview::prepare_file_preview,
             commands::preview::allow_composer_attachments,
             commands::preview::open_preview_resource,
+            commands::preview::reveal_in_file_manager,
             // Approval commands
             commands::approval::get_pending_approvals,
             commands::approval::resolve_approval,
+            #[cfg(feature = "e2e")]
+            commands::approval::e2e_seed_approval,
+            #[cfg(feature = "e2e")]
+            commands::approval::e2e_fail_next_approval_resolve,
             // Artifact commands
             commands::artifact::get_artifacts,
             commands::artifact::get_artifact,
             commands::artifact::delete_artifact,
+            commands::artifact::register_external_artifact,
             commands::artifact::open_artifact,
             // Settings commands
             commands::settings::get_settings,
@@ -385,6 +565,7 @@ pub fn run() {
             #[cfg(feature = "e2e")]
             commands::integration::e2e_seed_oauth_token,
             commands::workspace::get_mcp_servers,
+            commands::workspace::test_mcp_server,
             commands::workspace::save_mcp_server,
             commands::workspace::set_mcp_server_enabled,
             commands::workspace::delete_mcp_server,
@@ -392,12 +573,28 @@ pub fn run() {
             commands::workspace::create_permission_grant,
             commands::workspace::revoke_permission_grant,
             commands::workspace::get_usage_status,
+            commands::workspace::get_bobalytics,
+            commands::workspace::export_bobalytics,
             // System commands
             commands::system::get_app_info,
             commands::system::open_data_dir,
+            commands::system::create_database_backup,
+            commands::system::list_database_backups,
+            commands::system::restore_database_backup,
+            commands::system::purge_app_cache,
             commands::system::open_macos_privacy_pane,
+            commands::system::get_voice_dictation_availability,
+            commands::system::notification_authorization_state,
+            commands::system::request_notification_authorization,
+            commands::system::list_app_notifications,
+            commands::system::take_pending_notification_open,
+            commands::system::request_accessibility_permission,
+            commands::system::request_chrome_automation_permission,
             commands::system::get_chrome_control_status,
+            commands::system::get_computer_use_status,
             commands::system::export_diagnostics,
+            commands::updater::check_for_updates,
+            commands::updater::install_available_update,
             #[cfg(feature = "e2e")]
             commands::system::e2e_ack_macos_automation,
             // Schedule commands

@@ -1,7 +1,20 @@
-# Tauri + React + Typescript
+# Bob Work — application macOS
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Application desktop Tauri 2 + React 19 livrée dans ce monorepo.
 
-## Recommended IDE Setup
+Pour l’installation, l’architecture, les tests et les autres plateformes, voir le [README racine](../../README.md).
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Commandes locales
+
+```bash
+pnpm install                 # depuis la racine du monorepo
+pnpm dev:tauri               # développement
+pnpm ensure:dev-app          # bundle .app debug (notifications TCC)
+pnpm build:tauri             # build production
+pnpm test                    # Vitest
+pnpm test:e2e                # WebdriverIO
+pnpm smoke:bob               # smoke Bob Shell réel
+pnpm verify                  # typecheck + unit + vite build
+```
+
+Backend Rust : `src-tauri/` (`cargo test --manifest-path src-tauri/Cargo.toml`).

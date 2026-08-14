@@ -3,11 +3,47 @@ import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { allowComposerAttachments, getBobModes, getPlugins, getProjects, getSkills } from '../../lib/ipc'
-import type { BobMode, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
-import { PluginIcon, resolvePluginIcon } from '../PluginIcon'
+import {
+  allowComposerAttachments,
+  getBobModes,
+  getSettings,
+  getVoiceDictationAvailability,
+  getIntegrationStatuses,
+  getMcpServers,
+  getPlugins,
+  getProjects,
+  getSkills,
+  type IntegrationConnectionStatus,
+} from '../../lib/ipc'
+import type { BobMode, McpServer, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
+import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from '../../lib/builtinCatalog'
+import { PluginIcon, resolveIconFromText, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
-import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActivePluginMention } from './composerAttachments'
+import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, removeComposerMention } from './composerAttachments'
+import { errorMessage } from '../../lib/errorMessage'
+import { useT, useI18n, localeToBcp47 } from '../../i18n'
+import { useAppDialog } from '../AppDialog'
+
+/** OAuth integrations that expose a Bob skill + MCP connector when connected. */
+const INTEGRATION_PICKER = [
+  { id: 'github', name: 'GitHub', description: 'Dépôts, issues et pull requests', skillSlug: 'bob-work-github', mcpName: 'bob-work-github' },
+  { id: 'slack', name: 'Slack', description: 'Messages et canaux Slack', skillSlug: 'bob-work-slack', mcpName: 'bob-work-slack' },
+  { id: 'monday', name: 'Monday.com', description: 'Tableaux Monday.com', skillSlug: 'bob-work-monday', mcpName: 'bob-work-monday' },
+  { id: 'outlook-mail', name: 'Outlook', description: 'Messagerie Microsoft 365', skillSlug: 'bob-work-outlook-mail', mcpName: 'bob-work-microsoft' },
+  { id: 'teams', name: 'Microsoft Teams', description: 'Équipes et canaux Teams', skillSlug: 'bob-work-teams', mcpName: 'bob-work-microsoft' },
+  { id: 'outlook-calendar', name: 'Calendrier Outlook', description: 'Calendrier Microsoft 365', skillSlug: 'bob-work-outlook-calendar', mcpName: 'bob-work-microsoft' },
+  { id: 'onedrive', name: 'OneDrive', description: 'Fichiers OneDrive', skillSlug: 'bob-work-onedrive', mcpName: 'bob-work-microsoft' },
+  { id: 'onenote', name: 'OneNote', description: 'Carnets OneNote', skillSlug: 'bob-work-microsoft-onenote', mcpName: 'bob-work-microsoft' },
+] as const
+
+type McpPickerItem = {
+  id: string
+  name: string
+  description: string
+  icon: string
+  insert: string
+  kind: 'integration' | 'mcp'
+}
 
 interface Props {
   placeholder?: string
@@ -27,6 +63,7 @@ interface SpeechRecognitionLike {
   continuous: boolean
   start: () => void
   stop: () => void
+  abort?: () => void
   onresult: ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null
   onend: (() => void) | null
   onerror: (() => void) | null
@@ -53,9 +90,13 @@ async function registerAttachmentPaths(
 }
 
 export default function Composer({
-  placeholder = 'Demandez quelque chose…', showProjectPill, showModePill,
+  placeholder, showProjectPill, showModePill,
   onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId,
 }: Props) {
+  const t = useT()
+  const dialog = useAppDialog()
+  const { locale } = useI18n()
+  const resolvedPlaceholder = placeholder ?? t('composer.placeholder')
   const [text, setText] = useState('')
   const [mode, setMode] = useState('agent')
   const [modes, setModes] = useState<BobMode[]>(BUILTIN_MODES)
@@ -63,23 +104,47 @@ export default function Composer({
   const [projectId, setProjectId] = useState<string | undefined>(initialProjectId)
   const [skills, setSkills] = useState<WorkspaceSkill[]>([])
   const [plugins, setPlugins] = useState<Plugin[]>([])
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [integrationStatuses, setIntegrationStatuses] = useState<IntegrationConnectionStatus[]>([])
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([])
   const [attachments, setAttachments] = useState<string[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
   const [pluginSearch, setPluginSearch] = useState('')
   const [skillSearch, setSkillSearch] = useState('')
+  const [mcpSearch, setMcpSearch] = useState('')
   const [modeMenu, setModeMenu] = useState(false)
   const [modeSearch, setModeSearch] = useState('')
   const [projectMenu, setProjectMenu] = useState(false)
   const [listening, setListening] = useState(false)
+  const [dictationStarting, setDictationStarting] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const attachButtonRef = useRef<HTMLButtonElement>(null)
   const projectButtonRef = useRef<HTMLButtonElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  const dictationStartingRef = useRef(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
   const [isDragging, setIsDragging] = useState(false)
   const dragDepthRef = useRef(0)
+
+  useEffect(() => {
+    if (initialProjectId !== undefined) setProjectId(initialProjectId)
+  }, [initialProjectId])
+
+  useEffect(() => () => {
+    const recognition = recognitionRef.current
+    recognitionRef.current = null
+    if (!recognition) return
+    recognition.onresult = null
+    recognition.onend = null
+    recognition.onerror = null
+    try {
+      recognition.abort?.()
+    } catch {
+      // WebKit may already have disposed the native recognition session.
+    }
+  }, [])
 
   const insertPluginMention = useCallback((pluginId: string) => {
     const mentionValue = `@plugin:${pluginId}`
@@ -99,6 +164,36 @@ export default function Composer({
       return `${current}${separator}${mentionValue} `
     })
     window.requestAnimationFrame(() => taRef.current?.focus())
+  }, [])
+
+  const insertMcpMention = useCallback((insert: string) => {
+    const mentionValue = insert.trim()
+    setText(current => {
+      if (current.includes(mentionValue)) return current
+      const separator = current.length > 0 && !current.endsWith(' ') ? ' ' : ''
+      return `${current}${separator}${mentionValue} `
+    })
+    window.requestAnimationFrame(() => taRef.current?.focus())
+  }, [])
+
+  const refreshMcpIntegrations = useCallback(() => {
+    void Promise.all([
+      getIntegrationStatuses().then(items => ({ ok: true as const, items })).catch(error => ({ ok: false as const, error })),
+      getMcpServers().then(items => ({ ok: true as const, items })).catch(error => ({ ok: false as const, error })),
+    ]).then(([statusesResult, serversResult]) => {
+      const errors: string[] = []
+      if (statusesResult.ok) setIntegrationStatuses(statusesResult.items)
+      else {
+        setIntegrationStatuses([])
+        errors.push(errorMessage(statusesResult.error, t('composer.catalogError')))
+      }
+      if (serversResult.ok) setMcpServers(serversResult.items.filter(server => server.enabled))
+      else {
+        setMcpServers([])
+        errors.push(errorMessage(serversResult.error, t('composer.catalogError')))
+      }
+      if (errors.length) setCatalogError(errors[0])
+    })
   }, [])
 
   const suggestPluginForPaths = useCallback((paths: string[]) => {
@@ -151,18 +246,40 @@ export default function Composer({
   }, [addAttachmentPaths])
 
   useEffect(() => {
-    Promise.all([
-      getBobModes().catch(() => BUILTIN_MODES),
-      getProjects().catch(() => []),
-      getSkills().catch(() => []),
-      getPlugins().catch(() => []),
-    ]).then(([detectedModes, detectedProjects, detectedSkills, detectedPlugins]) => {
-      if (detectedModes.length) setModes(detectedModes)
-      setProjects(detectedProjects.filter(project => !project.archived))
-      setSkills(detectedSkills.filter(skill => skill.enabled))
-      setPlugins(detectedPlugins.filter(plugin => plugin.installState === 'installed'))
-    })
-  }, [])
+    setCatalogError(null)
+    const loadCatalog = () => {
+      Promise.all([
+        getBobModes().catch(() => BUILTIN_MODES),
+        getProjects().catch(() => [] as Project[]),
+        getSettings().catch(() => null),
+        getSkills().then(items => ({ ok: true as const, items })).catch(error => ({ ok: false as const, error })),
+        getPlugins().then(items => ({ ok: true as const, items })).catch(error => ({ ok: false as const, error })),
+      ]).then(([detectedModes, detectedProjects, settings, skillsResult, pluginsResult]) => {
+        if (detectedModes.length) setModes(detectedModes)
+        setProjects(detectedProjects.filter(project => !project.archived))
+        if (settings?.defaultMode) setMode(current => current === 'agent' ? settings.defaultMode : current)
+        const errors: string[] = []
+        if (skillsResult.ok) {
+          setSkills(skillsResult.items.filter(skill => skill.enabled))
+        } else {
+          setSkills([])
+          errors.push(errorMessage(skillsResult.error, t('composer.catalogError')))
+        }
+        if (pluginsResult.ok) {
+          setPlugins(pluginsResult.items.filter(plugin => plugin.installState === 'installed'))
+        } else {
+          setPlugins([])
+          errors.push(errorMessage(pluginsResult.error, t('composer.catalogError')))
+        }
+        setCatalogError(errors[0] ?? null)
+      })
+    }
+    loadCatalog()
+    refreshMcpIntegrations()
+    const onModes = () => { void getBobModes().then(items => { if (items.length) setModes(items) }).catch(() => {}) }
+    window.addEventListener('bob-modes-updated', onModes)
+    return () => window.removeEventListener('bob-modes-updated', onModes)
+  }, [refreshMcpIntegrations])
 
   useEffect(() => {
     const ta = taRef.current
@@ -175,6 +292,7 @@ export default function Composer({
     setAttachMenu(false)
     setPluginSearch('')
     setSkillSearch('')
+    setMcpSearch('')
     setProjectMenu(false)
     setModeMenu(false)
     setModeSearch('')
@@ -204,6 +322,7 @@ export default function Composer({
     setProjectMenu(target === 'project' && shouldOpen)
     setModeMenu(target === 'mode' && shouldOpen)
     if (target !== 'mode' || !shouldOpen) setModeSearch('')
+    if (target === 'attach' && shouldOpen) refreshMcpIntegrations()
   }
 
   const handleSend = () => {
@@ -220,7 +339,7 @@ export default function Composer({
 
   const chooseFiles = async () => {
     setAttachMenu(false)
-    const selected = await open({ multiple: true, directory: false, title: 'Joindre des fichiers' })
+    const selected = await open({ multiple: true, directory: false, title: t('composer.attachFiles') })
     if (!selected) return
     const paths = Array.isArray(selected) ? selected : [selected]
     addAttachmentPaths(paths)
@@ -228,13 +347,40 @@ export default function Composer({
 
   const chooseFolder = async () => {
     setAttachMenu(false)
-    const selected = await open({ multiple: false, directory: true, title: 'Joindre un dossier' })
+    const selected = await open({ multiple: false, directory: true, title: t('composer.attachFolder') })
     if (typeof selected === 'string') addAttachmentPaths([selected])
   }
 
-  const toggleDictation = () => {
-    if (listening) {
-      recognitionRef.current?.stop()
+  const toggleDictation = async () => {
+    const activeRecognition = recognitionRef.current
+    if (activeRecognition) {
+      try {
+        activeRecognition.stop()
+      } catch {
+        recognitionRef.current = null
+        setListening(false)
+      }
+      return
+    }
+    if (dictationStartingRef.current) return
+    dictationStartingRef.current = true
+    setDictationStarting(true)
+    let availability
+    try {
+      availability = await getVoiceDictationAvailability()
+    } catch (error) {
+      await dialog.alert({ message: t('composer.dictationCheckFailed', { error: errorMessage(error) }) })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
+      return
+    }
+    if (!availability.available) {
+      const message = availability.reason === 'requires_app_bundle'
+        ? t('composer.dictationRequiresApp')
+        : t('composer.dictationUnavailable')
+      await dialog.alert({ message })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
       return
     }
     const SpeechRecognition = (window as unknown as {
@@ -242,38 +388,96 @@ export default function Composer({
       webkitSpeechRecognition?: new () => SpeechRecognitionLike
     }).SpeechRecognition ?? (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike }).webkitSpeechRecognition
     if (!SpeechRecognition) {
-      alert('La dictée Apple n’est pas disponible dans cette version de WebKit. Activez la dictée macOS ou utilisez le collage vocal.')
+      await dialog.alert({ message: t('composer.dictationWebkitUnavailable') })
+      dictationStartingRef.current = false
+      setDictationStarting(false)
       return
     }
-    const recognition = new SpeechRecognition()
-    recognition.lang = navigator.language || 'fr-FR'
-    recognition.interimResults = true
-    recognition.continuous = false
-    let finalTranscript = ''
-    recognition.onresult = event => {
-      let interim = ''
-      for (let index = 0; index < event.results.length; index += 1) {
-        const result = event.results[index]
-        if (result.isFinal) finalTranscript += result[0].transcript
-        else interim += result[0].transcript
+    try {
+      const recognition = new SpeechRecognition()
+      recognition.lang = localeToBcp47(locale)
+      recognition.interimResults = true
+      recognition.continuous = false
+      const baseText = text
+      recognition.onresult = event => {
+        let transcript = ''
+        for (let index = 0; index < event.results.length; index += 1) {
+          transcript += event.results[index][0].transcript
+        }
+        const separator = baseText && !baseText.endsWith(' ') && transcript ? ' ' : ''
+        setText(`${baseText}${separator}${transcript}`)
       }
-      setText(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${finalTranscript || interim}`)
+      const finish = () => {
+        if (recognitionRef.current === recognition) recognitionRef.current = null
+        setListening(false)
+      }
+      recognition.onend = finish
+      recognition.onerror = finish
+      recognitionRef.current = recognition
+      setListening(true)
+      recognition.start()
+    } catch (error) {
+      recognitionRef.current = null
+      setListening(false)
+      await dialog.alert({ message: t('composer.dictationStartFailed', { error: errorMessage(error) }) })
+    } finally {
+      dictationStartingRef.current = false
+      setDictationStarting(false)
     }
-    recognition.onend = () => setListening(false)
-    recognition.onerror = () => setListening(false)
-    recognitionRef.current = recognition
-    setListening(true)
-    recognition.start()
   }
 
   const selectedProject = projects.find(project => project.id === projectId)
   const capabilityFilter = selectedProject?.allowedPlugins ?? []
+  const integrationFilter = selectedProject?.allowedIntegrations ?? []
   const allowedSkills = capabilityFilter.length === 0 ? skills : skills.filter(skill => capabilityFilter.includes(`skill:${skill.slug}`))
-  const allowedPlugins = capabilityFilter.length === 0 ? plugins : plugins.filter(plugin => capabilityFilter.includes(plugin.id))
+  const allowedPlugins = useMemo(() => {
+    const filter = selectedProject?.allowedPlugins
+    const filtered = !filter || filter.length === 0
+      ? plugins
+      : plugins.filter(plugin => filter.includes(plugin.id))
+    return sortPluginsForDisplay(filtered)
+  }, [plugins, selectedProject?.allowedPlugins])
+  const mcpPickerItems = useMemo(() => {
+    const connectedIds = new Set(
+      integrationStatuses.filter(status => status.connected).map(status => status.integrationId),
+    )
+    const items: McpPickerItem[] = []
+    for (const integration of INTEGRATION_PICKER) {
+      if (!connectedIds.has(integration.id)) continue
+      if (integrationFilter.length > 0 && !integrationFilter.includes(integration.id)) continue
+      items.push({
+        id: `integration:${integration.id}`,
+        name: integration.name,
+        description: integration.description,
+        icon: resolveIntegrationIcon(integration.id),
+        insert: `@skill:${integration.skillSlug}`,
+        kind: 'integration',
+      })
+    }
+    const coveredMcp = new Set<string>(
+      INTEGRATION_PICKER
+        .filter(integration => connectedIds.has(integration.id))
+        .map(integration => integration.mcpName),
+    )
+    for (const server of mcpServers) {
+      if (coveredMcp.has(server.name)) continue
+      if (integrationFilter.length > 0 && !integrationFilter.includes(`mcp:${server.name}`)) continue
+      items.push({
+        id: `mcp:${server.name}`,
+        name: server.name,
+        description: `${server.transport} · ${server.commandOrUrl || 'serveur MCP'}`,
+        icon: 'plugin',
+        insert: `@mcp:${server.name}`,
+        kind: 'mcp',
+      })
+    }
+    return items
+  }, [integrationFilter, integrationStatuses, mcpServers])
   const mention = text.match(/(?:^|\s)@([\w-]*)$/)?.[1]?.toLowerCase()
   const mentionItems = mention === undefined ? [] : [
-    ...allowedSkills.map(skill => ({ id: `skill:${skill.slug}`, label: skill.name, subtitle: 'Skill', insert: `@skill:${skill.slug} ` })),
     ...allowedPlugins.map(plugin => ({ id: `plugin:${plugin.id}`, label: plugin.name, subtitle: 'Plugin', insert: `@plugin:${plugin.id} ` })),
+    ...allowedSkills.map(skill => ({ id: `skill:${skill.slug}`, label: skill.name, subtitle: 'Skill', insert: `@skill:${skill.slug} ` })),
+    ...mcpPickerItems.map(item => ({ id: item.id, label: item.name, subtitle: item.kind === 'integration' ? 'Intégration MCP' : 'MCP', insert: `${item.insert} ` })),
   ].filter(item => item.label.toLowerCase().includes(mention) || item.id.toLowerCase().includes(mention)).slice(0, 8)
 
   const insertMention = (value: string) => {
@@ -286,6 +490,7 @@ export default function Composer({
     setAttachMenu(false)
     setPluginSearch('')
     setSkillSearch('')
+    setMcpSearch('')
   }
 
   const selectSkill = (skill: WorkspaceSkill) => {
@@ -293,14 +498,25 @@ export default function Composer({
     setAttachMenu(false)
     setPluginSearch('')
     setSkillSearch('')
+    setMcpSearch('')
+  }
+
+  const selectMcpItem = (item: McpPickerItem) => {
+    insertMcpMention(item.insert)
+    setAttachMenu(false)
+    setPluginSearch('')
+    setSkillSearch('')
+    setMcpSearch('')
   }
 
   const visibleSkills = useMemo(() => {
     const query = skillSearch.trim().toLocaleLowerCase()
-    if (!query) return allowedSkills
-    return allowedSkills.filter(skill =>
-      `${skill.name} ${skill.description ?? ''} ${skill.slug}`.toLocaleLowerCase().includes(query),
-    )
+    const filtered = query
+      ? allowedSkills.filter(skill =>
+          `${skill.name} ${skill.description ?? ''} ${skill.slug}`.toLocaleLowerCase().includes(query),
+        )
+      : allowedSkills
+    return sortSkillsForDisplay(filtered)
   }, [allowedSkills, skillSearch])
 
   const visiblePlugins = useMemo(() => {
@@ -309,27 +525,91 @@ export default function Composer({
     return allowedPlugins.filter(plugin => `${plugin.name} ${plugin.description ?? ''}`.toLocaleLowerCase().includes(query))
   }, [allowedPlugins, pluginSearch])
 
+  const visibleMcpItems = useMemo(() => {
+    const query = mcpSearch.trim().toLocaleLowerCase()
+    if (!query) return mcpPickerItems
+    return mcpPickerItems.filter(item =>
+      `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(query),
+    )
+  }, [mcpPickerItems, mcpSearch])
+
   const filteredModes = useMemo(() => {
     const query = modeSearch.trim().toLowerCase()
     if (!query) return modes
     return modes.filter(item => item.name.toLowerCase().includes(query) || item.slug.includes(query) || item.description?.toLowerCase().includes(query))
   }, [modeSearch, modes])
   const selectedMode = modes.find(item => item.slug === mode) ?? BUILTIN_MODES[0]
-  const activePluginId = getActivePluginMention(text)
-  const activePlugin = plugins.find(plugin => plugin.id === activePluginId)
+  const mentionChips = useMemo(() => {
+    type Chip = {
+      key: string
+      kind: 'plugin' | 'skill' | 'mcp'
+      id: string
+      name: string
+      subtitle: string
+      icon: string
+    }
+    const chips: Chip[] = []
+    for (const mention of getActiveComposerMentions(text)) {
+      if (mention.kind === 'plugin') {
+        const plugin = plugins.find(item => item.id === mention.id)
+        if (!plugin) continue
+        chips.push({
+          key: `plugin:${plugin.id}`,
+          kind: 'plugin',
+          id: plugin.id,
+          name: plugin.name,
+          subtitle: plugin.manifest && typeof plugin.manifest === 'object' && 'specializedMode' in (plugin.manifest as object)
+            ? 'Mode de travail'
+            : 'Plugin',
+          icon: resolvePluginIcon(plugin),
+        })
+        continue
+      }
+      if (mention.kind === 'skill') {
+        const skill = skills.find(item => item.slug === mention.id)
+        if (!skill) {
+          const integration = mcpPickerItems.find(item => item.insert === `@skill:${mention.id}`)
+          if (!integration) continue
+          chips.push({
+            key: `skill:${mention.id}`,
+            kind: 'skill',
+            id: mention.id,
+            name: integration.name,
+            subtitle: 'Intégration',
+            icon: integration.icon,
+          })
+          continue
+        }
+        chips.push({
+          key: `skill:${skill.slug}`,
+          kind: 'skill',
+          id: skill.slug,
+          name: skill.name,
+          subtitle: 'Instructions',
+          icon: resolveIconFromText(skill.slug, skill.name, skill.description),
+        })
+        continue
+      }
+      const mcp = mcpPickerItems.find(item => item.insert === `@mcp:${mention.id}` || item.id === `mcp:${mention.id}`)
+      chips.push({
+        key: `mcp:${mention.id}`,
+        kind: 'mcp',
+        id: mention.id,
+        name: mcp?.name ?? mention.id,
+        subtitle: 'MCP',
+        icon: mcp?.icon ?? 'plugin',
+      })
+    }
+    return chips
+  }, [mcpPickerItems, plugins, skills, text])
+
+  const removeMentionChip = (kind: 'plugin' | 'skill' | 'mcp', id: string) => {
+    setText(current => removeComposerMention(current, kind, id))
+    taRef.current?.focus()
+  }
 
   return (
     <div ref={rootRef} className="composer-root">
-      {isDragging && createPortal(
-        <div className="composer-drag-overlay" aria-hidden="true">
-          <div className="composer-drag-overlay-inner">
-            <span className="composer-drag-overlay-icon">+</span>
-            <strong>Déposer les fichiers ici</strong>
-            <span>Images, documents, dossiers…</span>
-          </div>
-        </div>,
-        document.body,
-      )}
       {mentionItems.length > 0 && (
         <div className="composer-popover" style={{ left: 16, right: 16, bottom: 'calc(100% + 8px)' }}>
           <div className="composer-popover-title">Ajouter au prompt</div>
@@ -371,13 +651,30 @@ export default function Composer({
           }
         }}
       >
-        {activePlugin && (
-          <div className="composer-active-plugin" aria-label={`Mode spécialisé ${activePlugin.name}`}>
-            <PluginIcon icon={resolvePluginIcon(activePlugin)} size="sm" className="composer-active-plugin-icon" />
-            <span className="composer-active-plugin-copy">
-              <strong>{activePlugin.name}</strong>
-              <small>Mode spécialisé · analyse locale</small>
-            </span>
+        {isDragging && (
+          <div className="composer-drop-hint" aria-hidden="true">
+            <span>Déposer pour joindre au prompt</span>
+          </div>
+        )}
+        {mentionChips.length > 0 && (
+          <div className="composer-mention-chips" aria-label="Composants du prompt">
+            {mentionChips.map(chip => (
+              <div key={chip.key} className="composer-mention-chip" aria-label={`${chip.subtitle} ${chip.name}`}>
+                <PluginIcon icon={chip.icon} size="sm" className="composer-mention-chip-icon" />
+                <span className="composer-mention-chip-copy">
+                  <strong>{chip.name}</strong>
+                  <small>{chip.subtitle}</small>
+                </span>
+                <button
+                  type="button"
+                  className="composer-mention-chip-remove"
+                  aria-label={`Retirer ${chip.name}`}
+                  onClick={() => removeMentionChip(chip.kind, chip.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         )}
         {attachments.length > 0 && (
@@ -391,7 +688,7 @@ export default function Composer({
         <textarea
           ref={taRef}
           className="composer-textarea"
-          placeholder={placeholder}
+          placeholder={resolvedPlaceholder}
           value={text}
           rows={1}
           disabled={disabled}
@@ -411,56 +708,129 @@ export default function Composer({
             </button>
             {attachMenu && (
               <ComposerPopover anchorRef={attachButtonRef} ariaLabel="Ajouter une pièce jointe" className="attach-popover">
-                <div className="composer-popover-title">Ajouter</div>
-                <button className="composer-popover-row" onClick={chooseFiles}>📄 Fichier(s)</button>
-                <button className="composer-popover-row" onClick={chooseFolder}>📁 Dossier</button>
-                <div className="composer-popover-separator" />
-                <div className="composer-popover-title">Skills</div>
-                {allowedSkills.length > 0 ? <>
-                  <input
-                    value={skillSearch}
-                    onChange={event => setSkillSearch(event.target.value)}
-                    placeholder="Rechercher un skill…"
-                    aria-label="Rechercher un skill à ajouter"
-                    className="popover-search"
-                  />
-                  <div className="attach-plugin-list">
-                    {visibleSkills.length > 0 ? visibleSkills.map(skill => (
-                      <button className="composer-popover-row attach-plugin-row" key={`${skill.scope}:${skill.slug}`} onClick={() => selectSkill(skill)}>
-                        <span className="attach-skill-icon" aria-hidden="true">✦</span>
-                        <span className="attach-plugin-copy"><strong>{skill.name}</strong><small>{skill.description || 'Skill activé'}</small></span>
-                        <span aria-hidden="true">+</span>
-                      </button>
-                    )) : <p className="composer-popover-empty">Aucun skill correspondant.</p>}
-                  </div>
-                </> : <p className="composer-popover-empty">Aucun skill activé{selectedProject ? ' pour ce projet' : ''}.</p>}
-                <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/extensions') }}>Gérer les skills</button>
-                <div className="composer-popover-separator" />
-                <div className="composer-popover-title">Plugins</div>
-                {allowedPlugins.length > 0 ? <>
-                  <input
-                    value={pluginSearch}
-                    onChange={event => setPluginSearch(event.target.value)}
-                    placeholder="Rechercher un plugin…"
-                    aria-label="Rechercher un plugin à ajouter"
-                    className="popover-search"
-                  />
-                  <div className="attach-plugin-list">
-                    {visiblePlugins.length > 0 ? visiblePlugins.map(plugin => (
-                      <button className="composer-popover-row attach-plugin-row" key={plugin.id} onClick={() => selectPlugin(plugin)}>
-                        <PluginIcon icon={resolvePluginIcon(plugin)} size="sm" className="attach-plugin-icon" />
-                        <span className="attach-plugin-copy"><strong>{plugin.name}</strong><small>{plugin.description || 'Plugin activé'}</small></span>
-                        <span aria-hidden="true">+</span>
-                      </button>
-                    )) : <p className="composer-popover-empty">Aucun plugin correspondant.</p>}
-                  </div>
-                </> : <p className="composer-popover-empty">Aucun plugin activé{selectedProject ? ' pour ce projet' : ''}.</p>}
-                <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/plugins') }}>Gérer les plugins</button>
+                <div className="attach-popover-header">
+                  <div className="composer-popover-title">Ajouter</div>
+                  <button type="button" className="composer-popover-row attach-plugin-row" onClick={chooseFiles}>
+                    <span className="attach-row-icon" aria-hidden="true">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    </span>
+                    <span className="attach-plugin-copy"><strong>Fichier(s)</strong></span>
+                  </button>
+                  <button type="button" className="composer-popover-row attach-plugin-row" onClick={chooseFolder}>
+                    <span className="attach-row-icon" aria-hidden="true">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    </span>
+                    <span className="attach-plugin-copy"><strong>Dossier</strong></span>
+                  </button>
+                </div>
+                <div className="attach-popover-scroll">
+                  <div className="composer-popover-separator" />
+                  <div className="composer-popover-title">Plugins & modes de travail</div>
+                  {catalogError && allowedPlugins.length === 0 ? (
+                    <p className="composer-popover-empty">{catalogError}</p>
+                  ) : allowedPlugins.length > 0 ? <>
+                    <input
+                      value={pluginSearch}
+                      onChange={event => setPluginSearch(event.target.value)}
+                      placeholder={t('composer.searchPlugin')}
+                      aria-label={t('composer.searchPlugin')}
+                      className="popover-search"
+                    />
+                    <div className="attach-plugin-list">
+                      {visiblePlugins.length > 0 ? visiblePlugins.map(plugin => {
+                        const isWorkMode = plugin.manifest && typeof plugin.manifest === 'object' && 'specializedMode' in (plugin.manifest as object)
+                        return (
+                          <button type="button" className="composer-popover-row attach-plugin-row" key={plugin.id} onClick={() => selectPlugin(plugin)}>
+                            <span className="attach-row-icon">
+                              <PluginIcon icon={resolvePluginIcon(plugin)} size="sm" className="attach-plugin-icon" />
+                            </span>
+                            <span className="attach-plugin-copy">
+                              <span className="attach-plugin-title">
+                                <strong>{plugin.name}</strong>
+                                {isBuiltinPlugin(plugin) ? <span className="skill-builtin-badge">Intégré</span> : null}
+                              </span>
+                              <small>{isWorkMode ? 'Mode de travail' : (plugin.description || 'Plugin activé')}</small>
+                            </span>
+                            <span className="attach-row-action" aria-hidden="true">+</span>
+                          </button>
+                        )
+                      }) : <p className="composer-popover-empty">Aucun plugin correspondant.</p>}
+                    </div>
+                  </> : <p className="composer-popover-empty">{t('composer.noPlugins')}</p>}
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/plugins') }}>Gérer les plugins</button>
+                  <div className="composer-popover-separator" />
+                  <div className="composer-popover-title">Skills (instructions)</div>
+                  {catalogError && allowedSkills.length === 0 ? (
+                    <p className="composer-popover-empty">{catalogError}</p>
+                  ) : allowedSkills.length > 0 ? <>
+                    <input
+                      value={skillSearch}
+                      onChange={event => setSkillSearch(event.target.value)}
+                      placeholder={t('composer.searchSkill')}
+                      aria-label={t('composer.searchSkill')}
+                      className="popover-search"
+                    />
+                    <div className="attach-plugin-list">
+                      {visibleSkills.length > 0 ? visibleSkills.map(skill => (
+                        <button type="button" className="composer-popover-row attach-plugin-row" key={`${skill.scope}:${skill.slug}`} onClick={() => selectSkill(skill)}>
+                          <span className="attach-row-icon">
+                            <PluginIcon icon={resolveIconFromText(skill.slug, skill.name, skill.description)} size="sm" className="attach-plugin-icon" />
+                          </span>
+                          <span className="attach-plugin-copy">
+                            <span className="attach-plugin-title">
+                              <strong>{skill.name}</strong>
+                              {isBuiltinSkill(skill) ? <span className="skill-builtin-badge">Intégré</span> : null}
+                            </span>
+                            <small>{skill.description || 'Skill activé'}</small>
+                          </span>
+                          <span className="attach-row-action" aria-hidden="true">+</span>
+                        </button>
+                      )) : <p className="composer-popover-empty">Aucun skill correspondant.</p>}
+                    </div>
+                  </> : <p className="composer-popover-empty">{t('composer.noSkills')}</p>}
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>Gérer les skills</button>
+                  <div className="composer-popover-separator" />
+                  <div className="composer-popover-title">Intégrations MCP</div>
+                  {mcpPickerItems.length > 0 ? <>
+                    <input
+                      value={mcpSearch}
+                      onChange={event => setMcpSearch(event.target.value)}
+                      placeholder={t('composer.searchMcp')}
+                      aria-label={t('composer.searchMcp')}
+                      className="popover-search"
+                    />
+                    <div className="attach-plugin-list">
+                      {visibleMcpItems.length > 0 ? visibleMcpItems.map(item => (
+                        <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
+                          <span className="attach-row-icon">
+                            <PluginIcon icon={item.icon} size="sm" className="attach-plugin-icon" />
+                          </span>
+                          <span className="attach-plugin-copy">
+                            <span className="attach-plugin-title">
+                              <strong>{item.name}</strong>
+                            </span>
+                            <small>{item.kind === 'integration' ? `Connecteur · ${item.description}` : item.description}</small>
+                          </span>
+                          <span className="attach-row-action" aria-hidden="true">+</span>
+                        </button>
+                      )) : <p className="composer-popover-empty">Aucune intégration MCP correspondante.</p>}
+                    </div>
+                  </> : <p className="composer-popover-empty">Aucune intégration MCP connectée{selectedProject ? ' pour ce projet' : ''}.</p>}
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>Gérer les intégrations</button>
+                </div>
               </ComposerPopover>
             )}
           </div>
 
-          <button className={`icon-btn ${listening ? 'recording' : ''}`} title="Dictée Apple" onClick={toggleDictation}>
+          <button
+            type="button"
+            className={`icon-btn ${listening ? 'recording' : ''}`}
+            title={t('composer.dictationLabel')}
+            aria-label={t('composer.dictationLabel')}
+            aria-pressed={listening}
+            disabled={dictationStarting}
+            onClick={toggleDictation}
+          >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
           </button>
 
@@ -487,7 +857,7 @@ export default function Composer({
               {modeMenu && (
                 <ComposerPopover anchorRef={modeButtonRef} align="end" ariaLabel="Modes Bob" className="mode-popover">
                   <div className="composer-popover-title">Modes Bob</div>
-                  <input autoFocus value={modeSearch} onChange={event => setModeSearch(event.target.value)} placeholder="Rechercher un mode…" className="popover-search" />
+                  <input autoFocus value={modeSearch} onChange={event => setModeSearch(event.target.value)} placeholder={t('composer.searchMode')} className="popover-search" />
                   <div className="mode-popover-list">
                     {filteredModes.map(item => (
                       <button className={`composer-popover-row mode-row ${item.slug === mode ? 'selected' : ''}`} key={item.slug} onClick={() => { setMode(item.slug); setModeMenu(false); setModeSearch('') }}>
@@ -509,7 +879,7 @@ export default function Composer({
             disabled={!text.trim() || !!disabled}
             onClick={handleSend}
             title={busy ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}` : 'Envoyer'}
-            aria-label={busy ? 'Ajouter le prompt à la file' : 'Envoyer le prompt'}
+            aria-label={busy ? 'Ajouter le prompt à la file' : t('composer.send')}
           >
             {busy ? (
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M4 6h10M4 12h7M4 18h5"/><path d="M17 11v8M13 15h8"/></svg>

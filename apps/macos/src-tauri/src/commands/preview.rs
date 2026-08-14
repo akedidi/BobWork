@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,9 +25,18 @@ pub struct FilePreview {
     pub size: u64,
     pub modified_at: Option<String>,
     pub preview_path: Option<String>,
+    /// Extra page/slide image paths when rasterized (optional).
+    #[serde(default)]
+    pub preview_paths: Vec<String>,
     pub content: Option<String>,
     pub entries: Vec<PreviewEntry>,
     pub quick_look: bool,
+    /// Number of pages/slides when known (PDF / converted Office).
+    #[serde(default)]
+    pub page_count: Option<u32>,
+    /// UI label unit: "page" | "slide"
+    #[serde(default)]
+    pub page_unit: Option<String>,
 }
 
 #[tauri::command]
@@ -41,10 +51,32 @@ pub async fn prepare_file_preview(path: String, app: AppHandle) -> Result<FilePr
     })
     .await
     .map_err(|error| AppError::Io(format!("Aperçu interrompu : {error}")))??;
+
+    let mut allow = Vec::new();
     if let Some(preview_path) = preview.preview_path.as_deref() {
+        allow.push(preview_path.to_string());
+    }
+    allow.extend(preview.preview_paths.iter().cloned());
+    for path in &allow {
         app.asset_protocol_scope()
-            .allow_file(preview_path)
+            .allow_file(path)
             .map_err(|error| AppError::Security(format!("Aperçu local refusé : {error}")))?;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = app.asset_protocol_scope().allow_directory(parent, true);
+            if let Some(media) = parent
+                .parent()
+                .map(|p| p.join("media"))
+                .filter(|p| p.is_dir())
+            {
+                let _ = app.asset_protocol_scope().allow_directory(&media, true);
+            }
+            let media_sibling = parent.join("media");
+            if media_sibling.is_dir() {
+                let _ = app
+                    .asset_protocol_scope()
+                    .allow_directory(&media_sibling, true);
+            }
+        }
     }
     Ok(preview)
 }
@@ -73,9 +105,7 @@ pub async fn allow_composer_attachments(
         }
         app.asset_protocol_scope()
             .allow_file(canonical.to_string_lossy().as_ref())
-            .map_err(|error| {
-                AppError::Security(format!("Pièce jointe refusée : {error}"))
-            })?;
+            .map_err(|error| AppError::Security(format!("Pièce jointe refusée : {error}")))?;
         allowed.push(canonical.to_string_lossy().to_string());
     }
     Ok(allowed)
@@ -90,6 +120,31 @@ pub async fn open_preview_resource(target: String) -> Result<(), AppError> {
         .canonicalize()
         .map_err(|_| AppError::NotFound("Fichier d’aperçu introuvable".into()))?;
     open::that(path).map_err(|error| AppError::Io(error.to_string()))
+}
+
+/// Reveal a local file or folder in Finder (macOS) / file manager.
+#[tauri::command]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), AppError> {
+    let path = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|_| AppError::NotFound("Fichier introuvable".into()))?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .status()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        if !status.success() {
+            return Err(AppError::Io("Impossible d’ouvrir le Finder".into()));
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let parent = path.parent().map(Path::to_path_buf).unwrap_or(path);
+        open::that(parent).map_err(|error| AppError::Io(error.to_string()))
+    }
 }
 
 fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, AppError> {
@@ -135,9 +190,12 @@ fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, Ap
             size: 0,
             modified_at,
             preview_path: None,
+            preview_paths: vec![],
             content: None,
             entries,
             quick_look: false,
+            page_count: None,
+            page_unit: None,
         });
     }
 
@@ -150,7 +208,10 @@ fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, Ap
     let mut content = None;
     let mut preview_path = matches!(kind, "image" | "pdf" | "video" | "audio" | "html")
         .then(|| path.to_string_lossy().to_string());
+    let mut preview_paths = Vec::new();
     let mut quick_look = false;
+    let mut page_count = None;
+    let mut page_unit = None;
 
     if matches!(kind, "text" | "markdown") {
         let file = std::fs::File::open(&path)?;
@@ -161,6 +222,9 @@ fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, Ap
             text.push_str("\n\n… aperçu limité aux 2 premiers Mo …");
         }
         content = Some(text);
+    } else if kind == "pdf" {
+        page_count = pdf_page_count(&path).or(Some(1));
+        page_unit = Some("page".into());
     } else if kind == "office" {
         std::fs::create_dir_all(&cache_dir)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -169,22 +233,78 @@ fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, Ap
         modified_at.hash(&mut hasher);
         let output_dir = cache_dir.join(format!("{:x}", hasher.finish()));
         std::fs::create_dir_all(&output_dir)?;
-        let expected = output_dir.join(format!("{}.png", name));
-        if !expected.exists() {
-            let _ = std::process::Command::new("/usr/bin/qlmanage")
-                .args(["-t", "-s", "1800", "-o"])
-                .arg(&output_dir)
-                .arg(&path)
-                .output();
-        }
-        let generated = if expected.exists() {
-            Some(expected)
+
+        let unit = if matches!(extension.as_str(), "ppt" | "pptx" | "odp" | "key") {
+            "slide"
         } else {
-            first_png(&output_dir)
+            "page"
         };
-        if let Some(generated) = generated {
-            preview_path = Some(generated.to_string_lossy().to_string());
-            quick_look = true;
+        page_unit = Some(unit.into());
+
+        // PPTX: always use standalone HTML renderer (no PowerPoint Automation).
+        if matches!(extension.as_str(), "ppt" | "pptx") {
+            match crate::services::pptx_preview::PptxPreviewService::new()
+                .render_to_html(&path, &output_dir)
+            {
+                Ok(html_paths) if !html_paths.is_empty() => {
+                    preview_paths = html_paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                    preview_path = preview_paths.first().cloned();
+                    page_count = Some(preview_paths.len() as u32);
+                    quick_look = false;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!("Standalone PPTX preview failed: {:?}", error);
+                }
+            }
+        }
+
+        if preview_path.is_none() {
+            let pdf_out = output_dir.join("document.pdf");
+            let converted = if pdf_out.is_file() {
+                Some(pdf_out.clone())
+            } else if !matches!(extension.as_str(), "ppt" | "pptx") {
+                // LibreOffice headless only — never AppleScript → PowerPoint/Word.
+                convert_with_libreoffice(&path, &output_dir)
+            } else {
+                None
+            };
+
+            if let Some(pdf) = converted {
+                preview_path = Some(pdf.to_string_lossy().to_string());
+                page_count = pdf_page_count(&pdf).or(Some(1));
+                quick_look = true;
+            } else if preview_path.is_none() {
+                // Fallback: single Quick Look thumbnail (no app Automation prompt).
+                let expected = output_dir.join(format!("{}.png", name));
+                if !expected.exists() {
+                    let _ = Command::new("/usr/bin/qlmanage")
+                        .args(["-t", "-s", "1800", "-o"])
+                        .arg(&output_dir)
+                        .arg(&path)
+                        .output();
+                }
+                let generated = if expected.exists() {
+                    Some(expected)
+                } else {
+                    first_png(&output_dir)
+                };
+                if let Some(generated) = generated {
+                    preview_path = Some(generated.to_string_lossy().to_string());
+                    if preview_paths.is_empty() {
+                        preview_paths = collect_pngs(&output_dir);
+                    }
+                    quick_look = true;
+                }
+                if page_count.is_none() {
+                    let raster =
+                        preview_paths.len().max(usize::from(preview_path.is_some())) as u32;
+                    page_count = Some(raster.max(1));
+                }
+            }
         }
     }
 
@@ -196,18 +316,109 @@ fn prepare_preview(input: PathBuf, cache_dir: PathBuf) -> Result<FilePreview, Ap
         size: metadata.len(),
         modified_at,
         preview_path,
+        preview_paths,
         content,
         entries: vec![],
         quick_look,
+        page_count,
+        page_unit,
     })
 }
 
+fn convert_with_libreoffice(path: &Path, output_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        "soffice",
+        "libreoffice",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "/opt/homebrew/bin/soffice",
+        "/usr/local/bin/soffice",
+    ];
+    let soffice = candidates.into_iter().find(|bin| {
+        Path::new(bin).is_file()
+            || Command::new("which")
+                .arg(bin)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .is_some()
+    })?;
+    let status = Command::new(soffice)
+        .args([
+            "--headless",
+            "--norestore",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+        ])
+        .arg(output_dir)
+        .arg(path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let pdf = output_dir.join(format!("{stem}.pdf"));
+    if pdf.is_file() {
+        let canonical = output_dir.join("document.pdf");
+        let _ = std::fs::rename(&pdf, &canonical);
+        return Some(if canonical.is_file() { canonical } else { pdf });
+    }
+    None
+}
+
+fn pdf_page_count(path: &Path) -> Option<u32> {
+    let output = Command::new("/usr/bin/mdls")
+        .args(["-raw", "-name", "kMDItemNumberOfPages"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() || raw == "(null)" {
+        return None;
+    }
+    raw.parse::<u32>().ok().filter(|n| *n > 0)
+}
+
+fn pptx_slide_count(path: &Path) -> Option<u32> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut count = 0u32;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).ok()?;
+        let name = entry.name().replace('\\', "/");
+        if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") && !name.contains("_rels")
+        {
+            count += 1;
+        }
+    }
+    (count > 0).then_some(count)
+}
+
 fn first_png(directory: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(directory)
-        .ok()?
+    collect_pngs(directory)
+        .into_iter()
+        .next()
+        .map(PathBuf::from)
+}
+
+fn collect_pngs(directory: &Path) -> Vec<String> {
+    let mut paths = std::fs::read_dir(directory)
+        .ok()
+        .into_iter()
+        .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
 }
 
 fn is_sensitive_path(path: &Path) -> bool {
@@ -273,6 +484,28 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.name == "notes.txt"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn counts_pptx_slides_from_zip() {
+        let root = std::env::temp_dir().join(format!("bob-pptx-count-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pptx = root.join("deck.pptx");
+        {
+            let file = std::fs::File::create(&pptx).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for i in 1..=3 {
+                zip.start_file(format!("ppt/slides/slide{i}.xml"), options)
+                    .unwrap();
+                use std::io::Write;
+                zip.write_all(b"<p:sld/>").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        assert_eq!(pptx_slide_count(&pptx), Some(3));
         let _ = std::fs::remove_dir_all(root);
     }
 

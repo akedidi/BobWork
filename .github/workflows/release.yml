@@ -1,0 +1,189 @@
+name: Release macOS
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-macos:
+    name: Sign · Notarize · Publish · Updater
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/macos/src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release inputs
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: ${{ vars.BOBWORK_OAUTH_MICROSOFT_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          required=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_UPDATER_PUBLIC_KEY BOBWORK_OAUTH_MICROSOFT_CLIENT_ID)
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing release secret or variable: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/bob-work-release.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/bob-work-signing.keychain-db"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "Developer ID Application identity not found in certificate" >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Create signed updater configuration
+        working-directory: apps/macos
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: node scripts/create-release-config.mjs
+
+      - name: Verify application before packaging
+        run: pnpm --filter macos run verify
+
+      - name: Build, sign, notarize and publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: ${{ vars.BOBWORK_OAUTH_MICROSOFT_CLIENT_ID }}
+        with:
+          projectPath: apps/macos
+          args: --config src-tauri/tauri.release.conf.json
+          tagName: v__VERSION__
+          releaseName: Bob Work v__VERSION__
+          releaseBody: Signed and notarized macOS release with automatic updates.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+
+      - name: Download published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./apps/macos/package.json').version")"
+          TAG="v${VERSION}"
+          mkdir -p release-evidence/assets
+          gh release download "$TAG" --dir release-evidence/assets
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Verify Developer ID signature and Apple notarization
+        run: |
+          set -euo pipefail
+          DMG="$(find release-evidence/assets -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [[ -z "$DMG" ]]; then
+            echo "Published DMG not found" >&2
+            exit 1
+          fi
+          MOUNT_POINT="$RUNNER_TEMP/bob-work-dmg"
+          mkdir -p "$MOUNT_POINT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          APP="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$APP" ]]; then
+            hdiutil detach "$MOUNT_POINT"
+            echo "Application bundle not found in DMG" >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee release-evidence/codesign.txt
+          spctl --assess --type execute --verbose=4 "$APP" 2>&1 | tee release-evidence/spctl.txt
+          xcrun stapler validate "$APP" 2>&1 | tee release-evidence/stapler-app.txt
+          hdiutil detach "$MOUNT_POINT"
+          xcrun stapler validate "$DMG" 2>&1 | tee release-evidence/stapler-dmg.txt
+          shasum -a 256 "$DMG" | tee release-evidence/dmg-sha256.txt
+
+      - name: Verify updater manifest and signed artifact pairing
+        run: |
+          set -euo pipefail
+          LATEST="$(find release-evidence/assets -maxdepth 1 -name 'latest.json' -print -quit)"
+          if [[ -z "$LATEST" ]]; then
+            echo "latest.json not found" >&2
+            exit 1
+          fi
+          jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$LATEST" >/dev/null
+          jq -e '.platforms | to_entries | length > 0' "$LATEST" >/dev/null
+          jq -e '.platforms | to_entries | all(.value.url | startswith("https://"))' "$LATEST" >/dev/null
+          jq -e '.platforms | to_entries | all(.value.signature | type == "string" and length > 20)' "$LATEST" >/dev/null
+          while IFS=$'\t' read -r target url signature; do
+            ARCHIVE="release-evidence/assets/$(basename "${url%%\?*}")"
+            if [[ ! -f "$ARCHIVE" ]]; then
+              curl --fail --location --retry 3 "$url" --output "$ARCHIVE"
+            fi
+            SIG_FILE="${ARCHIVE}.sig"
+            if [[ -f "$SIG_FILE" ]]; then
+              diff -u <(printf '%s' "$signature") <(tr -d '\r\n' < "$SIG_FILE")
+            fi
+            shasum -a 256 "$ARCHIVE" | tee -a release-evidence/updater-sha256.txt
+            printf '%s\t%s\n' "$target" "$url" | tee -a release-evidence/updater-platforms.txt
+          done < <(jq -r '.platforms | to_entries[] | [.key, .value.url, .value.signature] | @tsv' "$LATEST")
+          cp "$LATEST" release-evidence/latest-verified.json
+
+      - name: Upload release certification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bob-work-release-certification-${{ github.run_id }}
+          path: release-evidence/**
+          if-no-files-found: error
+          retention-days: 90

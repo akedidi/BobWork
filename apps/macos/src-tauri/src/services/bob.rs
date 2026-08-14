@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::oneshot;
@@ -35,6 +35,16 @@ pub struct BobDetectionResult {
     /// Whether Bob Work can execute the headless `bob run` command.
     pub authenticated: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BobAuthSnapshot {
+    pub found: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    pub authenticated: bool,
+    pub authentication_method: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +110,9 @@ pub struct BobRunOptions {
     pub plugin_hooks: Vec<PreparedPluginHook>,
     /// Bob Shell 2 root task identifier used by `bob run --resume`.
     pub resume_task_id: Option<String>,
+    /// When true, pass `--trust` to Bob Shell for this workspace run.
+    #[serde(default)]
+    pub trust_workspace: bool,
 }
 
 impl Default for BobRunOptions {
@@ -115,8 +128,20 @@ impl Default for BobRunOptions {
             integration_ids: vec![],
             plugin_hooks: vec![],
             resume_task_id: None,
+            trust_workspace: false,
         }
     }
+}
+
+/// Deferred `bob run` waiting on a preflight approval decision.
+#[derive(Debug, Clone)]
+pub struct PendingBobLaunch {
+    pub session_id: String,
+    pub conversation_id: String,
+    pub mode: String,
+    pub prompt: String,
+    pub project_path: Option<String>,
+    pub options: BobRunOptions,
 }
 
 // ── Streaming Events ──────────────────────────────────────────
@@ -146,6 +171,9 @@ pub struct BobSessionDoneEvent {
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub shell_task_id: Option<String>,
+    /// True when the user stopped the run — no failure notification.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 // ── Active Session ────────────────────────────────────────────
@@ -166,6 +194,8 @@ pub struct BobSession {
 pub struct BobService {
     pub sessions: Mutex<HashMap<String, BobSession>>,
     pub bob_path: Mutex<Option<String>>,
+    /// approval_id → launch payload (preflight gate).
+    pub pending_launches: Mutex<HashMap<String, PendingBobLaunch>>,
 }
 
 impl BobService {
@@ -174,7 +204,19 @@ impl BobService {
         Self {
             sessions: Mutex::new(HashMap::new()),
             bob_path: Mutex::new(None),
+            pending_launches: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn queue_pending_launch(&self, approval_id: String, launch: PendingBobLaunch) {
+        self.pending_launches
+            .lock()
+            .unwrap()
+            .insert(approval_id, launch);
+    }
+
+    pub fn take_pending_launch(&self, approval_id: &str) -> Option<PendingBobLaunch> {
+        self.pending_launches.lock().unwrap().remove(approval_id)
     }
 
     pub fn set_session_secret(&self, account: &str, secret: String) -> AppResult<()> {
@@ -233,18 +275,48 @@ impl BobService {
             .or_else(|| Self::environment_secret(&["BOB_API_KEY", "BOBSHELL_API_KEY"]))
     }
 
+    /// True when Bob Work can authenticate `bob run` / Bobcoins:
+    /// vault key, env key, or an active IBM Bob Shell SSO session.
+    fn has_run_credentials(&self) -> bool {
+        crate::services::bob_usage::credentials_available_for_run()
+    }
+
+    /// Fast install/auth snapshot for Settings and onboarding (no `bob --help` / `--version`).
+    pub fn auth_snapshot(&self) -> BobAuthSnapshot {
+        Self::enrich_path_for_gui_apps();
+        let path = self.resolve_bob_binary();
+        if let Some(ref resolved) = path {
+            *self.bob_path.lock().unwrap() = Some(resolved.clone());
+        }
+        BobAuthSnapshot {
+            found: path.is_some(),
+            path,
+            version: None,
+            authenticated: self.has_run_credentials(),
+            authentication_method: crate::services::bob_usage::resolve_run_authentication_method()
+                .to_string(),
+        }
+    }
+
     pub fn has_integration_credential(&self, integration_id: &str) -> bool {
         let oauth = crate::services::integration_oauth::IntegrationOAuthService::new();
-        if let Some(provider) = crate::services::integration_oauth::IntegrationOAuthService::provider_for(integration_id) {
+        if let Some(provider) =
+            crate::services::integration_oauth::IntegrationOAuthService::provider_for(
+                integration_id,
+            )
+        {
             if oauth.has_oauth_tokens(provider) {
                 return true;
             }
         }
         let (account, variables): (&str, &[&str]) = match integration_id {
             "github" => (SECRET_GITHUB, &["GH_TOKEN", "GITHUB_TOKEN"]),
-            "slack" => (SECRET_SLACK, &["SLACK_BOT_TOKEN"]),
+            "slack" => (
+                SECRET_SLACK,
+                &["SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN", "SLACK_USER_TOKEN"],
+            ),
             "monday" => (SECRET_MONDAY, &["MONDAY_API_TOKEN"]),
-            "outlook-mail" | "teams" | "outlook-calendar" | "onedrive" => {
+            "outlook-mail" | "teams" | "outlook-calendar" | "onedrive" | "onenote" => {
                 return oauth.has_oauth_tokens("microsoft");
             }
             _ => return false,
@@ -252,11 +324,16 @@ impl BobService {
         self.session_secret(account).is_some() || Self::environment_secret(variables).is_some()
     }
 
-    pub fn integration_access_token(&self, integration_id: &str) -> Option<zeroize::Zeroizing<String>> {
+    pub fn integration_access_token(
+        &self,
+        integration_id: &str,
+    ) -> Option<zeroize::Zeroizing<String>> {
         use zeroize::Zeroizing;
         let oauth = crate::services::integration_oauth::IntegrationOAuthService::new();
         if let Some(provider) =
-            crate::services::integration_oauth::IntegrationOAuthService::provider_for(integration_id)
+            crate::services::integration_oauth::IntegrationOAuthService::provider_for(
+                integration_id,
+            )
         {
             if let Ok(Some(token)) = oauth.access_token_for_provider(provider) {
                 return Some(Zeroizing::new(token));
@@ -264,7 +341,10 @@ impl BobService {
         }
         let (account, variables): (&str, &[&str]) = match integration_id {
             "github" => (SECRET_GITHUB, &["GH_TOKEN", "GITHUB_TOKEN"]),
-            "slack" => (SECRET_SLACK, &["SLACK_BOT_TOKEN"]),
+            "slack" => (
+                SECRET_SLACK,
+                &["SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN", "SLACK_USER_TOKEN"],
+            ),
             "monday" => (SECRET_MONDAY, &["MONDAY_API_TOKEN"]),
             _ => return None,
         };
@@ -281,7 +361,7 @@ impl BobService {
         for id in integration_ids {
             if matches!(
                 id.as_str(),
-                "outlook-mail" | "teams" | "outlook-calendar" | "onedrive"
+                "outlook-mail" | "teams" | "outlook-calendar" | "onedrive" | "onenote"
             ) {
                 if microsoft_injected {
                     continue;
@@ -294,7 +374,7 @@ impl BobService {
             }
             let variables: &[&str] = match id.as_str() {
                 "github" => &["GH_TOKEN", "GITHUB_TOKEN"],
-                "slack" => &["SLACK_BOT_TOKEN"],
+                "slack" => &["SLACK_BOT_TOKEN", "SLACK_ACCESS_TOKEN", "SLACK_USER_TOKEN"],
                 "monday" => &["MONDAY_API_TOKEN"],
                 _ => continue,
             };
@@ -318,34 +398,9 @@ impl BobService {
     // ── Detection ──────────────────────────────────────────────
 
     pub fn detect(&self) -> BobDetectionResult {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let npm_global = format!("{}/.npm-global/bin/bob", home);
-        let local_bin = format!("{}/.local/bin/bob", home);
-        let pnpm_bin = format!("{}/Library/pnpm/bob", home);
-        let configured = std::env::var("BOB_WORK_BOB_PATH").ok();
-
-        let mut search_paths: Vec<String> = vec![];
-        if let Some(path) = configured {
-            search_paths.push(path);
-        }
-        search_paths.extend([
-            "bob".to_string(),
-            local_bin,
-            npm_global,
-            pnpm_bin,
-            "/usr/local/bin/bob".to_string(),
-            "/opt/homebrew/bin/bob".to_string(),
-            "/usr/bin/bob".to_string(),
-        ]);
-
-        let bob_path = search_paths.iter().find_map(|p| {
-            if p == "bob" {
-                which("bob").ok().map(|pb| pb.to_string_lossy().to_string())
-            } else {
-                let path = Path::new(p);
-                (path.is_file() && is_executable(path)).then(|| p.to_string())
-            }
-        });
+        Self::enrich_path_for_gui_apps();
+        let authenticated = self.has_run_credentials();
+        let bob_path = self.resolve_bob_binary();
 
         match bob_path {
             None => {
@@ -354,9 +409,9 @@ impl BobService {
                     found: false,
                     path: None,
                     version: None,
-                    authenticated: false,
+                    authenticated,
                     error: Some(
-                        "Bob Shell non trouvé. Installez IBM Bob Shell depuis bob.ibm.com."
+                        "Bob Shell non trouvé. Installez IBM Bob Shell depuis bob.ibm.com, ou définissez BOB_WORK_BOB_PATH."
                             .to_string(),
                     ),
                 }
@@ -366,10 +421,8 @@ impl BobService {
                 *self.bob_path.lock().unwrap() = Some(path.clone());
 
                 let version = self.get_version_sync(&path);
-                // Bob Work executes `bob run --format stream-json`; only a
-                // usable API key makes this local integration ready.
-                let authenticated = self.api_key().is_some();
-
+                // Bob Work executes `bob run --format stream-json`. Auth may be
+                // a vault/env API key or an IBM Bob Shell SSO session.
                 BobDetectionResult {
                     found: true,
                     path: Some(path),
@@ -381,16 +434,136 @@ impl BobService {
         }
     }
 
-    fn get_version_output(&self, bob_path: &str) -> Option<String> {
-        std::process::Command::new(bob_path)
-            .arg("--version")
-            .output()
+    /// GUI / `.app` launches often have a minimal PATH. Prepend common install
+    /// locations so `which bob` and child `bob run` succeed.
+    fn enrich_path_for_gui_apps() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let extras = [
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+            home.join("Library/pnpm"),
+            home.join(".volta/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ];
+        let current = std::env::var("PATH").unwrap_or_default();
+        let mut parts: Vec<String> = extras
+            .iter()
+            .filter(|path| path.is_dir())
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        for segment in current.split(':').filter(|segment| !segment.is_empty()) {
+            if !parts.iter().any(|existing| existing == segment) {
+                parts.push(segment.to_string());
+            }
+        }
+        // Newest nvm node bin (if present).
+        let nvm = home.join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(&nvm) {
+            let mut versions: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
+            versions.sort_by_key(|entry| entry.file_name());
+            if let Some(latest) = versions.last() {
+                let bin = latest.path().join("bin");
+                if bin.is_dir() {
+                    let text = bin.to_string_lossy().to_string();
+                    if !parts.iter().any(|existing| existing == &text) {
+                        parts.insert(0, text);
+                    }
+                }
+            }
+        }
+        let _ = std::env::set_var("PATH", parts.join(":"));
+    }
+
+    fn resolve_bob_binary(&self) -> Option<String> {
+        let home = dirs::home_dir().unwrap_or_default();
+        let configured = std::env::var("BOB_WORK_BOB_PATH").ok();
+
+        let mut search_paths: Vec<PathBuf> = vec![];
+        if let Some(path) = configured {
+            search_paths.push(PathBuf::from(path));
+        }
+        search_paths.extend([
+            home.join(".local/bin/bob"),
+            home.join(".npm-global/bin/bob"),
+            home.join("Library/pnpm/bob"),
+            home.join(".volta/bin/bob"),
+            PathBuf::from("/opt/homebrew/bin/bob"),
+            PathBuf::from("/usr/local/bin/bob"),
+            PathBuf::from("/usr/bin/bob"),
+        ]);
+
+        // Explicit paths first (reliable under GUI PATH). Existence is enough
+        // to mark Bob as installed — `--version` can hang under a GUI PATH.
+        for path in &search_paths {
+            if Self::path_looks_like_bob(path) {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+        if let Some(path) = which("bob")
             .ok()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout).to_string()
-                    + &String::from_utf8_lossy(&o.stderr).to_string();
-                out.trim().to_string()
+            .map(|path| path.to_string_lossy().to_string())
+            .filter(|path| Path::new(path).is_file())
+        {
+            return Some(path);
+        }
+        Self::which_via_login_shell()
+    }
+
+    fn path_looks_like_bob(path: &Path) -> bool {
+        path.is_file()
+            || (path.is_symlink() && path.metadata().map(|m| m.is_file()).unwrap_or(false))
+    }
+
+    fn probe_bob_binary(&self, path: &Path) -> Option<String> {
+        if !Self::path_looks_like_bob(path) {
+            return None;
+        }
+        self.get_version_output(&path.to_string_lossy())
+            .or_else(|| {
+                let canonical = path.canonicalize().ok()?;
+                self.get_version_output(&canonical.to_string_lossy())
             })
+    }
+
+    fn which_via_login_shell() -> Option<String> {
+        let mut command = std::process::Command::new("/bin/zsh");
+        command.args(["-lic", "command -v bob"]);
+        let output = output_with_timeout(&mut command, Duration::from_secs(2))?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let candidate = PathBuf::from(&path);
+        (candidate.is_file() && is_executable(&candidate)).then_some(path)
+    }
+
+    fn enriched_path() -> String {
+        static PATH: OnceLock<String> = OnceLock::new();
+        PATH.get_or_init(|| {
+            Self::enrich_path_for_gui_apps();
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        })
+        .clone()
+    }
+
+    fn apply_runtime_path(cmd: &mut std::process::Command) {
+        cmd.env("PATH", Self::enriched_path());
+    }
+
+    fn apply_runtime_path_tokio(cmd: &mut TokioCommand) {
+        cmd.env("PATH", Self::enriched_path());
+    }
+
+    fn get_version_output(&self, bob_path: &str) -> Option<String> {
+        let mut command = std::process::Command::new(bob_path);
+        Self::apply_runtime_path(&mut command);
+        command.arg("--version");
+        let output = output_with_timeout(&mut command, Duration::from_secs(4))?;
+        let out = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr).to_string();
+        let out = out.trim().to_string();
+        (!out.is_empty()).then_some(out)
     }
 
     fn get_version_sync(&self, bob_path: &str) -> Option<String> {
@@ -429,13 +602,8 @@ impl BobService {
         let commit = version_output
             .lines()
             .find_map(|line| line.trim().strip_prefix("commit: ").map(str::to_string));
-        let authentication_method = if self.session_secret(SECRET_IBM_API).is_some() {
-            "api_key_session".to_string()
-        } else if Self::environment_secret(&["BOB_API_KEY", "BOBSHELL_API_KEY"]).is_some() {
-            "api_key_environment".to_string()
-        } else {
-            "required".to_string()
-        };
+        let authentication_method =
+            crate::services::bob_usage::resolve_run_authentication_method().to_string();
         ShellProfile {
             supports_stream_json: help_lower.contains("stream-json"),
             supports_resume: help_lower.contains("--resume"),
@@ -487,7 +655,9 @@ impl BobService {
         ];
         let mut candidates = vec![];
         if let Some(home) = dirs::home_dir() {
+            // Prefer Bob Work / settings path, then IBM Shell global path.
             candidates.push(home.join(".bob/settings/custom_modes.yaml"));
+            candidates.push(home.join(".bob/custom_modes.yaml"));
         }
         if let Some(workspace) = workspace {
             let root = PathBuf::from(workspace);
@@ -638,21 +808,51 @@ impl BobService {
     }
 
     fn get_help_output(&self, bob_path: &str) -> Option<String> {
+        static HELP_CACHE: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+        if let Ok(guard) = HELP_CACHE.lock() {
+            if let Some((help, at)) = guard.as_ref() {
+                if at.elapsed() < Duration::from_secs(3600) {
+                    return Some(help.clone());
+                }
+            }
+        }
+
+        // Prefer a single `--help` call. Spawning four Node help processes can
+        // hang long enough on GUI launches that profile refresh looks empty.
         let mut help = String::new();
+        let mut primary = std::process::Command::new(bob_path);
+        Self::apply_runtime_path(&mut primary);
+        primary.arg("--help");
+        let primary = output_with_timeout(&mut primary, Duration::from_secs(5))?;
+        help.push_str(&String::from_utf8_lossy(&primary.stdout));
+        help.push('\n');
+        help.push_str(&String::from_utf8_lossy(&primary.stderr));
+        help.push('\n');
+        let help_lower = help.to_lowercase();
+        let needs_run = !help_lower.contains("stream-json") || !help_lower.contains("--resume");
+        let needs_mcp = !help_lower.contains(" mcp") && !help_lower.contains("manage mcp");
+        let needs_chat =
+            !help_lower.contains("subagents") && !help_lower.contains("--auto-approve");
         for arguments in [
-            vec!["--help"],
-            vec!["run", "--help"],
-            vec!["chat", "--help"],
-            vec!["mcp", "--help"],
-        ] {
-            let output = std::process::Command::new(bob_path)
-                .args(arguments)
-                .output()
-                .ok()?;
-            help.push_str(&String::from_utf8_lossy(&output.stdout));
-            help.push('\n');
-            help.push_str(&String::from_utf8_lossy(&output.stderr));
-            help.push('\n');
+            needs_run.then_some(vec!["run", "--help"]),
+            needs_chat.then_some(vec!["chat", "--help"]),
+            needs_mcp.then_some(vec!["mcp", "--help"]),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut command = std::process::Command::new(bob_path);
+            Self::apply_runtime_path(&mut command);
+            command.args(&arguments);
+            if let Some(output) = output_with_timeout(&mut command, Duration::from_secs(4)) {
+                help.push_str(&String::from_utf8_lossy(&output.stdout));
+                help.push('\n');
+                help.push_str(&String::from_utf8_lossy(&output.stderr));
+                help.push('\n');
+            }
+        }
+        if let Ok(mut guard) = HELP_CACHE.lock() {
+            *guard = Some((help.clone(), std::time::Instant::now()));
         }
         Some(help)
     }
@@ -740,6 +940,7 @@ impl BobService {
                         task_id: task_id.clone(),
                         run_id: run_id.clone(),
                         shell_task_id: None,
+                        cancelled: false,
                     },
                 );
                 let service = app_handle.state::<BobService>();
@@ -749,6 +950,7 @@ impl BobService {
 
             // Build command
             let mut cmd = TokioCommand::new(&bob_path);
+            BobService::apply_runtime_path_tokio(&mut cmd);
             if let Some(api_key) = api_key.as_deref() {
                 // Bob Shell 2.0 accepts both names. IBM's public documentation
                 // still documents BOBSHELL_API_KEY while current builds prefer
@@ -759,11 +961,22 @@ impl BobService {
             for (variable, secret) in &integration_environment {
                 cmd.env(variable, secret.as_str());
             }
+            // Plugin API keys saved via Intégrations → APIs live in mcp.json env maps.
+            // Inject them so placeholders like ${FINNHUB_API_KEY} on plugin MCP resolve.
+            for (variable, value) in
+                crate::services::workspace::WorkspaceService::new().mcp_env_for_bob_process()
+            {
+                if std::env::var_os(&variable).is_none() {
+                    cmd.env(variable, value);
+                }
+            }
             cmd.arg("run");
             cmd.arg("--format");
             cmd.arg("stream-json");
             cmd.arg("--accept-license");
-            cmd.arg("--trust");
+            if options.trust_workspace {
+                cmd.arg("--trust");
+            }
 
             if let Some(path) = project_path {
                 cmd.arg("--workspace");
@@ -823,6 +1036,7 @@ impl BobService {
                             task_id: task_id.clone(),
                             run_id: run_id.clone(),
                             shell_task_id: None,
+                            cancelled: false,
                         },
                     );
                     let service = app_handle.state::<BobService>();
@@ -846,6 +1060,7 @@ impl BobService {
             let mut shell_task_id: Option<String> = None;
             let mut active_tools = HashMap::<String, ActiveTool>::new();
             let mut protocol_error: Option<String> = None;
+            let mut applied_session_cost = 0.0;
 
             // Read stdout and stderr concurrently, emit tokens
             loop {
@@ -874,6 +1089,7 @@ impl BobService {
                             task_id: task_id.clone(),
                             run_id: run_id.clone(),
                             shell_task_id: None,
+                            cancelled: true,
                         });
                         return;
                     }
@@ -882,11 +1098,12 @@ impl BobService {
                     line = stdout_reader.next_line() => {
                         match line {
                             Ok(Some(raw)) => {
-                                let clean = strip_ansi(&raw);
+                                let clean = Self::redact_secrets(&strip_ansi(&raw));
                                 if clean.is_empty() { continue; }
 
                                 // Attempt to parse as JSON if output-format is stream-json
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&clean) {
+                                if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&clean) {
+                                    crate::security::secret_redaction::redact_json(&mut parsed);
                                     if shell_task_id.is_none() {
                                         shell_task_id = find_json_string(&parsed, &["rootTaskId", "root_task_id", "taskId", "task_id"]);
                                     }
@@ -937,7 +1154,7 @@ impl BobService {
                                             let _ = app_handle.emit("bob-token", BobTokenEvent {
                                                 session_id: sid.clone(),
                                                 conversation_id: cid.clone(),
-                                                chunk: delta.to_string(),
+                                                chunk: Self::redact_secrets(delta),
                                                 is_final: false,
                                                 event_type: "text".to_string(),
                                                 task_id: task_id.clone(),
@@ -975,6 +1192,14 @@ impl BobService {
                                             record_task_activity(&app_handle, task_id.as_deref(), run_id.as_deref(), &activity);
                                         }
 
+                                        if matches!(protocol.event_type.as_str(), "usage" | "run_finished") {
+                                            publish_live_session_cost(
+                                                &app_handle,
+                                                &protocol.payload,
+                                                &mut applied_session_cost,
+                                            );
+                                        }
+
                                         for source in collect_sources(&parsed) {
                                             record_task_source(&app_handle, task_id.as_deref(), run_id.as_deref(), &source);
                                         }
@@ -995,7 +1220,7 @@ impl BobService {
                                             let _ = app_handle.emit("bob-token", BobTokenEvent {
                                                 session_id: sid.clone(),
                                                 conversation_id: cid.clone(),
-                                                chunk: delta.to_string(),
+                                                chunk: Self::redact_secrets(delta),
                                                 is_final: false,
                                             event_type: "text".to_string(),
                                             task_id: task_id.clone(),
@@ -1086,18 +1311,11 @@ impl BobService {
                                             }
 
                                             let _ = app_handle.emit("approval-required", &approval);
-                                            {
-                                                let db = app_handle.state::<crate::db::Database>();
-                                                if let Ok(settings) = crate::services::settings::SettingsService::new().get(&db) {
-                                                    if settings.notifications_enabled {
-                                                        use tauri_plugin_notification::NotificationExt;
-                                                        let _ = app_handle.notification().builder()
-                                                            .title("Bob attend votre autorisation")
-                                                            .body(description.chars().take(160).collect::<String>())
-                                                            .show();
-                                                    }
-                                                }
-                                            }
+                                            crate::services::notify::notify_approval_required(
+                                                &app_handle,
+                                                &description,
+                                                task_id.as_deref(),
+                                            );
                                         }
                                     } else if parsed.get("type").and_then(|v| v.as_str()) == Some("message") && parsed.get("role").and_then(|v| v.as_str()) == Some("assistant") {
                                         // Handle full message response
@@ -1106,7 +1324,7 @@ impl BobService {
                                             let _ = app_handle.emit("bob-token", BobTokenEvent {
                                                 session_id: sid.clone(),
                                                 conversation_id: cid.clone(),
-                                                chunk: content.to_string(),
+                                                chunk: Self::redact_secrets(content),
                                                 is_final: true,
                                                 event_type: "text".to_string(),
                                                 task_id: task_id.clone(),
@@ -1136,7 +1354,7 @@ impl BobService {
                     // stderr line (log only, do not stream to UI unless error)
                     line = stderr_reader.next_line() => {
                         if let Ok(Some(raw)) = line {
-                            let clean = strip_ansi(&raw);
+                            let clean = Self::redact_secrets(&strip_ansi(&raw));
                             debug!("Bob stderr: {}", clean);
                             if clean.to_lowercase().contains("error") || clean.to_lowercase().contains("budget") || clean.to_lowercase().contains("api key") {
                                 protocol_error.get_or_insert_with(|| clean.clone());
@@ -1188,11 +1406,12 @@ impl BobService {
                     error: if success {
                         None
                     } else {
-                        protocol_error.or_else(|| Some("Bob a terminé avec une erreur.".into()))
+                        protocol_error.or_else(|| Some("Bob Shell a renvoyé une erreur.".into()))
                     },
                     task_id: task_id.clone(),
                     run_id: run_id.clone(),
                     shell_task_id: shell_task_id.clone(),
+                    cancelled: false,
                 },
             );
 
@@ -1216,6 +1435,7 @@ impl BobService {
         let request = title_generation_prompt(first_prompt);
 
         let mut cmd = TokioCommand::new(bob_path);
+        Self::apply_runtime_path_tokio(&mut cmd);
         if let Some(api_key) = api_key.as_deref() {
             cmd.env("BOB_API_KEY", api_key);
             cmd.env("BOBSHELL_API_KEY", api_key);
@@ -1271,6 +1491,14 @@ impl BobService {
         })
     }
 
+    pub fn session_task_id(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|session| session.task_id.clone())
+    }
+
     /// Cancel a running session
     pub fn cancel_session(&self, session_id: &str) -> AppResult<()> {
         let mut sessions = self.sessions.lock().unwrap();
@@ -1307,7 +1535,7 @@ impl BobService {
             "ask" | "quick_chat" => "ask",
             "plan" | "planning" => "plan",
             "agent" | "general_work" | "presentation" | "document" | "spreadsheet" | "research"
-            | "web" | "automation" | "orchestrator" | "plugin_builder" => "agent",
+            | "web" | "automation" | "orchestrator" | "plugin_builder" | "skill_builder" => "agent",
             other => other,
         }
         .to_string()
@@ -1316,17 +1544,7 @@ impl BobService {
     // ── Secret redaction ───────────────────────────────────────
 
     pub fn redact_secrets(text: &str) -> String {
-        let mut result = text.to_string();
-        for pattern in &[
-            r"(Bearer\s+)([a-zA-Z0-9_\-\.]{10,})",
-            r"(?i)(api.{0,4}key\s*[=:]\s*)([a-zA-Z0-9_\-]{10,})",
-            r"(?i)(token\s*[=:]\s*)([a-zA-Z0-9_\-\.]{10,})",
-        ] {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                result = re.replace_all(&result, "${1}***REDACTED***").to_string();
-            }
-        }
-        result
+        crate::security::secret_redaction::redact_secrets(text)
     }
 }
 
@@ -1399,6 +1617,34 @@ mod conversation_title_tests {
         let request = title_generation_prompt(&"¤".repeat(5_000));
         assert!(request.contains("BOB_WORK_CONVERSATION_TITLE"));
         assert_eq!(request.matches('¤').count(), 4_000);
+    }
+}
+
+fn publish_live_session_cost<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    payload: &serde_json::Value,
+    applied_session_cost: &mut f64,
+) {
+    use tauri::{Emitter, Manager};
+
+    let Some(cost) = crate::services::bob_usage::extract_session_cost(payload) else {
+        return;
+    };
+    let delta = cost - *applied_session_cost;
+    if !(delta.is_finite() && delta > 0.0) {
+        return;
+    }
+    *applied_session_cost = cost;
+    let db = app_handle.state::<crate::db::Database>();
+    if let Ok(Some(snapshot)) =
+        crate::services::bob_usage::BobUsageService::new().apply_session_cost(&db, delta)
+    {
+        let status = crate::services::workspace::snapshot_to_status(
+            snapshot,
+            true,
+            "Consommation Bobcoins mise à jour.".into(),
+        );
+        let _ = app_handle.emit("usage-updated", &status);
     }
 }
 
@@ -1626,7 +1872,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
             Some(ProtocolEvent {
                 text_delta: None,
                 event_type: event.replace('-', "_"),
-                title: Some(event.replace('-', " ")),
+                title: Some(graph_subagent_title(event, &payload)),
                 content: None,
                 tool_name: None,
                 payload,
@@ -1702,6 +1948,24 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
             } else {
                 object.get("output").map(compact_json)
             };
+            let tool_name = object
+                .get("tool_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = if tool_name.is_empty() {
+                if failed {
+                    "Outil en échec".into()
+                } else {
+                    "Outil terminé".into()
+                }
+            } else {
+                tool_activity_title(
+                    &tool_name,
+                    &serde_json::Value::Null,
+                    if failed { "failed" } else { "finished" },
+                )
+            };
             Some(ProtocolEvent {
                 text_delta: None,
                 event_type: if failed {
@@ -1710,31 +1974,67 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                     "tool_finished"
                 }
                 .into(),
-                title: Some(
-                    if failed {
-                        "Outil en échec"
-                    } else {
-                        "Outil terminé"
-                    }
-                    .into(),
-                ),
+                title: Some(title),
                 content,
+                tool_name: (!tool_name.is_empty()).then_some(tool_name),
+                payload,
+            })
+        }
+        "graph-started" | "graph_started" | "graph-finished" | "graph_finished"
+        | "subagent-started" | "subagent_started" | "subagent-finished" | "subagent_finished" => {
+            Some(ProtocolEvent {
+                text_delta: None,
+                event_type: event_type.replace('-', "_"),
+                title: Some(graph_subagent_title(event_type, &payload)),
+                content: None,
                 tool_name: None,
                 payload,
             })
         }
-        "result" => Some(ProtocolEvent {
+        "result" => {
+            let status = object
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("success");
+            let failed = !matches!(status, "success" | "ok" | "completed");
+            if failed {
+                let detail = object
+                    .get("error")
+                    .or_else(|| object.get("message"))
+                    .map(compact_json)
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| format!("Bob Shell a terminé avec le statut « {status} »."));
+                Some(ProtocolEvent {
+                    text_delta: None,
+                    event_type: "error".into(),
+                    title: Some("Erreur Bob Shell".into()),
+                    content: Some(detail),
+                    tool_name: None,
+                    payload,
+                })
+            } else {
+                Some(ProtocolEvent {
+                    text_delta: None,
+                    event_type: "run_finished".into(),
+                    title: Some("Tâche terminée".into()),
+                    content: object.get("stats").map(compact_json),
+                    tool_name: None,
+                    payload,
+                })
+            }
+        }
+        "cost" => Some(ProtocolEvent {
             text_delta: None,
-            event_type: "run_finished".into(),
-            title: Some("Tâche terminée".into()),
-            content: object.get("stats").map(compact_json),
+            event_type: "usage".into(),
+            title: Some("Consommation".into()),
+            content: object.get("costs").map(compact_json),
             tool_name: None,
             payload,
         }),
         "error" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "error".into(),
-            title: Some("Erreur Bob".into()),
+            title: Some("Erreur Bob Shell".into()),
             content: object.get("message").map(compact_json),
             tool_name: None,
             payload,
@@ -1743,7 +2043,53 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
     }
 }
 
+fn graph_subagent_title(event: &str, payload: &serde_json::Value) -> String {
+    let name = find_json_string(payload, &["name", "agent", "agent_name", "title", "label"])
+        .unwrap_or_default();
+    let named = |prefix: &str| {
+        if name.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} : {name}")
+        }
+    };
+    match event.replace('_', "-").as_str() {
+        "graph-started" => named("Orchestration démarrée"),
+        "graph-finished" => named("Orchestration terminée"),
+        "subagent-started" => named("Sous-agent démarré"),
+        "subagent-finished" => named("Sous-agent terminé"),
+        _ => event.replace('-', " "),
+    }
+}
+
+fn tool_short_name(name: &str) -> &str {
+    name.rsplit("__").next().unwrap_or(name)
+}
+
 fn tool_activity_title(name: &str, parameters: &serde_json::Value, phase: &str) -> String {
+    let short = tool_short_name(name);
+    if matches!(
+        short,
+        "browser_snapshot"
+            | "chrome_read_front_tab"
+            | "chrome_open_url"
+            | "chrome_navigate"
+            | "chrome_list_tabs"
+    ) {
+        let url =
+            find_json_string(parameters, &["url", "requested_url", "href"]).unwrap_or_default();
+        let label = if url.trim().is_empty() {
+            "onglet actif"
+        } else {
+            url.trim()
+        };
+        return match phase {
+            "finished" => format!("Aperçu Chrome : {label}"),
+            "failed" => format!("Aperçu Chrome impossible : {label}"),
+            _ => format!("Aperçu Chrome : {label}"),
+        };
+    }
+
     let target = find_json_string(
         parameters,
         &[
@@ -1925,17 +2271,8 @@ fn collect_existing_paths(value: &serde_json::Value) -> Vec<String> {
     fn walk(value: &serde_json::Value, output: &mut Vec<String>) {
         match value {
             serde_json::Value::String(text) => {
-                for candidate in text.split_whitespace() {
-                    let candidate = candidate
-                        .trim_matches(['"', '\'', '`', ',', ';', ':', '(', ')', '[', ']', '{', '}'])
-                        .strip_prefix("file://")
-                        .unwrap_or(candidate);
-                    if candidate.starts_with('/')
-                        && candidate.len() < 4096
-                        && Path::new(candidate).exists()
-                    {
-                        output.push(candidate.to_string());
-                    }
+                for path in collect_deliverable_file_paths(text) {
+                    output.push(path);
                 }
             }
             serde_json::Value::Object(map) => map.values().for_each(|value| walk(value, output)),
@@ -1948,6 +2285,72 @@ fn collect_existing_paths(value: &serde_json::Value) -> Vec<String> {
     output.sort();
     output.dedup();
     output
+}
+
+/// Absolute (or ~/…) deliverable paths mentioned in Bob text / tool payloads.
+pub(crate) fn collect_deliverable_file_paths(text: &str) -> Vec<String> {
+    let Ok(pattern) = regex::Regex::new(
+        r#"(?i)(?:^|[\s«»"'`(=:\[])((?:/|~/|file://)[^\s"'`()\]<>]+\.(?:pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|png|jpe?g|gif|webp|zip|key|pages|numbers))\b"#,
+    ) else {
+        return vec![];
+    };
+    let home = std::env::var("HOME").ok();
+    let mut output = Vec::new();
+    for caps in pattern.captures_iter(text) {
+        let Some(raw) = caps.get(1).map(|value| value.as_str()) else {
+            continue;
+        };
+        let mut candidate = {
+            let trimmed = raw.trim().trim_end_matches([')', ',', ';', ':', '.', ']']);
+            trimmed
+                .strip_prefix("file://")
+                .unwrap_or(trimmed)
+                .to_string()
+        };
+        if let Some(home) = home.as_deref() {
+            if let Some(rest) = candidate.strip_prefix("~/") {
+                candidate = format!("{home}/{rest}");
+            }
+        }
+        if candidate.starts_with('/') && candidate.len() < 4096 {
+            let path = Path::new(&candidate);
+            if path.exists() {
+                output.push(
+                    path.canonicalize()
+                        .map(|value| value.to_string_lossy().to_string())
+                        .unwrap_or(candidate),
+                );
+            }
+        }
+    }
+    output.sort();
+    output.dedup();
+    output
+}
+
+#[cfg(test)]
+mod deliverable_path_tests {
+    use super::collect_deliverable_file_paths;
+    use std::io::Write;
+
+    #[test]
+    fn extracts_existing_desktop_pptx_paths() {
+        let dir = std::env::temp_dir().join(format!("bob-deliverable-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("IBM_AXA_Brief_Mission.pptx");
+        {
+            let mut handle = std::fs::File::create(&file).unwrap();
+            handle.write_all(b"PK").unwrap();
+        }
+        let text = format!(
+            "📂 Chemin absolu : {} (Double-clic ou qlmanage)",
+            file.display()
+        );
+        let found = collect_deliverable_file_paths(&text);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("IBM_AXA_Brief_Mission.pptx"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
@@ -2000,6 +2403,42 @@ mod session_secret_tests {
         assert!(service
             .set_session_secret("arbitrary_secret", "secret".into())
             .is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vault_key_marks_run_credentials_ready() {
+        let root =
+            std::env::temp_dir().join(format!("bob-work-service-test-{}", uuid::Uuid::new_v4()));
+        let service = BobService::new(&root);
+        service
+            .set_session_secret(SECRET_IBM_API, "vault-key".into())
+            .unwrap();
+        assert!(service.has_run_credentials());
+        let profile = service.get_profile(None);
+        assert_eq!(profile.authentication_method, "api_key_session");
+        assert!(profile.detection.authenticated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "manual: probes the developer machine Bob install and vault"]
+    fn probe_local_machine_detection() {
+        let home = dirs::home_dir().expect("home");
+        let data_dir = home.join("Library/Application Support/com.bobwork.desktop");
+        if !data_dir.is_dir() {
+            return;
+        }
+        let service = BobService::new(&data_dir);
+        let detection = service.detect();
+        eprintln!("detection = {detection:?}");
+        let profile = service.get_profile(None);
+        eprintln!("authentication_method = {}", profile.authentication_method);
+        assert!(detection.found, "expected local bob binary");
+        assert!(
+            detection.authenticated,
+            "expected vault key or IBM SSO session"
+        );
     }
 }
 
@@ -2151,7 +2590,115 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn output_with_timeout(
+    command: &mut std::process::Command,
+    limit: Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return None;
+            }
+        }
+    };
+    Some(std::process::Output {
+        status,
+        stdout: stdout_handle.join().unwrap_or_default(),
+        stderr: stderr_handle.join().unwrap_or_default(),
+    })
+}
+
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn result_status_error_becomes_protocol_error() {
+        let event = interpret_shell_2_event(&json!({
+            "type": "result",
+            "status": "error",
+            "error": "API quota exceeded",
+        }))
+        .expect("result event");
+        assert_eq!(event.event_type, "error");
+        assert!(event.content.as_deref().unwrap_or("").contains("quota"));
+    }
+
+    #[test]
+    fn result_status_success_stays_run_finished() {
+        let event = interpret_shell_2_event(&json!({
+            "type": "result",
+            "status": "success",
+            "stats": { "tool_calls": 1 },
+        }))
+        .expect("result event");
+        assert_eq!(event.event_type, "run_finished");
+    }
+
+    #[test]
+    fn shell2_subagent_events_use_french_titles() {
+        let started = interpret_shell_2_event(&json!({
+            "type": "subagent-started",
+            "name": "auth-review",
+        }))
+        .expect("subagent start");
+        assert_eq!(started.event_type, "subagent_started");
+        assert_eq!(
+            started.title.as_deref(),
+            Some("Sous-agent démarré : auth-review")
+        );
+
+        let finished = interpret_shell_2_event(&json!({
+            "type": "tool_result",
+            "tool_name": "spawn_subagent",
+            "status": "ok",
+            "output": "done",
+        }))
+        .expect("spawn result");
+        assert_eq!(finished.event_type, "tool_finished");
+        assert_eq!(finished.title.as_deref(), Some("Sous-agent terminé"));
+        assert_eq!(finished.tool_name.as_deref(), Some("spawn_subagent"));
+    }
+
+    #[test]
+    fn chrome_snapshot_tool_titles_use_the_url() {
+        let started = tool_activity_title(
+            "mcp__bob-work-chrome-control_6001__browser_snapshot",
+            &json!({ "url": "https://example.com" }),
+            "started",
+        );
+        assert_eq!(started, "Aperçu Chrome : https://example.com");
+        let finished = tool_activity_title("browser_snapshot", &json!({}), "finished");
+        assert_eq!(finished, "Aperçu Chrome : onglet actif");
+    }
 }

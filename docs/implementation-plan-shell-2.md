@@ -4,7 +4,7 @@
 **Application IBM présente sur la machine :** IBM Bob IDE 2.0.2  
 **Principe produit :** données de Bob Work locales par défaut ; les requêtes envoyées à IBM Bob et aux intégrations réseau restent nécessairement distantes.
 
-> **Mise à jour 0.1.4 (9 août 2026)** — La stratégie de secrets a changé : aucune dépendance au Trousseau et aucun coffre local. La clé Bob est saisie pour la session active uniquement et doit être saisie à nouveau après un redémarrage complet.
+> **Mise à jour 0.1.4+** — Pas de Trousseau macOS. La clé Bob est stockée dans le **coffre local chiffré** et injectée uniquement dans `bob run`. Voir `keychain-security.md` et `limitations.md`.
 
 ## 1. Décisions de produit
 

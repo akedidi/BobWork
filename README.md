@@ -1,276 +1,509 @@
-# Bob Work - macOS Application
+# Bob Work
 
-**Status**: Functional local macOS build  
-**Version**: 0.1.4  
-**Last Updated**: 2026-08-09
+**Version :** 0.1.4  
+**Statut :** application desktop locale fonctionnelle (macOS)  
+**Dernière mise à jour :** 2026-08-11
 
----
+Bob Work est une application native qui rend les capacités d’**IBM Bob** accessibles sans manipuler la CLI. Elle s’appuie sur **Bob Shell 2** comme moteur agentique local : conversations, projets, tâches, planifications, plugins, skills, MCP, intégrations et artefacts.
 
-## Overview
-
-Bob Work is a native macOS application that makes IBM Bob's AI capabilities accessible to non-technical users through an intuitive graphical interface. It transforms conversations into projects, deliverables, automations, and private plugins, with IBM Bob Shell as the local agentic execution engine.
-
-### Core Value Proposition
-
-> Transform a conversation into a project, deliverable, automation, or private plugin, with IBM Bob as the local execution engine.
+> Transformer une conversation en projet, livrable, automatisation ou plugin privé — avec Bob Shell comme moteur d’exécution local.
 
 ---
 
-## Project Status
+## Sommaire
 
-Bob Work 0.1.4 is implemented as a local-first Tauri application and packaged as an Apple Silicon DMG. It uses the installed Bob Shell 2 runtime for real execution, modes, skills, MCP and task resume.
-
-Implemented areas include conversations, projects, persistent tasks and run history, scheduling and catch-up policies, permissions and approvals, plugins/skills/MCP, local integrations, files and folders, search, import/export, notifications, voice dictation, themes, language and structured activity/sources.
-
-The first-party plugin catalog also includes Documents, Microsoft Word, Microsoft PowerPoint, Microsoft Excel and Microsoft OneNote. A tabbed right panel previews local files through native macOS Quick Look where needed and can keep multiple Web sources open beside the conversation.
-
-Agentic plugins can bundle instructions, local scripts, MCP servers, authenticated integration requirements, controlled lifecycle hooks, browser capabilities and scheduled-task templates in one installable unit. Bob Work validates paths and permissions, registers MCP servers through Bob Shell, checks required connections before execution, keeps enabled states synchronized and exposes every capability from one non-technical plugin details panel. OAuth is never simulated: an OAuth integration must reference a real MCP connector that owns its authorization flow.
-
-Plugin versions use immutable semantic versions. Bob Work detects a newer local bundle without replacing the active one, displays its release notes and permission changes, archives the complete bundle (skill, scripts, hooks and MCP), then installs it only after an explicit action. The details panel keeps the version history and can restore a previous bundle while preserving connections and the enabled/disabled choice. A manual edit automatically creates the next corrective version.
-
-See [the audited implementation plan](docs/implementation-plan-shell-2.md) and [the exact runtime limits](docs/limitations.md) before distribution.
-
----
-
-## Documentation
-
-### Design Documents
-
-All design documents are located in the `docs/` directory:
-
-1. **[Product Requirements](docs/product-requirements.md)** - Complete feature specifications, user stories, and acceptance criteria
-2. **[System Design](docs/system-design.md)** - Technical architecture, component design, and data models
-3. **[Bob Capability Matrix](docs/bob-capability-matrix.md)** - Mapping of features to IBM Bob capabilities with status and fallbacks
-4. **[Security Model](docs/security-model.md)** - Threat model, security controls, and best practices
-5. **[UI Specification](docs/ui-specification.md)** - Design system, component specs, and interaction patterns
-6. **[Delivery Plan](docs/delivery-plan.md)** - Development phases, timeline, and success criteria
-
-### Key Features (MVP)
-
-**Priority 1 - Core Functionality**:
-- Native macOS application with premium UI
-- IBM Bob detection and integration
-- Project and conversation management
-- Chat and Work modes
-- Approval and permission system
-
-**Priority 2 - Conversational Plugin Builder** (Highest Priority Feature):
-- Create plugins through natural conversation
-- Simple enable/disable catalogue with one unified plugin detail view
-- Visual permission management
-- Sandboxed testing
-- Version control and rollback
-
-**Priority 3 - Business Modes**:
-- Planning Mode
-- Presentation Builder
-- Document/Report Generator
-- Spreadsheet/Analysis
-- Research Mode
-- Automation Builder
-- Orchestrator
-
-**Priority 4 - Deliverables**:
-- PPTX generation and validation
-- DOCX generation
-- XLSX generation
-- PDF generation
-- Artifact gallery
+1. [Plateformes](#plateformes)
+2. [Prérequis](#prérequis)
+3. [Installation](#installation)
+4. [Démarrage rapide](#démarrage-rapide)
+5. [Architecture](#architecture)
+6. [Composants et fonctionnalités](#composants-et-fonctionnalités)
+7. [Stack technique](#stack-technique)
+8. [Structure du dépôt](#structure-du-dépôt)
+9. [Configuration](#configuration)
+10. [Tests](#tests)
+11. [CI / CD](#ci--cd)
+12. [Sécurité](#sécurité)
+13. [Documentation](#documentation)
+14. [Limites connues](#limites-connues)
+15. [Licence](#licence)
 
 ---
 
-## Technology Stack
+## Plateformes
 
-### Frontend
-- **Framework**: React 18+
-- **Language**: TypeScript 5+
-- **State**: Zustand or Jotai
-- **Styling**: Tailwind CSS + CSS Modules
-- **UI Components**: Radix UI
-- **Icons**: Lucide React
+| Plateforme | Application Bob Work | Bob Shell (moteur) | Notes |
+|------------|----------------------|--------------------|--------|
+| **macOS 12+** (Apple Silicon) | ✅ Livrée (`apps/macos`, DMG `aarch64`) | ✅ Requis | Cible principale ; tray, notifications UN, Quick Look, TCC |
+| **macOS Intel** | ⚠️ Possible | ✅ Requis | Build `x86_64` / universel non livré par défaut |
+| **Linux** | ❌ Non livrée | ✅ Installable (voir script / IBM) | Pas d’app Tauri Linux dans ce dépôt |
+| **Windows** | ❌ Non livrée | ✅ Installable (selon offre IBM) | Pas d’app Tauri Windows dans ce dépôt |
 
-### Backend
-- **Framework**: Tauri 2.x
-- **Language**: Rust 1.70+
-- **Database**: SQLite (rusqlite)
-- **Secrets**: encrypted local vault for the Bob API key; volatile memory for manual integration tokens
-- **Async**: tokio
-
-### Build & Development
-- **Package Manager**: pnpm
-- **Bundler**: Vite
-- **Linting**: ESLint, Prettier, Clippy
-- **Testing**: Vitest, React Testing Library, cargo-nextest
+Le monorepo ne contient aujourd’hui que l’application **macOS**. Les sections Linux / Windows ci-dessous couvrent l’installation de **Bob Shell** et les prérequis pour un futur portage desktop ; elles ne décrivent pas une app Bob Work packagée.
 
 ---
 
-## Architecture Overview
+## Prérequis
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Bob Work (macOS App)                     │
-├─────────────────────────────────────────────────────────────┤
-│  React UI Layer (TypeScript)                                 │
-│  ↕ IPC                                                        │
-│  Tauri Backend (Rust)                                        │
-│  ↕                                                            │
-│  Core Services (Bob, Project, Task, Plugin, Artifact)       │
-│  ↕                                                            │
-│  Data & Storage (SQLite, Session Memory, File System)       │
-└───────────────────────┬───────────────────────────────────┘
-                        │
-        ┌───────────────▼────────────────┐
-        │     IBM Bob Shell (CLI)        │
-        └────────────────────────────────┘
-```
+### Communs (développement)
 
----
+| Outil | Version recommandée |
+|-------|---------------------|
+| **Node.js** | 22.15+ |
+| **pnpm** | 10.11+ (CI utilise pnpm 10.11) |
+| **Rust** | stable (1.70+), avec `cargo` |
+| **Git** | 2.x |
+| **Bob Shell** | 2.x (`bob` sur le `PATH`) |
 
-## Security Principles
+### macOS (application)
 
-1. **Security by Default**: All sensitive actions require explicit approval
-2. **Defense in Depth**: Multiple layers of protection
-3. **Transparency**: Clear permission requests and audit trail
-4. **Privacy First**: Local-first, minimal data collection
-5. **Secure Development**: Input validation, output encoding, secure defaults
+- macOS 12 (Monterey) ou plus récent  
+- Xcode Command Line Tools (`xcode-select --install`)  
+- Pour les bannières Notifications en développement : un vrai `.app` (voir `ensure:dev-app`), pas seulement le binaire `tauri dev`  
+- Permissions Système selon les fonctions : Notifications, Accessibilité, Automatisation, Microphone / Reconnaissance vocale  
 
-### Key Security Features
+### Linux (Bob Shell uniquement)
 
-- Bob API key encrypted at rest with a user passphrase; manual integration tokens remain session-only
-- Validated plugin paths, explicit permissions and isolated hook environments
-- Path traversal protection
-- Prompt injection protection
-- Audit logging
-- Secret redaction in logs
+- Distribution récente (glibc)  
+- `curl` / `bash` pour le script d’installation IBM si disponible  
+- Node ou le gestionnaire de paquets demandé par le script Bob Shell  
+- Pas de build Tauri Bob Work dans ce dépôt  
+
+### Windows (Bob Shell uniquement)
+
+- Windows 10/11 64 bits  
+- PowerShell / terminal avec `bob` sur le `PATH` après installation IBM  
+- Visual Studio Build Tools uniquement si vous portez un jour le backend Rust/Tauri  
+- Pas de build Tauri Bob Work dans ce dépôt  
 
 ---
 
-## Verification status
+## Installation
 
-- TypeScript production build: passing
-- Frontend test suite: 44/44 passing
-- Rust test suite: 63/63 passing
-- macOS end-to-end suite: 18/18 passing
-- macOS `.app` and `.dmg`: generated and ad-hoc signed
-- Smoke launch: passing on Apple Silicon
-
----
-
-## Prerequisites
-
-### Required
-- macOS 12.0+ (Monterey or later)
-- IBM Bob Shell 2.x installed
-- Node.js 22.15.0+
-- Rust 1.70+
-- pnpm 8+
-
-### Optional
-- Apple Developer account (for signing/notarization)
-- Developer ID certificates
-
----
-
-## Getting Started
-
-### 1. Validate IBM Bob Installation
+### 1. Cloner le dépôt
 
 ```bash
-# Check if Bob is installed
+git clone <url-du-depot>
+cd BOBWork
+```
+
+### 2. Installer Bob Shell 2
+
+Vérifiez d’abord si Bob est déjà présent :
+
+```bash
 which bob
-
-# Check Bob version
-bob --version
-
-# Check Bob help
-bob --help
-
-# Test Bob (non-destructive)
-bob chat --accept-license
+bob --version   # attendu : 2.x
+bob run --help
 ```
 
-### 2. Clone Repository
+Sinon, utilisez le script fourni (selon votre offre IBM / COS) :
 
 ```bash
-git clone <repository-url>
-cd bob-work
+# Exemple — suivez les options du script
+./bobshell-install.sh --help
+./bobshell-install.sh --package-manager pnpm
 ```
 
-### 3. Install Dependencies
+Sur **Linux** et **Windows**, installez Bob Shell via le canal IBM / script adapté à votre OS, puis assurez-vous que `bob` est disponible dans le shell.
+
+Authentification headless utilisée par Bob Work : clé API injectée dans `bob run` (`BOB_API_KEY` / `BOBSHELL_API_KEY`). Le login interactif `bob chat` n’est pas le chemin principal de l’app.
+
+### 3. Dépendances du monorepo
 
 ```bash
 pnpm install
 ```
 
-### 4. Run Development Build
+### 4. Variables d’environnement (optionnel)
 
 ```bash
-pnpm --filter macos dev:tauri
+cp apps/macos/.env.example apps/macos/.env
+# Renseigner les Client ID OAuth (GitHub, Slack, Monday, Microsoft) si besoin
 ```
 
-### 5. Build for Production
-
-```bash
-pnpm --filter macos build:tauri
-```
+Voir [Configuration](#configuration).
 
 ---
 
-## Project Structure
+## Démarrage rapide
+
+### macOS — développement
+
+```bash
+# Depuis la racine du monorepo
+pnpm dev
+# équivalent : pnpm mac:dev  →  tauri dev
+```
+
+Pour les **notifications macOS** (enregistrement TCC sous Réglages → Notifications) :
+
+```bash
+pnpm --filter macos run ensure:dev-app
+# ou installation dans /Applications
+pnpm --filter macos run install:dev-app
+open -n "apps/macos/src-tauri/target/debug/bundle/macos/Bob Work.app"
+```
+
+### macOS — build production / DMG
+
+```bash
+pnpm mac:build          # tauri build
+pnpm mac:dmg            # bundle DMG
+```
+
+Le build local reste signé **ad hoc**. La publication GitHub automatisée signe avec Developer ID, notarie chez Apple et génère les artefacts de mise à jour signés. Configuration : [docs/release-macos.md](docs/release-macos.md).
+
+### Linux / Windows — développement applicatif
+
+Il n’existe pas encore de cible `apps/linux` ni `apps/windows`. Pour contribuer au moteur commun :
+
+1. Installer Node 22, pnpm, Rust.  
+2. Exécuter les packages partagés et les tests TypeScript non liés à Tauri macOS :
+   ```bash
+   pnpm install
+   pnpm --filter @bob-work/shared-types exec tsc --noEmit   # si scripts exposés
+   ```
+3. Les commandes `pnpm mac:*` et `tauri` **nécessitent macOS**.  
+
+Le portage desktop (Tauri multi-OS) réutiliserait `packages/*`, une grande partie des services Rust, et remplacerait les modules macOS-only (UNUserNotificationCenter, Quick Look, AppleScript, LaunchAgent).
+
+---
+
+## Architecture
 
 ```
-bob-work/
+┌──────────────────────────────────────────────────────────────┐
+│                     Bob Work (UI desktop)                     │
+│  React 19 · TypeScript · Vite · Zustand · Tailwind · i18n    │
+├──────────────────────────────────────────────────────────────┤
+│                         IPC Tauri 2                           │
+├──────────────────────────────────────────────────────────────┤
+│  Backend Rust (Tauri)                                         │
+│  commands → services → SQLite · coffre AES · FS · spawn bob   │
+└────────────────────────────┬─────────────────────────────────┘
+                             │ bob run (stream-json)
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     IBM Bob Shell 2                           │
+│  modes · skills · MCP · outils · reprise de tâche             │
+└──────────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+   ~/.bob/skills/ …              Serveurs MCP / APIs
+```
+
+### Flux principal
+
+1. L’utilisateur envoie un message (mode, projet, pièces jointes).  
+2. Le frontend appelle une commande Tauri (`send_message`, etc.).  
+3. Le service `bob` prépare le prompt, les permissions, les MCP/intégrations, puis lance `bob run`.  
+4. Les événements structurés (texte, outils, erreurs, résultat) sont streamés vers l’UI.  
+5. À la fin : persistance SQLite, artefacts, notifications (succès / erreur), sync plugins agentiques éventuels.
+
+### Couches
+
+| Couche | Rôle |
+|--------|------|
+| **Views / composants React** | Chat, Plugins, Skills, Intégrations, Tâches, Planning, Artefacts, Réglages, Onboarding |
+| **IPC (`lib/ipc.ts`)** | API typée vers les commandes Rust |
+| **Commands** | Frontière Tauri (`commands/*`) |
+| **Services** | Bob, plugins, MCP, OAuth, scheduler, notify, vault, audit, workspace… |
+| **Stockage** | SQLite (`app_data_dir/database.sqlite`), coffre AES-256-GCM, `~/.bob/` pour skills / MCP Bob |
+
+Identifiant d’app : `com.bobwork.desktop` (dossier de données Tauri).
+
+---
+
+## Composants et fonctionnalités
+
+| Domaine | Description |
+|---------|-------------|
+| **Chat** | Streaming, file de prompts, modes, pièces jointes, activité agentique, sources |
+| **Projets** | Espaces de travail, instructions, intégrations autorisées |
+| **Tâches** | Historique d’exécution, reprise, états, I/O |
+| **Planning** | Cron / récurrences, politiques catch-up & chevauchement, tray quand la fenêtre est fermée |
+| **Plugins** | Bundles agentiques (manifest, scripts, MCP, hooks, versions SemVer, rollback) |
+| **Skills** | `SKILL.md` personnels / intégrés ; création manuelle, avec Bob, ou import Claude OSS |
+| **Intégrations & MCP** | GitHub, Slack, Monday, Microsoft (catalogue) ; APIs publiques / à clé ; serveurs MCP ; tests de connexion |
+| **Computer Use / Chrome** | Plugins / MCP locaux ; Accessibilité & Automatisation macOS |
+| **Approbations** | Overlay + gouvernance des permissions ; pas de YOLO silencieux |
+| **Artefacts** | Galerie, prévisualisation panneau droit, Quick Look / ouverture native |
+| **Notifications** | Feed in-app + bannières macOS (fin de tâche, **erreurs Bob Shell**, approbations) |
+| **i18n** | Français, anglais, espagnol (`auto` = langue système) |
+
+Plugins intégrés notables : Documents / Office (Word, Excel, PowerPoint, OneNote), Chrome, Computer Use, CTO Investissements, etc.
+
+---
+
+## Stack technique
+
+### Frontend (`apps/macos/src`)
+
+| Technologie | Usage |
+|-------------|--------|
+| **React 19** | UI |
+| **TypeScript ~5.8** | Typage |
+| **Vite 7** | Bundler / dev server |
+| **Zustand** | État global |
+| **React Router 6** | Navigation |
+| **Tailwind CSS 3** + CSS custom | Styles |
+| **Framer Motion** | Animations |
+| **Lucide React** | Icônes |
+| **react-markdown** + GFM | Rendu Markdown |
+| **@tauri-apps/api** + plugins | Dialog, FS, notification, shell, opener, os, process |
+| **Vitest** + Testing Library | Tests unitaires UI |
+
+### Backend (`apps/macos/src-tauri`)
+
+| Technologie | Usage |
+|-------------|--------|
+| **Tauri 2** | Shell natif, IPC, fenêtres, tray |
+| **Rust (édition 2021)** | Services métier |
+| **tokio** | Async, process Bob |
+| **rusqlite** | Persistance |
+| **serde / serde_json** | Sérialisation |
+| **aes-gcm** | Coffre local des secrets |
+| **reqwest** | HTTP (OAuth, probes) |
+| **cron** | Planificateur |
+| **objc2 / UserNotifications** | Notifications macOS (cible `macos`) |
+
+### Packages partagés
+
+| Package | Rôle |
+|---------|------|
+| `@bob-work/shared-types` | Types TS partagés (plugins, settings, MCP…) |
+| `@bob-work/bob-adapter` | Adaptateur / helpers Bob |
+| `@bob-work/ui` | Composants UI partagés |
+
+### Outils
+
+- **pnpm** workspaces  
+- **ESLint** (frontend)  
+- **GitHub Actions** (verify + smoke Bob Shell)  
+- **WebdriverIO** (e2e macOS)  
+
+---
+
+## Structure du dépôt
+
+```
+BOBWork/
 ├── apps/
-│   └── macos/              # macOS application
-│       ├── src/            # React frontend
-│       ├── src-tauri/      # Rust backend
+│   └── macos/                      # Application Tauri (seule app livrée)
+│       ├── src/                    # Frontend React
+│       │   ├── components/
+│       │   ├── views/
+│       │   ├── stores/
+│       │   ├── lib/                # ipc, i18n helpers, catalogues
+│       │   └── i18n/
+│       ├── src-tauri/
+│       │   ├── src/
+│       │   │   ├── commands/
+│       │   │   ├── services/       # bob, plugin, notify, oauth, …
+│       │   │   ├── models/
+│       │   │   ├── security/
+│       │   │   └── …
+│       │   └── resources/          # MCP Python, OAuth manifests, finance…
+│       ├── e2e/                    # Specs WDIO + fixtures (fake-bob)
+│       ├── scripts/                # ensure-dev-app, smoke-bob-shell, …
 │       └── package.json
 ├── packages/
-│   ├── core/               # Shared core logic
-│   ├── ui/                 # UI components
-│   ├── bob-adapter/        # Bob integration
-│   ├── project-engine/     # Project management
-│   ├── task-engine/        # Task orchestration
-│   ├── plugin-sdk/         # Plugin system
-│   ├── artifact-engine/    # Deliverable generation
-│   ├── integration-sdk/    # External integrations
-│   └── shared-types/       # TypeScript types
-├── docs/                   # Documentation
-├── package.json
+│   ├── bob-adapter/
+│   ├── shared-types/
+│   └── ui/
+├── docs/                           # Specs, sécurité, limites, plans
+├── .github/workflows/
+│   ├── verify.yml
+│   └── smoke-bob-shell.yml
+├── bobshell-install.sh
+├── package.json                    # Scripts monorepo
 ├── pnpm-workspace.yaml
 └── README.md
 ```
 
 ---
 
-## Contributing
+## Configuration
 
-This project is currently in the planning phase. Contribution guidelines will be added once development begins.
+### Fichier `apps/macos/.env`
+
+Copier depuis `.env.example`. Principales variables :
+
+| Variable | Rôle |
+|----------|------|
+| `BOBWORK_OAUTH_GITHUB_CLIENT_ID` / `_SECRET` | OAuth GitHub |
+| `BOBWORK_OAUTH_SLACK_CLIENT_ID` | Slack PKCE |
+| `BOBWORK_OAUTH_MONDAY_CLIENT_ID` | Monday (optionnel) |
+| `BOBWORK_OAUTH_MICROSOFT_CLIENT_ID` | Microsoft 365 PKCE |
+| `FINNHUB_API_KEY` | Enrichissement plugin CTO (optionnel) |
+| `TMDB_API_KEY` | Tests e2e APIs (optionnel) |
+
+Redirect OAuth local : `http://127.0.0.1:47823/oauth/callback`.
+
+Manifests d’enregistrement : `apps/macos/src-tauri/resources/oauth/`.
+
+### Données runtime
+
+| Emplacement | Contenu |
+|-------------|---------|
+| Dossier données Tauri (`com.bobwork.desktop`) | SQLite, coffre chiffré, caches / aperçus |
+| `~/.bob/skills/` | Skills & bundles plugins déployés |
+| `~/.bob/settings/` | MCP / réglages Bob Shell |
 
 ---
 
-## License
+## Tests
 
-To be determined. This is a working prototype for IBM Bob integration.
+### Scripts monorepo (racine)
+
+| Commande | Description |
+|----------|-------------|
+| `pnpm mac:test:ts` | Tests unitaires frontend (Vitest) |
+| `pnpm mac:test:rust` | Tests unitaires Rust (`cargo test`) |
+| `pnpm mac:test` | TS + Rust |
+| `pnpm mac:verify` | `tsc` + Vitest + build Vite |
+| `pnpm mac:test:e2e` | Prépare fixtures, build `e2e`, lance WebdriverIO |
+| `pnpm mac:test:live-bob-oauth` | Parcours OAuth live (expect) |
+| `pnpm mac:smoke:bob` | Smoke contre un vrai Bob Shell (`BOB_API_KEY`) |
+| `pnpm mac:ci` | verify + cargo test + cargo build release |
+
+### Tests unitaires — frontend
+
+```bash
+pnpm --filter macos test
+# ou
+pnpm mac:test:ts
+```
+
+- Framework : **Vitest**  
+- UI : **Testing Library**  
+- Emplacement : `apps/macos/src/**/*.test.ts(x)`  
+- Couvre vues (Plugins, Intégrations, Chat, …), composants, i18n, catalogues builtins  
+
+### Tests unitaires — Rust
+
+```bash
+pnpm mac:test:rust
+# ou
+cargo test --manifest-path apps/macos/src-tauri/Cargo.toml
+```
+
+- Emplacement : `apps/macos/src-tauri/src/**` (`#[cfg(test)]`, `tests.rs`)  
+- Couvre services Bob, plugins, sécurité, notifications, workspace, etc.  
+- Les features `e2e` ne doivent **pas** être activées dans le binaire release CI  
+
+### Tests end-to-end (macOS)
+
+```bash
+pnpm mac:test:e2e
+```
+
+- Framework : **WebdriverIO** (`wdio.conf.ts`)  
+- Build dédié avec feature Cargo `e2e` + `VITE_BOB_WORK_E2E=1`  
+- Fixture CLI : `apps/macos/e2e/fixtures/fake-bob` (pas de réseau IBM en CI e2e locale)  
+- Specs : `apps/macos/e2e/specs/*.e2e.ts` (app, plugins, intégrations, computer-use, connection-tests…)  
+- Le job GitHub Actions `e2e-macos` exécute cette même suite sur l’application empaquetée et conserve les preuves 14 jours.
+
+### Smoke Bob Shell réel
+
+```bash
+export BOB_API_KEY=…
+pnpm mac:smoke:bob
+```
 
 ---
 
-## Contact
+## CI / CD
 
-For questions or feedback, please refer to the project documentation or contact the development team.
+| Workflow | Déclencheur | Contenu |
+|----------|-------------|---------|
+| [`.github/workflows/verify.yml`](.github/workflows/verify.yml) | push / PR | macOS : pnpm verify, `cargo test`, build release **sans** feature `e2e`, contrôle d’absence de symboles e2e |
+| [`.github/workflows/smoke-bob-shell.yml`](.github/workflows/smoke-bob-shell.yml) | tag / manuel | Install Bob Shell + smoke (`BOB_API_KEY` secret) |
 
----
-
-## Acknowledgments
-
-- IBM Bob team for the AI platform
-- Tauri team for the application framework
-- Open source community for the tools and libraries
+Runner principal : **`macos-latest`**.
 
 ---
 
-## Document History
+## Sécurité
 
-| Version | Date | Author | Changes |
-|---------|------|--------|---------|
-| 0.1.0 | 2026-08-05 | Bob (Plan Mode) | Initial README with project overview |
+Principes détaillés dans [docs/security-model.md](docs/security-model.md) et [docs/keychain-security.md](docs/keychain-security.md) :
+
+- **Coffre local AES-256-GCM** pour la clé API Bob et les secrets d’intégration (pas de Trousseau macOS)  
+- Injection des secrets uniquement dans le processus enfant `bob run`  
+- Redaction des secrets dans les logs / flux  
+- Validation de chemins, refus de secrets littéraux dans les manifestes MCP  
+- Hooks plugins avec environnement minimal (sans jetons Bob / intégrations)  
+- Approbations pour les actions sensibles ; politique de permissions persistée  
+- OAuth réel uniquement — jamais d’état « connecté » simulé  
+
+---
+
+## Documentation
+
+| Document | Contenu |
+|----------|---------|
+| [docs/executive-summary.md](docs/executive-summary.md) | Synthèse produit |
+| [docs/product-requirements.md](docs/product-requirements.md) | Exigences & user stories |
+| [docs/system-design.md](docs/system-design.md) | Conception système |
+| [docs/implementation-plan-shell-2.md](docs/implementation-plan-shell-2.md) | Plan d’implémentation Shell 2 |
+| [docs/bob-capability-matrix.md](docs/bob-capability-matrix.md) | Matrice capacités Bob |
+| [docs/security-model.md](docs/security-model.md) | Modèle de menace & contrôles |
+| [docs/keychain-security.md](docs/keychain-security.md) | Coffre local (pas Keychain) |
+| [docs/ui-specification.md](docs/ui-specification.md) | Spec UI |
+| [docs/delivery-plan.md](docs/delivery-plan.md) | Plan de livraison |
+| [docs/limitations.md](docs/limitations.md) | **Limites et garanties 0.1.4** |
+| [docs/auth-troubleshooting.md](docs/auth-troubleshooting.md) | Dépannage auth |
+| [docs/release-macos.md](docs/release-macos.md) | Signature, notarisation et mises à jour |
+| [docs/test-report.md](docs/test-report.md) | Rapport de tests |
+| [docs/bob-validation-checklist.md](docs/bob-validation-checklist.md) | Checklist de validation |
+
+---
+
+## Limites connues
+
+Résumé — détail dans [docs/limitations.md](docs/limitations.md) :
+
+- Application desktop **macOS only** (Apple Silicon DMG)  
+- Builds locaux ad hoc ; releases GitHub signées/notariées lorsque les secrets Apple du dépôt sont configurés  
+- Accès Web / Computer Use / Chrome dépendent de Bob Shell + permissions macOS  
+- Fermer la fenêtre ≠ quitter : le tray maintient le scheduler ; Quitter arrête le moteur  
+- Linux / Windows : pas d’app packagée dans ce dépôt  
+
+---
+
+## Scripts utiles (racine)
+
+```bash
+pnpm dev                 # Dev Tauri macOS
+pnpm build               # Build Tauri
+pnpm mac:test            # Unitaires TS + Rust
+pnpm mac:verify          # typecheck + unit + vite build
+pnpm mac:test:e2e        # E2E WebdriverIO
+pnpm mac:smoke:bob       # Smoke Bob Shell réel
+pnpm lint                # Lint récursif
+pnpm typecheck           # Typecheck récursif
+```
+
+---
+
+## Licence
+
+À définir. Prototype / intégration IBM Bob — usage selon les conditions de votre organisation et d’IBM Bob Shell.
+
+---
+
+## Remerciements
+
+- Équipe IBM Bob / Bob Shell  
+- Projet [Tauri](https://tauri.app/)  
+- Communauté open source (React, Rust, Vitest, WebdriverIO, …)
+
+---
+
+## Historique du document
+
+| Version | Date | Changements |
+|---------|------|-------------|
+| 0.1.0 | 2026-08-05 | README initial |
+| 0.1.4 | 2026-08-11 | Refonte : plateformes, install, architecture réelle, stack, tests unitaires / e2e, CI |

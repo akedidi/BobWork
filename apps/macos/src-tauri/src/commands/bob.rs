@@ -7,14 +7,18 @@ use crate::db::Database;
 use crate::error::AppError;
 use crate::models::conversation::AddMessageInput;
 use crate::models::task::CreateTaskInput;
+use crate::models::workspace::McpServer;
 use crate::services::audit::AuditService;
 use crate::services::bob::{
-    BobDetectionResult, BobMode, BobRunOptions, BobService, CapabilityInfo, ShellProfile,
+    BobDetectionResult, BobMode, BobRunOptions, BobService, CapabilityInfo, PendingBobLaunch,
+    ShellProfile,
 };
 use crate::services::conversation::ConversationService;
+use crate::services::permission_governance::{self, RiskContext, ACTION_SESSION_START};
 use crate::services::plugin_extensions::PluginExtensionService;
 use crate::services::settings::SettingsService;
 use crate::services::task::TaskService;
+use crate::services::workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{Emitter, Manager, State};
@@ -23,10 +27,15 @@ use tracing::{debug, info};
 // ── detect_bob ────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn detect_bob(
-    bob_service: State<'_, BobService>,
-) -> Result<BobDetectionResult, AppError> {
+pub fn detect_bob(bob_service: State<'_, BobService>) -> Result<BobDetectionResult, AppError> {
     Ok(bob_service.detect())
+}
+
+#[tauri::command]
+pub fn get_bob_auth_snapshot(
+    bob_service: State<'_, BobService>,
+) -> Result<crate::services::bob::BobAuthSnapshot, AppError> {
+    Ok(bob_service.auth_snapshot())
 }
 
 // ── get_bob_capabilities ──────────────────────────────────────
@@ -39,7 +48,7 @@ pub async fn get_bob_capabilities(
 }
 
 #[tauri::command]
-pub async fn get_bob_profile(
+pub fn get_bob_profile(
     workspace: Option<String>,
     bob_service: State<'_, BobService>,
 ) -> Result<ShellProfile, AppError> {
@@ -288,8 +297,9 @@ pub async fn send_message(
                     )
                 })
             });
-        let trusted_local_office = plugin.manifest.get("builtin") == Some(&serde_json::Value::Bool(true))
-            && plugin.manifest.get("specializedMode").is_some();
+        // Packaged Work modes (Brief Mission IBM, CTO Invest…) use specializedMode with
+        // builtin:false so they stay out of the "native skill" catalog — still trusted locally.
+        let trusted_local_office = plugin.manifest.get("specializedMode").is_some();
         if requires_preflight
             && !trusted_local_office
             && !approved_plugin_ids.iter().any(|value| value == plugin_id)
@@ -302,15 +312,40 @@ pub async fn send_message(
         if crate::services::plugin_mcp::PluginMcpService::has_servers(&plugin.manifest) {
             let bundle_dir =
                 crate::services::plugin_mcp::PluginMcpService::bundle_dir(&plugin.manifest)?;
-            let unavailable = crate::services::plugin_mcp::PluginMcpService::new()
+            let mcp = crate::services::plugin_mcp::PluginMcpService::new();
+            let mut unavailable = mcp
                 .status(&plugin.id, &plugin.manifest, &bundle_dir)?
                 .into_iter()
                 .filter(|server| server.required && (!server.configured || !server.enabled))
                 .map(|server| server.name)
                 .collect::<Vec<_>>();
+            // Local specialized modes: register/enable MCP on first use instead of a dead-end error.
+            if !unavailable.is_empty() && trusted_local_office {
+                if let Some(bob_path) = bob_service.get_binary_path() {
+                    match mcp.sync(&bob_path, &plugin.id, &plugin.manifest, &bundle_dir, true) {
+                        Ok(_) => {
+                            unavailable = mcp
+                                .status(&plugin.id, &plugin.manifest, &bundle_dir)?
+                                .into_iter()
+                                .filter(|server| {
+                                    server.required && (!server.configured || !server.enabled)
+                                })
+                                .map(|server| server.name)
+                                .collect();
+                        }
+                        Err(error) => {
+                            return Err(AppError::PermissionDenied(format!(
+                                "Impossible d’activer les outils MCP du plugin {} : {}. Vérifiez que Bob Shell est installé, puis réessayez depuis Plugins.",
+                                plugin.name,
+                                error
+                            )));
+                        }
+                    }
+                }
+            }
             if !unavailable.is_empty() {
                 return Err(AppError::PermissionDenied(format!(
-                    "Les outils connectés du plugin {} ne sont pas actifs : {}. Réactivez le plugin avant de relancer la demande.",
+                    "Les outils connectés du plugin {} ne sont pas actifs : {}. Activez le plugin dans Plugins (MCP) puis relancez.",
                     plugin.name,
                     unavailable.join(", ")
                 )));
@@ -364,10 +399,29 @@ pub async fn send_message(
         }
     }
 
-    // 1. Persist user message
-    let attachment_paths = attachment_paths.unwrap_or_default();
-    let attachment_json = serde_json::Value::Array(
-        attachment_paths
+    // 1. Resolve a Bob-accessible workspace and stage attachments into it.
+    // Composer paths (e.g. ~/Downloads) are outside Bob Shell's sandbox unless
+    // we copy them under `--workspace` first.
+    let requested_attachment_paths = attachment_paths.unwrap_or_default();
+    let app_data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::Io(error.to_string()))?;
+    let workspace_root = crate::services::attachment_staging::resolve_workspace_root(
+        project
+            .as_ref()
+            .and_then(|value| value.local_path.as_deref()),
+        &app_data_dir,
+        &conversation_id,
+    )?;
+    let session_id = format!("sess_{}", uuid::Uuid::new_v4());
+    let staged_attachments = crate::services::attachment_staging::stage_attachments(
+        &workspace_root,
+        &session_id,
+        &requested_attachment_paths,
+    )?;
+    let attachment_json = serde_json::Value::Array(if staged_attachments.is_empty() {
+        requested_attachment_paths
             .iter()
             .map(|path| {
                 let p = std::path::Path::new(path);
@@ -378,8 +432,21 @@ pub async fn send_message(
                     "size": p.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()).unwrap_or(0),
                 })
             })
-            .collect(),
-    );
+            .collect()
+    } else {
+        staged_attachments
+            .iter()
+            .map(|attachment| {
+                serde_json::json!({
+                    "name": attachment.name,
+                    "path": attachment.source_path,
+                    "stagedPath": attachment.staged_path,
+                    "type": if attachment.is_directory { "directory" } else { "file" },
+                    "size": attachment.size,
+                })
+            })
+            .collect()
+    });
     let user_message = conv_service.add_message(
         &db,
         AddMessageInput {
@@ -390,6 +457,8 @@ pub async fn send_message(
             sources: None,
         },
     )?;
+    // First user prompt makes the conversation listable in the sidebar.
+    let _ = app_handle.emit("conversation-updated", &conversation_id);
     let should_generate_title = conv_service
         .get_by_id(&db, &conversation_id)
         .ok()
@@ -419,7 +488,7 @@ pub async fn send_message(
         return Err(AppError::BobNotFound(err_msg));
     }
     if !bob_info.authenticated {
-        let err_msg = "Bob Shell exige une clé API pour bob run. Activez-la uniquement pour cette session dans Bob Work.".to_string();
+        let err_msg = "Bob Shell exige une authentification pour bob run. Connectez IBM Bob (SSO) ou enregistrez une clé d’inférence dans Réglages → IBM Bob Shell.".to_string();
         conv_service.add_message(
             &db,
             AddMessageInput {
@@ -467,8 +536,8 @@ pub async fn send_message(
     };
     TaskService::new().update_state(&db, &task.id, "starting")?;
 
-    let session_id = format!("sess_{}", uuid::Uuid::new_v4());
     let run = TaskService::new().start_run(&db, &task.id, &session_id)?;
+
     // Make the running task observable immediately. Waiting for the final
     // session event left the Tasks view empty during the first execution.
     let _ = app_handle.emit("task-updated", &task.id);
@@ -495,33 +564,35 @@ pub async fn send_message(
         None,
         &serde_json::json!({ "mode": mode }),
     );
-    for path in &attachment_paths {
-        let p = std::path::Path::new(path);
-        if !p.exists() {
-            continue;
-        }
-        let metadata = p.metadata().ok();
+    for attachment in &staged_attachments {
         let _ = TaskService::new().add_io(
             &db,
             &task.id,
             Some(&run.id),
             "input",
-            if p.is_dir() { "directory" } else { "file" },
-            p.file_name().and_then(|v| v.to_str()).unwrap_or(path),
-            Some(path),
+            if attachment.is_directory {
+                "directory"
+            } else {
+                "file"
+            },
+            &attachment.name,
+            Some(&attachment.staged_path),
             None,
-            metadata
-                .as_ref()
-                .filter(|m| m.is_file())
-                .map(|m| m.len() as i64),
+            (!attachment.is_directory).then_some(attachment.size as i64),
             None,
-            &serde_json::json!({ "accessMode": "reference" }),
+            &serde_json::json!({
+                "accessMode": "staged",
+                "sourcePath": attachment.source_path,
+            }),
         );
     }
 
     info!(
-        "Starting streaming session {} for conversation {} in {} mode",
-        session_id, conversation_id, mode
+        "Starting streaming session {} for conversation {} in {} mode (workspace {})",
+        session_id,
+        conversation_id,
+        mode,
+        workspace_root.display()
     );
 
     // 4. Load conversation history (last 10 messages) for context
@@ -534,16 +605,72 @@ pub async fn send_message(
         .rev()
         .collect::<Vec<_>>();
 
+    let mut prompt_attachment_paths = staged_attachments
+        .iter()
+        .map(|attachment| attachment.staged_path.clone())
+        .collect::<Vec<_>>();
+    if prompt_attachment_paths.is_empty() {
+        // Follow-ups like “ok, déplace-les” must keep the prior images in context.
+        prompt_attachment_paths =
+            crate::services::attachment_staging::attachment_paths_from_history(&history);
+    }
+
     // 5. Build context-aware prompt with history
     let shell_message = translate_prompt_mentions(&db, &message);
     let mut integration_ids = project
         .as_ref()
         .map(|value| value.allowed_integrations.clone())
         .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec!["github".into(), "slack".into(), "monday".into(), "outlook-mail".into(), "teams".into(), "outlook-calendar".into(), "onedrive".into()]);
+        .unwrap_or_else(|| {
+            vec![
+                "github".into(),
+                "slack".into(),
+                "monday".into(),
+                "outlook-mail".into(),
+                "teams".into(),
+                "outlook-calendar".into(),
+                "onedrive".into(),
+                "onenote".into(),
+            ]
+        });
     integration_ids.extend(plugin_integration_ids);
     integration_ids.sort();
     integration_ids.dedup();
+    let plugin_creation =
+        plugin_creation_protocol(&message).or_else(|| skill_creation_protocol(&message, &mode));
+    let mcp_catalog = WorkspaceService::new().list_mcp_servers();
+    let creation_environment = plugin_creation
+        .as_ref()
+        .filter(|text| text.contains("création de plugin"))
+        .map(|_| {
+            plugin_creation_environment_context(
+                settings.web_enabled,
+                settings.computer_use_enabled,
+                settings.chrome_control_enabled,
+                &mcp_catalog,
+                &available_integration_context(&bob_service, &integration_ids),
+                &integration_ids,
+            )
+        });
+    let related_context = if settings.cross_conversation_context {
+        // Project-level « Conserver le contexte local » gates sibling chats.
+        let allow_search = project
+            .as_ref()
+            .map(|project| project.memory_enabled)
+            .unwrap_or(true);
+        if allow_search {
+            let scope = project.as_ref().map(|project| project.id.as_str());
+            ConversationService::new()
+                .related_context_snippets(&db, &message, &conversation_id, scope, 4)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+    let related_context_block =
+        crate::services::conversation::RelatedContextSnippet::format_block(&related_context);
     let prompt = build_prompt_with_history(
         &shell_message,
         &mode,
@@ -552,49 +679,159 @@ pub async fn send_message(
         project
             .as_ref()
             .and_then(|p| p.custom_instructions.as_deref()),
-        &attachment_paths,
-        settings.web_enabled,
+        &prompt_attachment_paths,
+        settings.web_enabled && !settings.sandbox_mode,
         &available_integration_context(&bob_service, &integration_ids),
-        build_office_specialized_context(&office_plugins, &attachment_paths),
+        build_office_specialized_context(&office_plugins, &prompt_attachment_paths),
+        plugin_creation,
+        creation_environment,
+        settings.sandbox_mode,
+        settings.computer_use_enabled && !settings.sandbox_mode,
+        settings.chrome_control_enabled && !settings.sandbox_mode,
+        related_context_block,
     );
 
     // 6. Audit log: session started
     let _ =
         AuditService::new().bob_event(&db, "bob.session_started", &session_id, &conversation_id);
 
-    // 6.5. Get project path if project_id is provided
-    let project_path = project.as_ref().and_then(|value| value.local_path.clone());
-
-    // 7. Start non-blocking streaming session
-    // The BobService spawns a tokio task that:
-    //   - runs `bob --non-interactive --mode=<bob_mode>`
-    //   - pipes the prompt to stdin
-    //   - reads stdout line-by-line
-    //   - emits `bob-token` events for each chunk
-    //   - emits `bob-session-done` when finished
-    bob_service.start_streaming_session(
-        app_handle.clone(),
-        session_id.clone(),
-        conversation_id.clone(),
-        mode,
-        prompt,
-        project_path,
-        BobRunOptions {
-            task_id: Some(task.id.clone()),
-            run_id: Some(run.id),
-            max_turns: Some(settings.max_turns),
-            max_cost: (settings.max_cost > 0.0).then_some(settings.max_cost),
-            mcp_enabled: settings.mcp_enabled,
-            subagents_enabled: settings.subagents_enabled,
-            attachment_paths,
-            integration_ids,
-            plugin_hooks,
-            resume_task_id: task
-                .shell_task_id
-                .clone()
-                .filter(|_| resume_task_id.is_some()),
-        },
+    // 7. Permission governance: session start is default-allow (no popup).
+    // `--trust` remains conditional. Mid-run risky actions use other paths.
+    let workspace_path = Some(workspace_root.to_string_lossy().to_string());
+    let workspace_resource = workspace_root.to_string_lossy().to_string();
+    let risk = RiskContext {
+        computer_use: settings.computer_use_enabled,
+        chrome: settings.chrome_control_enabled,
+        mcp: settings.mcp_enabled,
+        web: settings.web_enabled,
+    }
+    .with_sandbox(settings.sandbox_mode);
+    let has_grant = permission_governance::has_allow_grant(
+        &db,
+        ACTION_SESSION_START,
+        &workspace_resource,
+        Some(task.id.as_str()),
     )?;
+    let run_options = BobRunOptions {
+        task_id: Some(task.id.clone()),
+        run_id: Some(run.id.clone()),
+        max_turns: Some(settings.max_turns),
+        max_cost: (settings.max_cost > 0.0).then_some(settings.max_cost),
+        mcp_enabled: settings.mcp_enabled,
+        subagents_enabled: settings.subagents_enabled,
+        attachment_paths: prompt_attachment_paths,
+        integration_ids,
+        plugin_hooks,
+        resume_task_id: task
+            .shell_task_id
+            .clone()
+            .filter(|_| resume_task_id.is_some()),
+        trust_workspace: false,
+    };
+
+    let awaiting_approval = if permission_governance::needs_preflight(
+        &settings.permission_policy,
+        &risk,
+        has_grant,
+    ) {
+        let approval_id = format!("appr_{}", uuid::Uuid::new_v4());
+        let approval = crate::models::approval::Approval {
+            id: approval_id.clone(),
+            task_id: task.id.clone(),
+            action_type: ACTION_SESSION_START.into(),
+            human_description: format!(
+                "Autoriser Bob Shell à démarrer cette session ? Capacité : {}{}.",
+                risk.summary(),
+                if settings.sandbox_mode {
+                    " · mode sandbox (workspace uniquement, sans --trust)"
+                } else {
+                    ""
+                }
+            ),
+            command_or_change: Some(format!(
+                "bob run --workspace {} (politique : {}{})",
+                workspace_resource,
+                permission_governance::policy_label(&settings.permission_policy),
+                if settings.sandbox_mode {
+                    ", sandbox"
+                } else {
+                    ""
+                }
+            )),
+            data_accessed: serde_json::json!([]),
+            files_affected: serde_json::json!([]),
+            // Used as grant resource so later sessions on the same workspace can skip preflight.
+            network_destination: Some(workspace_resource.clone()),
+            risk_level: risk.risk_level().into(),
+            decision: "pending".into(),
+            permission_duration: None,
+            decided_by: None,
+            decided_at: None,
+            undo_possible: false,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO approvals (id, task_id, action_type, human_description, command_or_change, data_accessed, files_affected, network_destination, risk_level, decision, permission_duration, decided_by, decided_at, undo_possible, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![
+                    approval.id,
+                    approval.task_id,
+                    approval.action_type,
+                    approval.human_description,
+                    approval.command_or_change,
+                    approval.data_accessed.to_string(),
+                    approval.files_affected.to_string(),
+                    approval.network_destination,
+                    approval.risk_level,
+                    approval.decision,
+                    approval.permission_duration,
+                    approval.decided_by,
+                    approval.decided_at,
+                    approval.undo_possible,
+                    approval.created_at
+                ],
+            )?;
+        }
+        TaskService::new().update_state(&db, &task.id, "awaiting_approval")?;
+        bob_service.queue_pending_launch(
+            approval_id,
+            PendingBobLaunch {
+                session_id: session_id.clone(),
+                conversation_id: conversation_id.clone(),
+                mode: mode.clone(),
+                prompt: prompt.clone(),
+                project_path: workspace_path.clone(),
+                options: run_options,
+            },
+        );
+        let _ = app_handle.emit("approval-required", &approval);
+        crate::services::notify::notify_approval_required(
+            &app_handle,
+            &approval.human_description,
+            Some(task.id.as_str()),
+        );
+        true
+    } else {
+        let mut options = run_options;
+        options.trust_workspace = permission_governance::should_pass_trust(
+            &settings.permission_policy,
+            false,
+            has_grant,
+            settings.sandbox_mode,
+        );
+        bob_service.start_streaming_session(
+            app_handle.clone(),
+            session_id.clone(),
+            conversation_id.clone(),
+            mode,
+            prompt,
+            workspace_path,
+            options,
+        )?;
+        false
+    };
 
     if should_generate_title {
         let title_app_handle = app_handle.clone();
@@ -611,6 +848,7 @@ pub async fn send_message(
         session_id,
         task_id: task.id,
         user_message_id: user_message.id,
+        awaiting_approval,
     })
 }
 
@@ -693,8 +931,14 @@ fn translate_prompt_mentions(db: &Database, message: &str) -> String {
 #[tauri::command]
 pub async fn stop_task(
     session_id: String,
+    app_handle: tauri::AppHandle,
+    db: State<'_, crate::db::Database>,
     bob_service: State<'_, BobService>,
 ) -> Result<(), AppError> {
+    if let Some(task_id) = bob_service.session_task_id(&session_id) {
+        let _ = crate::services::task::TaskService::new().update_state(&db, &task_id, "cancelled");
+        let _ = app_handle.emit("task-updated", &task_id);
+    }
     bob_service.cancel_session(&session_id)
 }
 
@@ -711,6 +955,12 @@ fn build_prompt_with_history(
     web_enabled: bool,
     integration_context: &[String],
     office_context: Option<String>,
+    plugin_creation: Option<String>,
+    plugin_creation_environment: Option<String>,
+    sandbox_mode: bool,
+    computer_use_enabled: bool,
+    chrome_control_enabled: bool,
+    related_context: Option<String>,
 ) -> String {
     let prefix = match mode {
         "ask" | "quick_chat" =>
@@ -728,7 +978,9 @@ fn build_prompt_with_history(
         "orchestrator" =>
             "Décompose l'objectif en étapes avec dépendances. Liste chaque étape clairement.",
         "plugin_builder" =>
-            "Tu es en mode création de plugin. Mène un entretien structuré pour créer un plugin.",
+            "Tu es en mode création de plugin. Mène un entretien structuré (objectif → outils → permissions → fichiers → validation). description = bénéfice utilisateur ; intégrations dans resources.",
+        "skill_builder" =>
+            "Tu es en mode création de skill. Mène un entretien court puis écris un SKILL.md local (pas un plugin agentique).",
         _ =>
             "Tu es un assistant de travail professionnel.",
     };
@@ -749,13 +1001,18 @@ fn build_prompt_with_history(
     let instruction_context = [
         (!global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", global_instructions.trim())),
         project_instructions.filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
-        plugin_creation_protocol(message),
+        related_context,
+        plugin_creation,
+        plugin_creation_environment,
         office_context,
         (!attachment_paths.is_empty()).then(|| format!(
-            "Pièces jointes autorisées pour cette demande (fichiers locaux — ne pas uploader vers un cloud) :\n{}",
+            "Pièces jointes déjà disponibles dans le workspace courant (chemins locaux accessibles — lis-les directement, ne demande pas de les déplacer ni de les uploader ; les images peuvent être des copies compressées pour l’analyse) :\n{}",
             attachment_paths.iter().map(|path| format!("- {}", path)).collect::<Vec<_>>().join("\n")
         )),
         (!web_enabled).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette demande.".to_string()),
+        sandbox_mode.then(|| "Mode sandbox Bob Work : reste strictement dans le workspace fourni. N’accède pas au bureau macOS, à Chrome, ni à des chemins hors workspace. N’utilise pas --trust / hors périmètre.".to_string()),
+        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, desktop_click, desktop_type, press_key). N’exécute jamais `osascript`, `python3` ni un script Terminal pour piloter l’UI — macOS demanderait alors une permission à python3/osascript. Si Accessibilité est refusée ou l’arbre UI est vide, arrête-toi et demande d’autoriser **Bob Work** (pas python3, pas Terminal) dans Réglages Système → Confidentialité et sécurité → Accessibilité, ou Réglages Bob Work → Accès et contrôle → Demander Accessibilité. Les URI d’app (`open spotify:…`) restent acceptables.".to_string()),
+        chrome_control_enabled.then(|| "Contrôle Chrome Bob Work : utilise uniquement bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, demande d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation.".to_string()),
         (!integration_context.is_empty()).then(|| format!("Intégrations locales disponibles (utilise les variables d’environnement nommées, sans jamais les afficher) :\n{}", integration_context.join("\n"))),
     ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
 
@@ -818,7 +1075,10 @@ fn build_office_specialized_context(
             .get("label")
             .and_then(|value| value.as_str())
             .unwrap_or(&plugin.name);
-        let workflow = mode.get("workflow").and_then(|value| value.as_str()).unwrap_or("");
+        let workflow = mode
+            .get("workflow")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let allowed_tools = mode
             .get("allowedTools")
             .and_then(|value| value.as_array())
@@ -854,8 +1114,21 @@ fn build_office_specialized_context(
             .unwrap_or_default();
 
         blocks.push(format!(
-            "Mode spécialisé actif — {} :\n- Format de sortie attendu : {}\n- Outils autorisés : {}\n- Bibliothèques Python recommandées : {}\n- Workflow : {}\n- Utilise d’abord le MCP local office-tools du plugin (use_mcp_tool), puis une commande Python si nécessaire.\n- Traitement 100 % local : ne pas uploader les pièces jointes.",
-            label, output_formats, allowed_tools, libraries, workflow
+            "Mode spécialisé actif — {} :\n- Format de sortie attendu : {}\n- Outils autorisés : {}\n- Bibliothèques Python recommandées : {}\n- Workflow : {}\n- Utilise d’abord le MCP du plugin via use_mcp_tool, puis une commande Python si nécessaire.\n{}",
+            label,
+            output_formats,
+            allowed_tools,
+            libraries,
+            workflow,
+            if mode
+                .get("sandbox")
+                .and_then(|value| value.as_str())
+                == Some("market-data")
+            {
+                "- Données de marché publiques et informatives uniquement (pas un conseil en investissement personnalisé)."
+            } else {
+                "- Traitement 100 % local : ne pas uploader les pièces jointes."
+            }
         ));
     }
 
@@ -890,30 +1163,205 @@ fn plugin_matches_extension(manifest: &serde_json::Value, extension: &str) -> bo
 
 fn plugin_creation_protocol(message: &str) -> Option<String> {
     let normalized = message.to_lowercase();
-    let asks_for_plugin = normalized.contains("plugin") || normalized.contains("skill");
-    let asks_to_create = ["crée", "cree", "créer", "creer", "create", "build"]
-        .iter()
-        .any(|word| normalized.contains(word));
+    let asks_for_plugin = normalized.contains("plugin");
+    let asks_to_create = [
+        "crée",
+        "cree",
+        "créer",
+        "creer",
+        "create",
+        "build",
+        "mets à jour",
+        "met a jour",
+        "update",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word));
     if !asks_for_plugin || !asks_to_create {
         return None;
     }
+    // Skill-only prompts mention « skill » + « pas un plugin » — don't inject Work plugin bar.
+    if normalized.contains("skill")
+        && (normalized.contains("pas un plugin") || normalized.contains("pas de plugin"))
+    {
+        return None;
+    }
     Some(
-        r#"Protocole Bob Work — création de plugin agentique local :
-- Crée un bundle dans ~/.bob/skills/<slug>/, sans écrire ailleurs pour l’installation du plugin.
-- Le slug doit utiliser uniquement a-z, 0-9 et des tirets.
-- Crée obligatoirement SKILL.md avec un frontmatter `name`, `description`, `user-invocable: true`, puis des instructions détaillant quand agir, quelles validations faire et comment utiliser les outils Bob.
-- Crée obligatoirement .bob-work-plugin.json avec schemaVersion=1, name, slug, version, description, category, permissions, runtime et entrypoints.
-- Pour un plugin Python/CLI, place le code sous scripts/, déclare chaque fichier dans entrypoints avec runtime `python3` et un chemin relatif, et fournis une interface argparse. N’ajoute aucune dépendance réseau implicite.
-- Lorsque le plugin bénéficie d’outils déterministes ou connectés, intègre-les au même bundle sous `mcp/` et déclare `mcpServers` dans .bob-work-plugin.json. Chaque entrée MCP utilise un identifiant a-z/0-9/tirets, un `displayName`, une description, `required`, une liste `tools`, puis une configuration Bob MCP locale (`command`, `args`, `cwd`) ou distante (`type`, `url`). Pour un serveur local Python, utilise `command: "python3"`, un script sous `mcp/` dans `args`, et `cwd: "."`.
-- Un serveur MCP local doit réellement implémenter JSON-RPC sur stdin/stdout et au minimum `initialize`, `tools/list` et `tools/call`. Vérifie sa syntaxe et teste localement l’initialisation et un appel d’outil sans effet externe.
-- Déclare `mcp.connect` pour tout MCP, `command.execute` pour un serveur local, `network.request` pour un serveur distant, puis les permissions fichier/réseau réellement nécessaires. Ne stocke aucun secret dans le bundle ; utilise uniquement des références à des variables d’environnement ou un vrai flux OAuth géré séparément.
-- Pour une connexion externe, déclare `integrations` avec `provider`, `displayName`, `authType` (`oauth`, `mcp` ou `token`), `scopes`, `optional` et, pour OAuth/MCP, `mcpServer`. Un connecteur OAuth doit toujours être adossé à un vrai serveur MCP qui gère l’autorisation ; ne crée jamais de faux état « connecté ».
-- Si le workflow peut être récurrent, ajoute `scheduledTaskTemplates` avec `id`, `name`, `description`, `instructions`, `cronOrEvent`, `offlineBehavior` et `overlapPolicy`. Les instructions doivent être utilisables sans secret et la planification restera modifiable avant activation.
-- Si le plugin exige le navigateur, déclare `browserExtensions` avec `id`, `displayName`, `capability` (`browser`, `computer_use` ou `chrome`), `required` et le `mcpServer` compatible pour tout contrôle. Déclare aussi `browser.control`. Bob Work n’active pas Computer Use ou Chrome sans réglage utilisateur et outil réellement connecté.
-- Pour une action locale avant/après tâche, déclare un script dans `entrypoints`, puis un `hook` avec `id`, `displayName`, `event` (`before_task`, `after_task` ou `task_error`), `entrypoint`, `required` et un délai court. Déclare `hook.execute` et `command.execute`. Les hooks reçoivent uniquement un environnement minimal, jamais les clés Bob ou les jetons d’intégration.
-- Tu peux vérifier la syntaxe du script, mais n’exécute aucune action cloud réelle pendant l’installation.
-- Bob Work importera le bundle dans sa liste Plugins à la fin de cette tâche. N’annonce la réussite que si tous les fichiers requis ont été écrits et validés."#.to_string(),
+        r#"Protocole Bob Work — création de plugin (niveau ChatGPT Work) :
+
+## Barre qualité (obligatoire)
+- Un skill seul (SKILL.md d’instructions) n’est PAS un plugin Work-level. Le plugin doit être un produit : mode spécialisé + surface exécutable + connecteurs déclarés.
+- Minimum : (1) `specializedMode` avec label/outils/workflow, (2) au moins une surface réelle parmi CLI `entrypoints`, MCP local `mcp/`, ou MCP distant HTTPS, (3) permissions honnêtes, (4) zéro secret en clair.
+- À la fin de la création, explique explicitement tes choix : pourquoi local vs distant, quelles APIs/MCP, ce qui est optionnel, et comment l’utilisateur active les connecteurs.
+
+## Exploration obligatoire des intégrations (avant d’écrire les fichiers)
+Explore TOUTES les familles pertinentes pour le cas d’usage, même si certaines restent optionnelles :
+1. OAuth catalogue Bob (GitHub, Slack, Monday, Microsoft Graph / Outlook / Teams / Calendar / OneDrive / OneNote)
+2. MCP locaux du bundle et MCP déjà configurés dans Bob Work
+3. APIs publiques (sans clé) et APIs avec clé (`${ENV}` / headers)
+4. Autre MCP distant HTTPS / streamable-http / SSE (OAuth côté serveur distant)
+5. Recherche web Bob (si le réglage Accès web est actif) — permission `network.request`
+6. Appel au LLM Bob (toujours disponible dans le chat ; déclare-le dans `resources` si le workflow raisonne / synthétise)
+7. Computer Use / Contrôle Chrome si le workflow pilote le bureau ou le navigateur
+Ne retiens que ce qui sert le workflow, mais DOCUMENTÉ ce que tu as exploré et écarté.
+
+## Description & resources (obligatoire dans .bob-work-plugin.json)
+- `description` = bénéfice utilisateur en 1–2 phrases claires (ce que le plugin fait / pour qui / résultat). Interdit : jargon d’implémentation seul (« MCP », « CLI », « Work-level », listes de connecteurs).
+  Exemple bon : « Propose des idées d’actions chiffrées pour un CTO français. »
+  Exemple mauvais : « Plugin Work-level + CLI/MCP Python + Stooq. »
+- Les intégrations (y compris optionnelles) vont dans `resources` et `connectorStrategy`, PAS dans `description`.
+- Déclare `resources` (tableau) avec chaque ressource explorée/retenue :
+  `{ "kind": "oauth"|"mcp"|"api-public"|"api-key"|"web-search"|"bob-llm"|"computer-use"|"chrome"|"stdio-cli", "label": "…", "optional": true|false, "provider": "…", "notes": "…" }`
+- `connectorStrategy` résume les tiers (T1–T5) + fallback + `explored` (liste courte des familles examinées).
+- `capabilities` doit refléter les usages (ex. `web.search`, `llm.synthesize`, `slack.post` si applicable).
+
+## Tiers de connecteurs
+- T1 API ouverte sans clé — préférer si suffisant.
+- T2 API ouverte avec `${ENV_API_KEY}` — enrichissement optionnel.
+- T3 MCP/CLI Python local dans le bundle.
+- T4 MCP HTTPS public / URL utilisateur.
+- T5 OAuth catalogue Bob — vrai flux ; ne jamais simuler.
+- + Web search Bob et LLM Bob selon le workflow (déclarés dans `resources`).
+
+## Fichiers & structure
+- Bundle uniquement dans ~/.bob/skills/<slug>/ (slug a-z, 0-9, tirets).
+- Obligatoire : SKILL.md + `.bob-work-plugin.json` (schemaVersion, name, slug, version, description, category, permissions, runtime, entrypoints, specializedMode, connectorStrategy, resources, icon).
+- `icon` (obligatoire) : clé locale adaptée à la fonction (`word`, `excel`, `powerpoint`, `onenote`, `document`, `invest`, `computer`, `chrome`, `github`, `slack`, `monday`, `outlook`, `teams`, `calendar`, `onedrive`, `agentic`, `plugin`) **ou** URL HTTPS d’un logo/favicon trouvé sur internet (ex. `https://www.google.com/s2/favicons?domain=notion.so&sz=128`). Jamais laisser `icon` vide.
+- Ne crée pas de second plugin pour un slug déjà couvert par un builtin Bob Work (Word/Excel/PowerPoint/OneNote/Documents/Computer Use/Chrome…).
+- MCP / CLI / integrations / browserExtensions selon le besoin réel. Secrets = `${PLACEHOLDER}` ou OAuth catalogue uniquement.
+
+## Annonce
+- Succès seulement si fichiers écrits et validés.
+- Après succès, invite l’utilisateur à ouvrir Plugins → le plugin pour lancer « Mise en service » (validate / sync MCP / test).
+- Section finale « Choix de conception » : ressources retenues vs écartées, activation utilisateur, limites."#.to_string(),
     )
+}
+
+fn skill_creation_protocol(message: &str, mode: &str) -> Option<String> {
+    let normalized = message.to_lowercase();
+    let mode_skill = mode == "skill_builder";
+    let asks_for_skill = normalized.contains("skill");
+    let asks_to_create = [
+        "crée",
+        "cree",
+        "créer",
+        "creer",
+        "create",
+        "build",
+        "importe",
+        "import",
+        "rapatrier",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word));
+    if !mode_skill && (!asks_for_skill || !asks_to_create) {
+        return None;
+    }
+    if normalized.contains("plugin")
+        && !normalized.contains("pas un plugin")
+        && !normalized.contains("pas de plugin")
+        && !mode_skill
+    {
+        return None;
+    }
+    Some(
+        r#"Protocole Bob Work — création / import de skill :
+
+## Qu’est-ce qu’un skill
+- Un skill = instructions markdown (`SKILL.md`), pas un plugin agentique (pas de MCP/CLI Python obligatoire).
+- Si l’utilisateur a besoin d’outils exécutables, oriente-le vers le Plugin Builder.
+
+## Format
+- Dossier `~/.bob/skills/<slug>/SKILL.md`
+- Frontmatter YAML : `name`, `description` (bénéfice utilisateur 1–2 phrases), `user-invocable: true`
+- Corps : consignes claires, limites, exemples.
+
+## Annonce
+- Succès seulement si le fichier est écrit.
+- Demande de rafraîchir la page Skills."#.to_string(),
+    )
+}
+
+fn plugin_creation_environment_context(
+    web_enabled: bool,
+    computer_use_enabled: bool,
+    chrome_control_enabled: bool,
+    mcp_servers: &[McpServer],
+    connected_integration_lines: &[String],
+    considered_integration_ids: &[String],
+) -> String {
+    let mut lines = vec![
+        "Catalogue à explorer pour ce plugin (état runtime Bob Work) :".into(),
+        "- bob-llm : toujours disponible (raisonnement / synthèse dans le chat Bob Work)".into(),
+        format!(
+            "- web-search : {}",
+            if web_enabled {
+                "réglage Accès web ACTIF — déclarable via network.request + resources.kind=web-search"
+            } else {
+                "réglage Accès web INACTIF — ne pas dépendre d’une recherche web obligatoire"
+            }
+        ),
+        format!(
+            "- computer-use : {}",
+            if computer_use_enabled {
+                "ACTIF (MCP bob-work-computer-use) — déclarable si le workflow pilote le bureau"
+            } else {
+                "inactif — optionnel via Réglages → Contrôle de l’ordinateur"
+            }
+        ),
+        format!(
+            "- chrome-control : {}",
+            if chrome_control_enabled {
+                "ACTIF (MCP bob-work-chrome-control)"
+            } else {
+                "inactif — optionnel via Réglages → Contrôle de Chrome"
+            }
+        ),
+        "- oauth-catalog : github, slack, monday, outlook-mail, teams, outlook-calendar, onedrive, onenote".into(),
+        format!(
+            "- oauth considérés pour ce projet/session : {}",
+            if considered_integration_ids.is_empty() {
+                "(aucun)".into()
+            } else {
+                considered_integration_ids.join(", ")
+            }
+        ),
+    ];
+    if connected_integration_lines.is_empty() {
+        lines.push(
+            "- oauth déjà connectés : aucun pour l’instant (déclare optional:true si utile)".into(),
+        );
+    } else {
+        lines.push("- oauth déjà connectés :".into());
+        lines.extend(connected_integration_lines.iter().cloned());
+    }
+    if mcp_servers.is_empty() {
+        lines.push("- mcp configurés : aucun serveur global pour l’instant".into());
+    } else {
+        lines.push("- mcp déjà configurés dans Bob Work :".into());
+        for server in mcp_servers.iter().take(24) {
+            lines.push(format!(
+                "  • {} ({}) {}{}",
+                server.name,
+                server.transport,
+                if server.enabled {
+                    "actif"
+                } else {
+                    "désactivé"
+                },
+                if server.command_or_url.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", server.command_or_url)
+                }
+            ));
+        }
+    }
+    lines.push(
+        "Inclure les intégrations retenues dans `resources` (pas dans `description`) ; noter brièvement celles écartées dans Choix de conception."
+            .into(),
+    );
+    lines.join("\n")
 }
 
 fn available_integration_context(bob_service: &BobService, ids: &[String]) -> Vec<String> {
@@ -942,4 +1390,185 @@ pub struct StartSessionResult {
     pub session_id: String,
     pub task_id: String,
     pub user_message_id: String,
+    #[serde(default)]
+    pub awaiting_approval: bool,
+}
+
+#[cfg(test)]
+mod plugin_creation_protocol_tests {
+    use super::plugin_creation_protocol;
+
+    #[test]
+    fn injects_work_level_bar_and_connector_tiers_when_creating_a_plugin() {
+        let protocol = plugin_creation_protocol("Crée un plugin Python pour analyser mon CTO")
+            .expect("protocol");
+        assert!(protocol.contains("niveau ChatGPT Work"));
+        assert!(protocol.contains("connectorStrategy"));
+        assert!(protocol.contains("T1"));
+        assert!(protocol.contains("Choix de conception"));
+        assert!(protocol.contains("specializedMode"));
+        assert!(protocol.contains("resources"));
+        assert!(protocol.contains("web-search"));
+        assert!(protocol.contains("bob-llm"));
+        assert!(protocol.contains("Exploration obligatoire"));
+        assert!(protocol.contains("bénéfice utilisateur"));
+        assert!(protocol.contains("PAS dans `description`"));
+        assert!(protocol.contains("Mise en service"));
+    }
+
+    #[test]
+    fn skill_prompt_gets_skill_protocol_not_plugin_bar() {
+        let protocol = super::skill_creation_protocol(
+            "Crée avec moi un skill personnel Bob Work (pas un plugin agentique).",
+            "skill_builder",
+        )
+        .expect("skill protocol");
+        assert!(protocol.contains("création / import de skill"));
+        assert!(plugin_creation_protocol(
+            "Crée avec moi un skill personnel Bob Work (pas un plugin agentique)."
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn prompt_includes_related_context_block() {
+        let prompt = super::build_prompt_with_history(
+            "Relance le screening",
+            "agent",
+            &[],
+            "",
+            None,
+            &[],
+            true,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            Some(
+                "Contexte lié (autres conversations, extrait local — à utiliser seulement s’il aide vraiment) :\n- « Brief » : AIR.PA"
+                    .into(),
+            ),
+        );
+        assert!(prompt.contains("Contexte lié"));
+        assert!(prompt.contains("AIR.PA"));
+        assert!(prompt.contains("Relance le screening"));
+    }
+
+    #[test]
+    fn prompt_tells_bob_to_grant_bob_work_not_python3() {
+        let prompt = super::build_prompt_with_history(
+            "Joue Blue sur Spotify",
+            "agent",
+            &[],
+            "",
+            None,
+            &[],
+            true,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            None,
+        );
+        assert!(prompt.contains("Bob Work"));
+        assert!(prompt.contains("Accessibilité"));
+        assert!(prompt.contains("osascript"));
+        assert!(prompt.contains("pas python3"));
+        assert!(prompt.contains("bob-work-computer-use"));
+    }
+
+    #[test]
+    fn environment_context_lists_web_llm_and_mcp_catalog() {
+        let context = super::plugin_creation_environment_context(
+            true,
+            true,
+            false,
+            &[crate::models::workspace::McpServer {
+                name: "bob-work-computer-use".into(),
+                transport: "stdio".into(),
+                command_or_url: "python3".into(),
+                args: vec![],
+                enabled: true,
+                status: "configured".into(),
+                raw: serde_json::json!({}),
+                last_test: None,
+            }],
+            &["- GitHub via GH_TOKEN".into()],
+            &["github".into(), "slack".into()],
+        );
+        assert!(context.contains("bob-llm"));
+        assert!(context.contains("web-search"));
+        assert!(context.contains("ACTIF"));
+        assert!(context.contains("bob-work-computer-use"));
+        assert!(context.contains("github, slack"));
+    }
+}
+
+#[cfg(test)]
+mod cto_invest_prompt_tests {
+    use super::{build_office_specialized_context, translate_prompt_mentions};
+    use crate::db::Database;
+    use crate::services::plugin::PluginService;
+
+    #[test]
+    fn cto_invest_mention_translates_and_injects_market_mode_into_prompt() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        PluginService::new()
+            .ensure_builtin_plugins(&db)
+            .expect("builtins");
+
+        let translated = translate_prompt_mentions(
+            &db,
+            "@plugin:bob-work-cto-invest Quelles actions CTO regarder maintenant ?",
+        );
+        assert!(
+            translated.contains("$bob-work-cto-invest"),
+            "plugin mention must become Bob skill token: {translated}"
+        );
+
+        let plugin = PluginService::new()
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("plugin");
+        let context =
+            build_office_specialized_context(&[plugin], &[]).expect("specialized context");
+        assert!(context.contains("Mode CTO Investissements"));
+        assert!(context.contains("cto_screen_ideas"));
+        assert!(context.contains("pas un conseil en investissement"));
+    }
+
+    #[test]
+    fn ibm_pursuit_plugin_mention_injects_open_api_brief_mode() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        PluginService::new()
+            .ensure_builtin_plugins(&db)
+            .expect("builtins");
+
+        let translated = translate_prompt_mentions(
+            &db,
+            "@plugin:bob-work-ibm-pursuit Prépare un brief mission Schneider Electric",
+        );
+        assert!(
+            translated.contains("$bob-work-ibm-pursuit"),
+            "plugin mention must become Bob skill token: {translated}"
+        );
+
+        let plugin = PluginService::new()
+            .get_by_id(&db, "bob-work-ibm-pursuit")
+            .expect("lookup")
+            .expect("plugin");
+        let context =
+            build_office_specialized_context(&[plugin], &[]).expect("specialized context");
+        assert!(context.contains("Mode Brief Mission IBM"));
+        assert!(context.contains("ibm_screen_plays"));
+        assert!(context.contains("Ne jamais utiliser Slack"));
+    }
 }

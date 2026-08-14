@@ -18,7 +18,9 @@ pub async fn get_conversations(
     project_id: Option<String>,
     db: State<'_, Database>,
 ) -> Result<Vec<Conversation>, AppError> {
-    ConversationService::new().get_all(&db, project_id.as_deref())
+    let service = ConversationService::new();
+    let _ = service.purge_promptless(&db);
+    service.get_all(&db, project_id.as_deref())
 }
 
 #[tauri::command]
@@ -32,12 +34,11 @@ pub async fn get_conversation(
 #[tauri::command]
 pub async fn create_conversation(
     input: CreateConversationInput,
-    app_handle: AppHandle,
     db: State<'_, Database>,
 ) -> Result<Conversation, AppError> {
-    let conversation = ConversationService::new().create(&db, input)?;
-    let _ = app_handle.emit("conversation-updated", &conversation.id);
-    Ok(conversation)
+    // Do not emit conversation-updated yet — drafts without a user prompt
+    // must stay out of the sidebar until the first message is persisted.
+    ConversationService::new().create(&db, input)
 }
 
 #[tauri::command]
@@ -61,7 +62,11 @@ pub async fn update_conversation(
         service.set_archived(&db, &id, value)?;
     }
     if let Some(value) = project_id {
-        let pid = if value.is_empty() { None } else { Some(value.as_str()) };
+        let pid = if value.is_empty() {
+            None
+        } else {
+            Some(value.as_str())
+        };
         service.set_project_id(&db, &id, pid)?;
     }
     let _ = app_handle.emit("conversation-updated", &id);

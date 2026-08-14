@@ -18,26 +18,28 @@ impl SettingsService {
 
     pub fn get(&self, db: &Database) -> AppResult<AppSettings> {
         let conn = db.conn.lock().unwrap();
+        let mut map = std::collections::HashMap::<String, String>::new();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (key, value) = row?;
+            map.insert(key, value);
+        }
 
-        let get_val = |key: &str| -> Option<String> {
-            conn.query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        };
+        let get_val = |key: &str| -> Option<&String> { map.get(key) };
 
         Ok(AppSettings {
             theme: get_val("theme")
-                .and_then(|v| serde_json::from_str(&v).ok())
-                .unwrap_or("system".to_string()),
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_else(|| "system".to_string()),
             language: get_val("language")
-                .and_then(|v| serde_json::from_str(&v).ok())
-                .unwrap_or("auto".to_string()),
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_else(|| "auto".to_string()),
             default_mode: get_val("default_mode")
-                .and_then(|v| serde_json::from_str(&v).ok())
-                .unwrap_or("general_work".to_string()),
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_else(|| "general_work".to_string()),
             sidebar_width: get_val("sidebar_width")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(260),
@@ -45,29 +47,29 @@ impl SettingsService {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(340),
             sidebar_visible: get_val("sidebar_visible")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
             inspector_visible: get_val("inspector_visible")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
             font_size: get_val("font_size")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15),
             reduced_motion: get_val("reduced_motion")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
             permission_policy: get_val("permission_policy")
-                .and_then(|v| serde_json::from_str(&v).ok())
-                .unwrap_or("always_ask".to_string()),
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_else(|| "ask_for_important".to_string()),
             launch_at_login: get_val("launch_at_login")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
             menu_bar_enabled: get_val("menu_bar_enabled")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
-            global_hotkey: get_val("global_hotkey").and_then(|v| serde_json::from_str(&v).ok()),
+            global_hotkey: get_val("global_hotkey").and_then(|v| serde_json::from_str(v).ok()),
             global_instructions: get_val("global_instructions")
-                .and_then(|v| serde_json::from_str(&v).ok())
+                .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default(),
             max_turns: get_val("max_turns")
                 .and_then(|v| v.parse().ok())
@@ -75,31 +77,41 @@ impl SettingsService {
             max_cost: get_val("max_cost")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
-            mcp_enabled: get_val("mcp_enabled").map(|v| v == "true").unwrap_or(true),
-            subagents_enabled: get_val("subagents_enabled")
-                .map(|v| v == "true")
+            mcp_enabled: get_val("mcp_enabled")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
-            web_enabled: get_val("web_enabled").map(|v| v == "true").unwrap_or(true),
+            subagents_enabled: get_val("subagents_enabled")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(true),
+            web_enabled: get_val("web_enabled")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(true),
             notifications_enabled: get_val("notifications_enabled")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
             notify_task_complete: get_val("notify_task_complete")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
             voice_on_device: get_val("voice_on_device")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
             task_retention_days: get_val("task_retention_days")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             telemetry_enabled: get_val("telemetry_enabled")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
             computer_use_enabled: get_val("computer_use_enabled")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
             chrome_control_enabled: get_val("chrome_control_enabled")
-                .map(|v| v == "true")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(false),
+            sandbox_mode: get_val("sandbox_mode")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(false),
+            cross_conversation_context: get_val("cross_conversation_context")
+                .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
         })
     }
@@ -170,6 +182,11 @@ impl SettingsService {
             (
                 "chrome_control_enabled",
                 settings.chrome_control_enabled.to_string(),
+            ),
+            ("sandbox_mode", settings.sandbox_mode.to_string()),
+            (
+                "cross_conversation_context",
+                settings.cross_conversation_context.to_string(),
             ),
         ];
 

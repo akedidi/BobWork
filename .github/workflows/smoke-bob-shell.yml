@@ -1,0 +1,44 @@
+name: Smoke Bob Shell (real)
+
+# Pre-release check against a real IBM Bob Shell binary + API key.
+# Does not replace WDIO fake-bob e2e. Requires repository secret BOB_API_KEY.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: smoke-bob-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Real Bob Shell smoke
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (for Bob Shell install path)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Bob Shell
+        run: |
+          set -euo pipefail
+          VERSION="$(curl -fsSL https://s3.us-south.cloud-object-storage.appdomain.cloud/bob-shell/bobshell-version.txt)"
+          npm install -g --prefix "${HOME}/.local" \
+            "https://s3.us-south.cloud-object-storage.appdomain.cloud/bob-shell/bobshell-${VERSION}.tgz"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          bob --accept-license --version
+
+      - name: Run smoke
+        env:
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOBSHELL_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_SMOKE_SKIP_IF_NO_KEY: "0"
+        run: bash apps/macos/scripts/smoke-bob-shell.sh

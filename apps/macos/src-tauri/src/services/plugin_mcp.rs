@@ -4,6 +4,7 @@ use crate::services::workspace::WorkspaceService;
 use serde_json::{Map, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Component, Path};
 use std::process::Command;
 
@@ -135,6 +136,9 @@ impl PluginMcpService {
         let servers = self.prepare(plugin_id, manifest, bundle_dir)?;
         let mut installed: Vec<String> = vec![];
         for server in servers {
+            // Global scope: Bob Work is a desktop app; workspace scope writes
+            // cwd/.bob/mcp.json (ENOENT under the Tauri project dir) and made
+            // the Plugins screen hang for seconds on every open.
             if let Err(error) = run_bob(
                 bob_path,
                 &[
@@ -142,10 +146,12 @@ impl PluginMcpService {
                     "add-json",
                     &server.qualified_name,
                     &server.config.to_string(),
+                    "--scope",
+                    "global",
                 ],
             ) {
                 for name in installed.iter().rev() {
-                    let _ = run_bob(bob_path, &["mcp", "remove", name]);
+                    let _ = run_bob(bob_path, &["mcp", "remove", name, "--scope", "global"]);
                 }
                 return Err(error);
             }
@@ -156,11 +162,16 @@ impl PluginMcpService {
                     "mcp",
                     if enabled { "enable" } else { "disable" },
                     &server.qualified_name,
+                    "--scope",
+                    "global",
                 ],
             ) {
-                let _ = run_bob(bob_path, &["mcp", "remove", &server.qualified_name]);
+                let _ = run_bob(
+                    bob_path,
+                    &["mcp", "remove", &server.qualified_name, "--scope", "global"],
+                );
                 for name in installed.iter().rev() {
-                    let _ = run_bob(bob_path, &["mcp", "remove", name]);
+                    let _ = run_bob(bob_path, &["mcp", "remove", name, "--scope", "global"]);
                 }
                 return Err(error);
             }
@@ -184,7 +195,16 @@ impl PluginMcpService {
         let configured = configured_names();
         for server in self.prepare(plugin_id, manifest, bundle_dir)? {
             if configured.contains(&server.qualified_name) {
-                run_bob(bob_path, &["mcp", "disable", &server.qualified_name])?;
+                run_bob(
+                    bob_path,
+                    &[
+                        "mcp",
+                        "disable",
+                        &server.qualified_name,
+                        "--scope",
+                        "global",
+                    ],
+                )?;
             }
         }
         Ok(())
@@ -200,7 +220,10 @@ impl PluginMcpService {
         let configured = configured_names();
         for server in self.prepare(plugin_id, manifest, bundle_dir)? {
             if configured.contains(&server.qualified_name) {
-                run_bob(bob_path, &["mcp", "remove", &server.qualified_name])?;
+                run_bob(
+                    bob_path,
+                    &["mcp", "remove", &server.qualified_name, "--scope", "global"],
+                )?;
             }
         }
         Ok(())
@@ -226,7 +249,10 @@ impl PluginMcpService {
             if !new_names.contains(&server.qualified_name)
                 && configured.contains(&server.qualified_name)
             {
-                run_bob(bob_path, &["mcp", "remove", &server.qualified_name])?;
+                run_bob(
+                    bob_path,
+                    &["mcp", "remove", &server.qualified_name, "--scope", "global"],
+                )?;
             }
         }
         Ok(())
@@ -257,8 +283,23 @@ impl PluginMcpService {
                     configured: current.is_some(),
                     enabled: current.is_some_and(|value| value.enabled),
                     required: server.required,
+                    last_test: None,
                 }
             })
+            .collect())
+    }
+
+    /// Live probe: spawn each stdio MCP, run `initialize` + `tools/list`.
+    pub fn test(
+        &self,
+        plugin_id: &str,
+        manifest: &Value,
+        bundle_dir: &Path,
+    ) -> AppResult<Vec<crate::models::plugin::PluginMcpTestResult>> {
+        let servers = self.prepare(plugin_id, manifest, bundle_dir)?;
+        Ok(servers
+            .into_iter()
+            .map(|server| probe_prepared_server(&server))
             .collect())
     }
 
@@ -400,12 +441,283 @@ fn run_bob(bob_path: &str, args: &[&str]) -> AppResult<()> {
     }))
 }
 
+fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::PluginMcpTestResult {
+    let fail = |message: String| crate::models::plugin::PluginMcpTestResult {
+        id: server.id.clone(),
+        name: server.display_name.clone(),
+        ok: false,
+        message,
+        tools: vec![],
+        tested_at: None,
+    };
+    if server.transport != "stdio" {
+        let url = server
+            .config
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if url.is_empty() {
+            return fail("URL MCP manquante.".into());
+        }
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return fail(format!("Client HTTP indisponible : {error}")),
+        };
+        let mut request = client.get(url);
+        if let Some(headers) = server.config.get("headers").and_then(Value::as_object) {
+            for (key, value) in headers {
+                if key == "_redacted" {
+                    continue;
+                }
+                if let Some(header_value) = value.as_str() {
+                    if header_value != "<stored securely>" {
+                        request = request.header(key.as_str(), header_value);
+                    }
+                }
+            }
+        }
+        return match request.send() {
+            // 401/403 = auth/config failure. Other 4xx still count as "reachable"
+            // because many MCP HTTP endpoints reject bare GET with Method Not Allowed.
+            Ok(response) => {
+                let status = response.status();
+                let code = status.as_u16();
+                if code == 401 || code == 403 {
+                    fail(format!("Authentification refusée (HTTP {code})."))
+                } else if status.is_success() || code < 500 {
+                    crate::models::plugin::PluginMcpTestResult {
+                        id: server.id.clone(),
+                        name: server.display_name.clone(),
+                        ok: true,
+                        message: format!("Endpoint HTTP joignable ({url})."),
+                        tools: server.tools.clone(),
+                        tested_at: None,
+                    }
+                } else {
+                    fail(format!("Endpoint HTTP a répondu HTTP {code}."))
+                }
+            }
+            Err(error) => fail(format!("Endpoint HTTP injoignable : {error}")),
+        };
+    }
+
+    let command = server
+        .config
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if command.trim().is_empty() {
+        return fail("Commande MCP manquante.".into());
+    }
+    let args = server
+        .config
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let cwd = server
+        .config
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("."));
+    let mut child = match Command::new(command)
+        .args(&args)
+        .current_dir(cwd)
+        .envs(server_env(&server.config))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return fail(format!("Impossible de démarrer le serveur MCP : {error}")),
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return fail("stdin MCP indisponible.".into());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return fail("stdout MCP indisponible.".into());
+    };
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bob-work","version":"0.1.4"}}}"#;
+    let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let tools_list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+    if writeln!(stdin, "{init}").is_err()
+        || writeln!(stdin, "{initialized}").is_err()
+        || writeln!(stdin, "{tools_list}").is_err()
+    {
+        let _ = child.kill();
+        return fail("Écriture JSON-RPC vers le serveur MCP impossible.".into());
+    }
+    drop(stdin);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(stdout);
+        let mut lines = Vec::new();
+        for line in reader.lines().flatten() {
+            let trimmed = line.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            lines.push(trimmed);
+            if lines.len() >= 8 {
+                break;
+            }
+        }
+        let _ = tx.send(lines);
+    });
+
+    let lines = match rx.recv_timeout(std::time::Duration::from_secs(8)) {
+        Ok(lines) => lines,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return fail(
+                "Délai dépassé en attendant la réponse MCP (initialize / tools/list).".into(),
+            );
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let mut saw_initialize = false;
+    let mut tools = Vec::new();
+    for line in &lines {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("id").and_then(Value::as_u64) == Some(1) && value.get("result").is_some() {
+            saw_initialize = true;
+        }
+        if value.get("id").and_then(Value::as_u64) == Some(2) {
+            if let Some(list) = value.pointer("/result/tools").and_then(Value::as_array) {
+                tools = list
+                    .iter()
+                    .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+            }
+            if value.get("error").is_some() {
+                return fail(format!(
+                    "tools/list a échoué : {}",
+                    value
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("erreur MCP")
+                ));
+            }
+        }
+    }
+
+    if !saw_initialize {
+        let preview = lines
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "aucune sortie".into());
+        return fail(format!("Pas de réponse initialize valide ({preview})."));
+    }
+
+    crate::models::plugin::PluginMcpTestResult {
+        id: server.id.clone(),
+        name: server.display_name.clone(),
+        ok: true,
+        message: if tools.is_empty() {
+            "Connexion MCP OK (initialize).".into()
+        } else {
+            format!(
+                "Connexion MCP OK — {} outil(s) : {}.",
+                tools.len(),
+                tools.join(", ")
+            )
+        },
+        tools,
+        tested_at: None,
+    }
+}
+
+fn server_env(config: &Value) -> Vec<(String, String)> {
+    config
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|env| {
+            env.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn configured_names() -> std::collections::HashSet<String> {
     WorkspaceService::new()
         .list_mcp_servers()
         .into_iter()
         .map(|server| server.name)
         .collect()
+}
+
+/// Probe a server already present in Bob's mcp.json (Integrations → MCP).
+pub fn test_workspace_server(
+    server: &crate::models::workspace::McpServer,
+) -> crate::models::plugin::PluginMcpTestResult {
+    let mut config = if let Some(object) = server.raw.as_object() {
+        object.clone()
+    } else {
+        Map::new()
+    };
+    if server.transport == "stdio" || server.transport.is_empty() {
+        config
+            .entry("command".to_string())
+            .or_insert_with(|| Value::String(server.command_or_url.clone()));
+        if !server.args.is_empty() {
+            config.insert(
+                "args".to_string(),
+                Value::Array(
+                    server
+                        .args
+                        .iter()
+                        .map(|arg| Value::String(arg.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    } else {
+        config
+            .entry("url".to_string())
+            .or_insert_with(|| Value::String(server.command_or_url.clone()));
+    }
+    let prepared = PreparedServer {
+        id: server.name.clone(),
+        qualified_name: server.name.clone(),
+        display_name: server.name.clone(),
+        description: None,
+        transport: if server.transport.is_empty() {
+            "stdio".into()
+        } else {
+            server.transport.clone()
+        },
+        tools: vec![],
+        required: false,
+        enabled: server.enabled,
+        config: Value::Object(config),
+    };
+    probe_prepared_server(&prepared)
 }
 
 fn resolve_bundle_directory(bundle_dir: &Path, relative: &str) -> AppResult<std::path::PathBuf> {
@@ -604,5 +916,50 @@ mod tests {
         manifest["mcpServers"]["architecture"]["env"] =
             serde_json::json!({"API_TOKEN": "${CLOUD_API_TOKEN}"});
         assert!(PluginMcpService::validate_schema(&manifest).is_empty());
+    }
+
+    #[test]
+    fn probes_stdio_mcp_initialize_and_tools_list() {
+        let root =
+            std::env::temp_dir().join(format!("bob-work-mcp-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("mcp")).unwrap();
+        std::fs::write(
+            root.join("cto_market.py"),
+            include_str!("../../resources/finance/cto_market.py"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("mcp/server.py"),
+            include_str!("../../resources/finance/mcp/server.py"),
+        )
+        .unwrap();
+        let manifest = serde_json::json!({
+            "slug": "bob-work-cto-invest-probe",
+            "permissions": [{"type":"mcp.connect"},{"type":"command.execute"},{"type":"network.request"}],
+            "mcpServers": {
+                "cto-market": {
+                    "displayName": "Marché CTO",
+                    "command": "python3",
+                    "args": ["mcp/server.py"],
+                    "cwd": ".",
+                    "env": {"BOB_CTO_INVEST": "e2e-probe"},
+                    "tools": ["cto_market_snapshot", "cto_screen_ideas"]
+                }
+            }
+        });
+        let results = PluginMcpService::new()
+            .test("bob-work-cto-invest", &manifest, &root)
+            .expect("probe");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok, "{}", results[0].message);
+        assert!(results[0]
+            .tools
+            .iter()
+            .any(|tool| tool == "cto_screen_ideas"));
+        assert!(results[0]
+            .tools
+            .iter()
+            .any(|tool| tool == "cto_connector_status"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

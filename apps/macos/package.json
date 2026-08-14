@@ -9,16 +9,21 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:tauri": "tauri dev",
+    "dev:tauri:app": "bash scripts/ensure-dev-app.sh debug && open -n \"src-tauri/target/debug/bundle/macos/Bob Work.app\"",
+    "ensure:dev-app": "bash scripts/ensure-dev-app.sh debug",
+    "install:dev-app": "INSTALL_APPS=1 bash scripts/ensure-dev-app.sh debug",
     "build:tauri": "tauri build",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:e2e:prepare": "node e2e/prepare.mjs",
     "test:e2e:build": "VITE_BOB_WORK_E2E=1 pnpm build && CARGO_TARGET_DIR=src-tauri/target/e2e CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OPT_LEVEL=1 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --manifest-path src-tauri/Cargo.toml --features e2e,tauri/custom-protocol",
     "test:e2e": "pnpm test:e2e:prepare && pnpm test:e2e:build && wdio run wdio.conf.ts",
     "test:e2e:live-bob-oauth": "expect e2e/live-bob-oauth.exp",
+    "smoke:bob": "bash scripts/smoke-bob-shell.sh",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
-    "verify": "pnpm typecheck && pnpm test && pnpm build"
+    "verify": "pnpm typecheck && pnpm test:coverage && pnpm build"
   },
   "dependencies": {
     "@bob-work/bob-adapter": "workspace:*",
@@ -39,7 +44,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^9.0.1",
-    "react-router-dom": "^6.26.1",
+    "react-router-dom": "^7.18.2",
     "rehype-highlight": "^7.0.0",
     "remark-gfm": "^4.0.0",
     "zustand": "^4.5.5"
@@ -54,7 +59,7 @@
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
     "@vitejs/plugin-react": "^4.6.0",
-    "@vitest/coverage-v8": "^2.0.5",
+    "@vitest/coverage-v8": "^4.1.10",
     "@wdio/cli": "9.30.1",
     "@wdio/local-runner": "9.30.1",
     "@wdio/mocha-framework": "9.30.1",
@@ -68,6 +73,6 @@
     "tailwindcss": "^3.4.10",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^2.0.5"
+    "vitest": "^4.1.10"
   }
 }

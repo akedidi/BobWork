@@ -1,0 +1,98 @@
+name: Updater N to N+1 smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: Installed release version N (without v)
+        required: true
+        type: string
+      target_version:
+        description: Latest release version N+1 expected from the updater
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  updater-smoke:
+    name: Install N · detect N+1 · verify · restart
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release N
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FROM_VERSION: ${{ inputs.from_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p updater-smoke/from
+          gh release download "v${FROM_VERSION}" --pattern '*.dmg' --dir updater-smoke/from
+
+      - name: Install and certify release N
+        run: |
+          set -euo pipefail
+          DMG="$(find updater-smoke/from -name '*.dmg' -print -quit)"
+          MOUNT_POINT="$RUNNER_TEMP/bob-work-from-dmg"
+          INSTALL_ROOT="$RUNNER_TEMP/bob-work-updater-install"
+          mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
+          ditto "$SOURCE_APP" "$INSTALL_ROOT/Bob Work.app"
+          hdiutil detach "$MOUNT_POINT"
+          codesign --verify --deep --strict --verbose=2 "$INSTALL_ROOT/Bob Work.app"
+          spctl --assess --type execute --verbose=4 "$INSTALL_ROOT/Bob Work.app"
+          xcrun stapler validate "$INSTALL_ROOT/Bob Work.app"
+          echo "SMOKE_APP=$INSTALL_ROOT/Bob Work.app" >> "$GITHUB_ENV"
+
+      - name: Exercise signed updater and process restart
+        env:
+          BOB_WORK_UPDATER_SMOKE: '1'
+          BOB_WORK_UPDATER_EXPECTED_VERSION: ${{ inputs.target_version }}
+          BOB_WORK_UPDATER_SMOKE_FILE: ${{ runner.temp }}/bob-work-updater-events.jsonl
+        run: |
+          set -euo pipefail
+          EXECUTABLE="$SMOKE_APP/Contents/MacOS/bob-work"
+          "$EXECUTABLE" > updater-smoke/app.log 2>&1 &
+          APP_PID=$!
+          echo "$APP_PID" > updater-smoke/initial-pid.txt
+
+          for attempt in $(seq 1 120); do
+            if [[ -f "$BOB_WORK_UPDATER_SMOKE_FILE" ]]; then
+              cp "$BOB_WORK_UPDATER_SMOKE_FILE" updater-smoke/events.jsonl
+              if jq -s -e 'any(.[]; .status == "error")' updater-smoke/events.jsonl >/dev/null; then
+                cat updater-smoke/events.jsonl
+                exit 1
+              fi
+              if jq -s -e --arg version "$BOB_WORK_UPDATER_EXPECTED_VERSION" '
+                any(.[]; .status == "detected" and .to == $version) and
+                any(.[]; .status == "installed" and .version == $version) and
+                any(.[]; .status == "current" and .version == $version)
+              ' updater-smoke/events.jsonl >/dev/null; then
+                cat updater-smoke/events.jsonl
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          cat updater-smoke/events.jsonl 2>/dev/null || true
+          exit 1
+
+      - name: Verify updated bundle after restart
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$SMOKE_APP"
+          spctl --assess --type execute --verbose=4 "$SMOKE_APP"
+
+      - name: Upload updater smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bob-work-updater-smoke-${{ github.run_id }}
+          path: updater-smoke/**
+          if-no-files-found: error
+          retention-days: 90

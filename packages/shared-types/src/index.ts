@@ -9,9 +9,17 @@ export interface BobDetectionResult {
   found: boolean;
   path?: string;
   version?: string;
-  /** True only when Bob Work can execute `bob run` (session-only key or environment). */
+  /** True when Bob Work can authenticate `bob run` (vault/env key or IBM Bob SSO session). */
   authenticated: boolean;
   error?: string;
+}
+
+export interface BobAuthSnapshot {
+  found: boolean;
+  path?: string;
+  version?: string;
+  authenticated: boolean;
+  authenticationMethod: string;
 }
 
 export type CapabilityInfo = Capability;
@@ -487,6 +495,13 @@ export interface PluginMcpServerDefinition {
   disabled?: boolean;
 }
 
+export interface ConnectionTestSummary {
+  ok: boolean;
+  message: string;
+  testedAt: string;
+  tools?: string[];
+}
+
 export interface PluginMcpStatus {
   id: string;
   name: string;
@@ -496,6 +511,17 @@ export interface PluginMcpStatus {
   configured: boolean;
   enabled: boolean;
   required: boolean;
+  /** Persisted result of the last MCP connection probe. */
+  lastTest?: ConnectionTestSummary | null;
+}
+
+export interface PluginMcpTestResult {
+  id: string;
+  name: string;
+  ok: boolean;
+  message: string;
+  tools: string[];
+  testedAt?: string | null;
 }
 
 export interface PluginIntegrationStatus {
@@ -506,6 +532,21 @@ export interface PluginIntegrationStatus {
   state: "connected" | "configured" | "disabled" | "disconnected" | string;
   required: boolean;
   message: string;
+}
+
+export interface MacosChromeControlStatus {
+  chromeInstalled: boolean;
+  mcpConfigured: boolean;
+  mcpEnabled: boolean;
+  automation: 'granted' | 'denied' | 'chrome_missing' | 'unavailable' | 'unknown';
+  automationMessage: string;
+}
+
+export interface MacosComputerUseStatus {
+  mcpConfigured: boolean;
+  mcpEnabled: boolean;
+  accessibility: 'granted' | 'denied' | 'unavailable' | 'unknown';
+  accessibilityMessage: string;
 }
 
 export interface MacosChromeControlStatus {
@@ -568,6 +609,22 @@ export interface PluginExtensionStatus {
   browserExtensions: PluginBrowserStatus[];
   hooks: PluginHookStatus[];
   scheduledTaskTemplates: PluginScheduleTemplate[];
+}
+
+/** Live configuration status for a declared plugin source/resource. */
+export interface PluginResourceStatus {
+  id: string;
+  label: string;
+  kind: string;
+  optional: boolean;
+  /** ready | needs_key | needs_setup | inactive | always_on */
+  state: 'ready' | 'needs_key' | 'needs_setup' | 'inactive' | 'always_on' | string;
+  message: string;
+  setupHint?: string | null;
+  /** integrations | apis | mcp */
+  configureTab?: string | null;
+  envKey?: string | null;
+  configureUrl?: string | null;
 }
 
 export interface PluginInputSchema {
@@ -693,6 +750,8 @@ export interface Schedule {
   projectId?: string;
   pluginOrMode?: string;
   cronOrEvent: string;
+  /** Local time of day (HH:MM) in `timezone` for recurring schedules. */
+  runAt?: string;
   timezone: string;
   nextRun?: string;
   lastRun?: string;
@@ -717,6 +776,8 @@ export interface CreateScheduleInput {
   projectId?: string;
   pluginOrMode?: string;
   cronOrEvent: string;
+  /** Local time of day (HH:MM) in `timezone` for recurring schedules. */
+  runAt?: string;
   timezone?: string;
   offlineBehavior?: OfflineBehavior;
   overlapPolicy?: OverlapPolicy;
@@ -797,6 +858,13 @@ export interface AppSettings {
   telemetryEnabled: boolean;
   computerUseEnabled: boolean;
   chromeControlEnabled: boolean;
+  /** Confine bob run to the workspace (no --trust; no Computer Use / Chrome for the session). */
+  sandboxMode: boolean;
+  /**
+   * When true, Bob Work may retrieve short excerpts from other conversations
+   * (preferring the same project) to enrich prompts — ChatGPT-style.
+   */
+  crossConversationContext: boolean;
 }
 
 export interface BobMode {
@@ -806,6 +874,18 @@ export interface BobMode {
   groups: string[];
   builtin: boolean;
   source: string;
+}
+
+export interface ModeCatalogEntry {
+  slug: string;
+  name: string;
+  description?: string;
+  groups: string[];
+  builtin: boolean;
+  source: string;
+  installed: boolean;
+  /** True when the mode is part of the curated Bob Work catalog. */
+  catalog: boolean;
 }
 
 export interface ShellProfile {
@@ -839,6 +919,12 @@ export interface WorkspaceSkill {
   sourcePath: string;
   scope: string;
   enabled: boolean;
+  /** True when the skill is deployed by a Bob Work built-in plugin/integration. */
+  builtin?: boolean;
+  /** Filesystem birth time of SKILL.md when available. */
+  createdAt?: string;
+  /** Filesystem mtime of SKILL.md. */
+  updatedAt?: string;
 }
 
 export interface SaveSkillInput {
@@ -856,6 +942,8 @@ export interface McpServer {
   enabled: boolean;
   status: string;
   raw: Record<string, unknown>;
+  /** Persisted result of the last MCP connection probe. */
+  lastTest?: ConnectionTestSummary | null;
 }
 
 export interface SaveMcpServerInput {
@@ -864,6 +952,10 @@ export interface SaveMcpServerInput {
   commandOrUrl: string;
   args: string[];
   enabled: boolean;
+  /** Optional environment variables (use ${NAME} placeholders when possible). */
+  env?: Record<string, string>;
+  /** Optional HTTP headers for remote MCP (Authorization, X-Api-Key, …). */
+  headers?: Record<string, string>;
 }
 
 export interface PermissionGrant {
@@ -889,6 +981,68 @@ export interface UsageStatus {
   message: string;
 }
 
+export type BobalyticsScope = 'workspace' | 'team' | 'user'
+export type BobalyticsRangeDays = 7 | 30 | 90
+
+export interface BobalyticsDayPoint {
+  day: string
+  label: string
+  value: number
+}
+
+export interface BobalyticsTeamPoint {
+  id: string
+  name: string
+  activeSharePct: number
+  committedSharePct: number
+  spendSharePct: number
+  outputSharePct: number
+  typicalDayActivePct: number
+  highlight?: string
+}
+
+export interface BobalyticsReport {
+  generatedAt: string
+  greetingName: string
+  instanceLabel?: string
+  scope: BobalyticsScope
+  rangeDays: number
+  source: 'gateway' | 'local' | 'mixed'
+  message?: string
+  seats: number
+  today: {
+    tasksToday: number
+    streakDays: number
+    momentum: string
+    weeklyRhythm: BobalyticsDayPoint[]
+    peakDay?: BobalyticsDayPoint
+  }
+  kpis: {
+    avgDailyUsers: number
+    seats: number
+    adoptionPct: number
+    bobFactorPct?: number
+    bobcoins: number
+  }
+  patterns: {
+    activityDays: number
+    headline: string
+    body: string
+    reachHeadline: string
+    reachBody: string
+    bobUsers: number
+    bobUsersPct: number
+    typicalDayActive: number
+    typicalDayPct: number
+    usageFrequency: { weekly: number; light: number; inactive: number }
+    recordedSpend: number
+    committedLines?: number
+    insight: string
+    teams: BobalyticsTeamPoint[]
+    highlightedTeamId?: string
+  }
+}
+
 export interface PreviewEntry {
   name: string;
   path: string;
@@ -904,9 +1058,15 @@ export interface FilePreview {
   size: number;
   modifiedAt?: string;
   previewPath?: string;
+  /** Extra raster pages when available. */
+  previewPaths?: string[];
   content?: string;
   entries: PreviewEntry[];
   quickLook: boolean;
+  /** Pages/slides when known. */
+  pageCount?: number;
+  /** "page" | "slide" */
+  pageUnit?: string;
 }
 
 // ── IPC Events ────────────────────────────────────────────────

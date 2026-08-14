@@ -29,6 +29,11 @@ pub struct AppSettings {
     pub telemetry_enabled: bool,
     pub computer_use_enabled: bool,
     pub chrome_control_enabled: bool,
+    /// Confine bob run to the workspace (never pass `--trust`; no Computer Use / Chrome for the session).
+    pub sandbox_mode: bool,
+    /// When true, Bob Work may retrieve short excerpts from other conversations
+    /// (same project when applicable) to enrich the prompt — ChatGPT-style.
+    pub cross_conversation_context: bool,
 }
 
 impl Default for AppSettings {
@@ -43,7 +48,7 @@ impl Default for AppSettings {
             inspector_visible: true,
             font_size: 15,
             reduced_motion: false,
-            permission_policy: "always_ask".to_string(),
+            permission_policy: "ask_for_important".to_string(),
             launch_at_login: false,
             menu_bar_enabled: true,
             global_hotkey: None,
@@ -60,6 +65,8 @@ impl Default for AppSettings {
             telemetry_enabled: false,
             computer_use_enabled: false,
             chrome_control_enabled: false,
+            sandbox_mode: false,
+            cross_conversation_context: false,
         }
     }
 }

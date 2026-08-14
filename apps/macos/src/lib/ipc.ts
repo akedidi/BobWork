@@ -5,24 +5,60 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  Project, CreateProjectInput, UpdateProjectInput,
-  Conversation, CreateConversationInput, ConversationTransferSummary, Message, AddMessageInput,
-  Task, CreateTaskInput,
-  Plugin, CreatePluginInput, PluginExtensionStatus, PluginMcpStatus, PluginVersion, PluginVersionDiff,
-  Approval, ResolveApprovalInput,
+  Project,
+  CreateProjectInput,
+  UpdateProjectInput,
+  Conversation,
+  CreateConversationInput,
+  ConversationTransferSummary,
+  Message,
+  AddMessageInput,
+  Task,
+  CreateTaskInput,
+  Plugin,
+  CreatePluginInput,
+  PluginExtensionStatus,
+  PluginMcpStatus,
+  PluginMcpTestResult,
+  PluginResourceStatus,
+  PluginVersion,
+  PluginVersionDiff,
+  Approval,
+  ResolveApprovalInput,
   Artifact,
   AppSettings,
   MacosChromeControlStatus,
-  BobDetectionResult, CapabilityInfo,
-  Schedule, ScheduleRun, CreateScheduleInput,
-  ShellProfile, BobMode, TaskDetail, SearchResult, WorkspaceSkill, SaveSkillInput,
-  McpServer, SaveMcpServerInput, PermissionGrant, UsageStatus, FilePreview,
+  MacosComputerUseStatus,
+  BobDetectionResult,
+  CapabilityInfo,
+  BobAuthSnapshot,
+  Schedule,
+  ScheduleRun,
+  CreateScheduleInput,
+  ShellProfile,
+  BobMode,
+  ModeCatalogEntry,
+  TaskDetail,
+  SearchResult,
+  WorkspaceSkill,
+  SaveSkillInput,
+  McpServer,
+  SaveMcpServerInput,
+  PermissionGrant,
+  UsageStatus,
+  BobalyticsReport,
+  BobalyticsScope,
+  FilePreview,
 } from '@bob-work/shared-types';
 
 // ── Bob Commands ─────────────────────────────────────────────
 
 export const detectBob = () =>
   invoke<BobDetectionResult>('detect_bob');
+
+export const getBobAuthSnapshot = () =>
+  invoke<BobAuthSnapshot>('get_bob_auth_snapshot');
+
 
 export const getBobCapabilities = () =>
   invoke<Record<string, CapabilityInfo>>('get_bob_capabilities');
@@ -33,6 +69,18 @@ export const getBobProfile = (workspace?: string) =>
 export const getBobModes = (workspace?: string) =>
   invoke<BobMode[]>('get_bob_modes', { workspace });
 
+export const listModeMarketplace = (workspace?: string) =>
+  invoke<ModeCatalogEntry[]>('list_mode_marketplace', { workspace });
+
+export const installBobMode = (slug: string) =>
+  invoke<BobMode>('install_bob_mode', { slug });
+
+export const uninstallBobMode = (slug: string) =>
+  invoke<void>('uninstall_bob_mode', { slug });
+
+export const importBobModeYaml = (yaml: string) =>
+  invoke<BobMode>('import_bob_mode_yaml', { yaml });
+
 export const sendMessage = (params: {
   conversationId: string;
   message: string;
@@ -41,7 +89,7 @@ export const sendMessage = (params: {
   attachmentPaths?: string[];
   resumeTaskId?: string;
   approvedPluginIds?: string[];
-}) => invoke<{ sessionId: string; taskId: string; userMessageId: string }>('send_message', {
+}) => invoke<{ sessionId: string; taskId: string; userMessageId: string; awaitingApproval?: boolean }>('send_message', {
   conversationId: params.conversationId,
   message: params.message,
   mode: params.mode,
@@ -106,6 +154,8 @@ export interface RewindConversationResult {
 export const rewindConversationFromMessage = (conversationId: string, messageId: string) =>
   invoke<RewindConversationResult>('rewind_conversation_from_message', { conversationId, messageId });
 
+
+
 export const importConversations = (path: string) =>
   invoke<ConversationTransferSummary>('import_conversations', { path });
 
@@ -114,11 +164,67 @@ export type ConversationExportFormat = 'bob-work-export-v1' | 'chatgpt' | 'claud
 export const exportConversations = (path: string, format: ConversationExportFormat = 'bob-work-export-v1') =>
   invoke<ConversationTransferSummary>('export_conversations', { path, format });
 
-export const openMacosPrivacyPane = (pane: 'accessibility' | 'automation') =>
-  invoke<void>('open_macos_privacy_pane', { pane });
+export const openMacosPrivacyPane = (
+  pane: 'accessibility' | 'automation' | 'notifications' | 'microphone' | 'speech',
+) => invoke<void>('open_macos_privacy_pane', { pane });
+
+export interface VoiceDictationAvailability {
+  available: boolean;
+  reason?: 'unsupported_platform' | 'requires_app_bundle' | 'missing_usage_description' | 'executable_unavailable' | null;
+}
+
+export const getVoiceDictationAvailability = () =>
+  invoke<VoiceDictationAvailability>('get_voice_dictation_availability');
+
+export type NotificationAuthState =
+  | 'not_determined'
+  | 'denied'
+  | 'authorized'
+  | 'provisional'
+  | 'ephemeral'
+  | 'unavailable';
+
+export const isNotificationAuthGranted = (state: NotificationAuthState): boolean =>
+  state === 'authorized' || state === 'provisional' || state === 'ephemeral';
+
+export const getNotificationAuthState = () =>
+  invoke<NotificationAuthState>('notification_authorization_state');
+
+export const requestNotificationAuthorization = () =>
+  invoke<NotificationAuthState>('request_notification_authorization');
+
+export interface NotificationOpenTarget {
+  conversationId?: string | null
+  taskId?: string | null
+}
+
+export interface AppNotificationPayload {
+  id: string
+  title: string
+  body: string
+  kind: string
+  createdAt: string
+  taskId?: string | null
+  conversationId?: string | null
+}
+
+export const listAppNotifications = () =>
+  invoke<AppNotificationPayload[]>('list_app_notifications');
+
+export const takePendingNotificationOpen = () =>
+  invoke<NotificationOpenTarget | null>('take_pending_notification_open');
+
+export const requestAccessibilityPermission = () =>
+  invoke<boolean>('request_accessibility_permission');
+
+export const requestChromeAutomationPermission = () =>
+  invoke<string>('request_chrome_automation_permission');
 
 export const getChromeControlStatus = () =>
   invoke<MacosChromeControlStatus>('get_chrome_control_status');
+
+export const getComputerUseStatus = () =>
+  invoke<MacosComputerUseStatus>('get_computer_use_status');
 
 // ── Task Commands ─────────────────────────────────────────────
 
@@ -179,11 +285,23 @@ export const togglePlugin = (pluginId: string, enabled: boolean) =>
 export const getPluginMcpStatus = (pluginId: string) =>
   invoke<PluginMcpStatus[]>('get_plugin_mcp_status', { pluginId });
 
+export const testPluginMcp = (pluginId: string) =>
+  invoke<PluginMcpTestResult[]>('test_plugin_mcp', { pluginId });
+
 export const getPluginExtensionStatus = (pluginId: string) =>
   invoke<PluginExtensionStatus>('get_plugin_extension_status', { pluginId });
 
+export const getPluginResourceStatus = (pluginId: string) =>
+  invoke<PluginResourceStatus[]>('get_plugin_resource_status', { pluginId });
+
 export const validatePlugin = (manifest: unknown) =>
   invoke<{ valid: boolean; warnings: string[]; errors: string[]; riskLevel: string }>('validate_plugin', { manifest });
+
+export const exportPluginZip = (pluginId: string, destination: string) =>
+  invoke<void>('export_plugin_zip', { pluginId, destination });
+
+export const importPluginZip = (source: string) =>
+  invoke<Plugin>('import_plugin_zip', { source });
 
 // ── Approval Commands ─────────────────────────────────────────
 
@@ -201,14 +319,84 @@ export const getArtifact = (id: string) => invoke<Artifact | null>('get_artifact
 
 export const deleteArtifact = (id: string) => invoke<void>('delete_artifact', { id });
 
+export const registerExternalArtifact = (path: string, conversationId?: string) =>
+  invoke<Artifact | null>('register_external_artifact', {
+    path,
+    conversationId: conversationId ?? null,
+  });
+
 export const openArtifact = (id: string) => invoke<void>('open_artifact', { id });
 
 // ── Settings Commands ─────────────────────────────────────────
 
-export const getSettings = () => invoke<AppSettings>('get_settings');
+/** Matches Rust `AppSettings::default` — used for instant Settings paint before IPC. */
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  theme: 'system',
+  language: 'auto',
+  defaultMode: 'general_work',
+  sidebarWidth: 260,
+  inspectorWidth: 340,
+  sidebarVisible: true,
+  inspectorVisible: true,
+  fontSize: 15,
+  reducedMotion: false,
+  permissionPolicy: 'ask_for_important',
+  launchAtLogin: false,
+  menuBarEnabled: true,
+  globalInstructions: '',
+  maxTurns: 100,
+  maxCost: 0,
+  mcpEnabled: true,
+  subagentsEnabled: true,
+  webEnabled: true,
+  notificationsEnabled: true,
+  notifyTaskComplete: true,
+  voiceOnDevice: true,
+  taskRetentionDays: 30,
+  telemetryEnabled: false,
+  computerUseEnabled: false,
+  chromeControlEnabled: false,
+  sandboxMode: false,
+  crossConversationContext: false,
+}
 
-export const updateSettings = (settings: AppSettings) =>
-  invoke<void>('update_settings', { settings });
+/** In-memory settings so Settings UI can paint without waiting on IPC. */
+let cachedSettings: AppSettings | null = null
+let settingsInflight: Promise<AppSettings> | null = null
+
+export const peekCachedSettings = (): AppSettings | null => cachedSettings
+
+/** Cached settings if known, otherwise safe defaults for first paint. */
+export const resolveSettingsSnapshot = (): AppSettings =>
+  cachedSettings ?? DEFAULT_APP_SETTINGS
+
+export const getSettings = (options?: { force?: boolean }) => {
+  const force = options?.force === true
+  if (!force && cachedSettings) return Promise.resolve(cachedSettings)
+  if (!force && settingsInflight) return settingsInflight
+
+  const request = invoke<AppSettings>('get_settings').then(settings => {
+    cachedSettings = settings
+    return settings
+  })
+  if (!force) {
+    settingsInflight = request.finally(() => {
+      settingsInflight = null
+    })
+    return settingsInflight
+  }
+  return request
+}
+
+/** Kick off settings IPC as early as possible (call from app bootstrap). */
+export const warmSettingsCache = () => {
+  void getSettings().catch(() => undefined)
+}
+
+export const updateSettings = async (settings: AppSettings) => {
+  await invoke<void>('update_settings', { settings })
+  cachedSettings = settings
+}
 
 // ── System Commands ───────────────────────────────────────────
 
@@ -217,7 +405,56 @@ export const getAppInfo = () =>
 
 export const openDataDir = () => invoke<void>('open_data_dir');
 
+export type DatabaseBackup = {
+  name: string
+  path: string
+  createdAt: string
+  sizeBytes: number
+}
+
+export const createDatabaseBackup = () =>
+  invoke<DatabaseBackup>('create_database_backup')
+
+export const listDatabaseBackups = () =>
+  invoke<DatabaseBackup[]>('list_database_backups')
+
+export const restoreDatabaseBackup = (name: string) =>
+  invoke<void>('restore_database_backup', { name })
+
+export type CachePurgeResult = {
+  freedBytes: number
+  clearedPaths: string[]
+}
+
+export const purgeAppCache = () => invoke<CachePurgeResult>('purge_app_cache');
+
 export const exportDiagnostics = () => invoke<string>('export_diagnostics');
+
+export interface UpdateCheckResult {
+  currentVersion: string
+  available: boolean
+  version?: string | null
+  notes?: string | null
+  publishedAt?: string | null
+}
+
+export const checkForUpdates = () => invoke<UpdateCheckResult>('check_for_updates')
+
+export const installAvailableUpdate = () => invoke<void>('install_available_update')
+
+export const installBobShell = () => invoke<boolean>('install_bob_shell');
+
+export interface CreatePermissionGrantInput {
+  actionType: string;
+  resource: string;
+  scope: string;
+  scopeId?: string;
+  decision: string;
+  expiresAt?: string;
+}
+
+export const createPermissionGrant = (input: CreatePermissionGrantInput) =>
+  invoke<PermissionGrant>('create_permission_grant', { input });
 
 // ── Schedule Commands ─────────────────────────────────────────
 
@@ -293,6 +530,13 @@ export interface IntegrationConnectionStatus {
   deviceFlowAvailable: boolean;
   /** False when the provider token exists but lacks this integration's scopes. */
   scopeSatisfied: boolean;
+  /** Persisted MCP probe for the connector behind this integration. */
+  lastTest?: {
+    ok: boolean;
+    message: string;
+    testedAt: string;
+    tools?: string[];
+  } | null;
 }
 
 export interface OAuthClientConfig {
@@ -304,7 +548,8 @@ export interface OAuthStartResult {
   integrationId: string;
   authUrl: string;
   state: string;
-  mode: 'web' | 'device';
+  /** web = authorize page, device = device-flow code, setup = one-time Slack app create */
+  mode: 'web' | 'device' | 'setup';
   userCode?: string | null;
   verificationUri?: string | null;
 }
@@ -342,10 +587,15 @@ export const e2eConnectIntegration = (
   accountLabel,
 });
 
+
+
 export const disconnectIntegration = (integrationId: string) =>
   invoke<void>('disconnect_integration', { integrationId });
 
 export const getMcpServers = () => invoke<McpServer[]>('get_mcp_servers');
+
+export const testMcpServer = (name: string) =>
+  invoke<PluginMcpTestResult>('test_mcp_server', { name });
 
 export const saveMcpServer = (input: SaveMcpServerInput) =>
   invoke<void>('save_mcp_server', { input });
@@ -360,7 +610,14 @@ export const getPermissionGrants = () => invoke<PermissionGrant[]>('get_permissi
 
 export const revokePermissionGrant = (id: string) => invoke<void>('revoke_permission_grant', { id });
 
-export const getUsageStatus = () => invoke<UsageStatus>('get_usage_status');
+export const getUsageStatus = (force = false) =>
+  invoke<UsageStatus>('get_usage_status', { force });
+
+export const getBobalytics = (scope: BobalyticsScope = 'workspace', rangeDays: 7 | 30 | 90 = 30) =>
+  invoke<BobalyticsReport>('get_bobalytics', { scope, rangeDays });
+
+export const exportBobalytics = (path: string, scope: BobalyticsScope = 'workspace', rangeDays: 7 | 30 | 90 = 30) =>
+  invoke<void>('export_bobalytics', { path, scope, rangeDays });
 
 // ── Right-side file and browser preview ─────────────────────
 
@@ -370,5 +627,9 @@ export const prepareFilePreview = (path: string) =>
 export const allowComposerAttachments = (paths: string[]) =>
   invoke<string[]>('allow_composer_attachments', { paths });
 
+
 export const openPreviewResource = (target: string) =>
   invoke<void>('open_preview_resource', { target });
+
+export const revealInFileManager = (path: string) =>
+  invoke<void>('reveal_in_file_manager', { path });

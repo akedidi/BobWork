@@ -1,8 +1,8 @@
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::plugin::{
-    CreatePluginInput, Plugin, PluginExtensionStatus, PluginMcpStatus, PluginValidationResult,
-    PluginVersion, PluginVersionDiff,
+    CreatePluginInput, Plugin, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult,
+    PluginResourceStatus, PluginValidationResult, PluginVersion, PluginVersionDiff,
 };
 use crate::services::bob::BobService;
 use crate::services::plugin::PluginService;
@@ -35,6 +35,12 @@ fn sync_plugin_mcp(service: &BobService, plugin: &Plugin, enabled: bool) -> AppR
             enabled,
         )
         .map(|_| ())
+}
+
+fn mcp_sync_error(plugin_name: &str, error: AppError) -> AppError {
+    AppError::Plugin(format!(
+        "Sync MCP échouée pour « {plugin_name} » : {error}. Les outils du plugin ne sont pas prêts — vérifiez Bob Shell (`bob mcp`) puis réessayez d’activer le plugin."
+    ))
 }
 
 fn reconcile_plugin_tools(service: &BobService, previous: &Plugin, next: &Plugin) -> AppResult<()> {
@@ -77,11 +83,16 @@ fn switch_plugin_version(
         .get_by_id(db, plugin_id)?
         .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
     let next = service.activate_version(db, plugin_id, version)?;
+    // Keep the activated plugin even if Bob Shell MCP sync fails — otherwise
+    // Office builtins stay stuck on "Prête à être installée" forever.
+    // Retry MCP sync on the next install / toggle of this plugin.
     if let Err(error) = reconcile_plugin_tools(bob_service, &previous, &next) {
-        if let Ok(restored) = service.activate_version(db, plugin_id, &previous.version) {
-            let _ = reconcile_plugin_tools(bob_service, &next, &restored);
-        }
-        return Err(error);
+        tracing::warn!(
+            "Plugin {} switched to {} but MCP tools sync failed: {:?}",
+            plugin_id,
+            version,
+            error
+        );
     }
     Ok(next)
 }
@@ -89,33 +100,19 @@ fn switch_plugin_version(
 #[tauri::command]
 pub async fn get_plugins(
     db: State<'_, Database>,
-    bob_service: State<'_, BobService>,
+    _bob_service: State<'_, BobService>,
 ) -> Result<Vec<Plugin>, AppError> {
-    PluginService::new().sync_agentic_bundles(&db)?;
-    let plugins = PluginService::new().get_all(&db)?;
-    for plugin in plugins
-        .iter()
-        .filter(|plugin| plugin.install_state == "installed")
-    {
-        if PluginMcpService::has_servers(&plugin.manifest) {
-            let needs_install = PluginMcpService::bundle_dir(&plugin.manifest)
-                .and_then(|bundle_dir| {
-                    PluginMcpService::new().status(&plugin.id, &plugin.manifest, &bundle_dir)
-                })
-                .map(|servers| servers.iter().any(|server| !server.configured))
-                .unwrap_or(true);
-            if needs_install {
-                if let Err(error) = sync_plugin_mcp(&bob_service, plugin, true) {
-                    tracing::warn!(
-                        "Unable to reconcile MCP tools for plugin {}: {:?}",
-                        plugin.id,
-                        error
-                    );
-                }
-            }
-        }
+    let service = PluginService::new();
+    // Apply any staged built-in package bumps (e.g. 1.0 → 1.1) so the Plugins
+    // screen does not stay stuck on "Prête à être installée".
+    if let Err(error) = service.ensure_builtin_plugins(&db) {
+        tracing::warn!("Unable to refresh built-in plugins: {:?}", error);
     }
-    Ok(plugins)
+    service.sync_agentic_bundles(&db)?;
+    // Do not reconcile Bob MCP on list — each `bob mcp add-json` used to block
+    // the Plugins screen for ~1s per plugin (and forever when workspace-scoped
+    // mcp.json was missing). MCP is synced on install / toggle / version switch.
+    Ok(service.get_all(&db)?)
 }
 
 #[tauri::command]
@@ -177,7 +174,7 @@ pub async fn create_plugin(
     let plugin = PluginService::new().create(&db, input)?;
     if let Err(error) = sync_plugin_mcp(&bob_service, &plugin, true) {
         let _ = PluginService::new().uninstall(&db, &plugin.id);
-        return Err(error);
+        return Err(mcp_sync_error(&plugin.name, error));
     }
     Ok(plugin)
 }
@@ -244,7 +241,7 @@ pub async fn install_plugin(
         .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
     if let Err(error) = sync_plugin_mcp(&bob_service, &plugin, true) {
         let _ = PluginService::new().toggle(&db, &plugin_id, false);
-        return Err(error);
+        return Err(mcp_sync_error(&plugin.name, error));
     }
     Ok(())
 }
@@ -282,7 +279,7 @@ pub async fn toggle_plugin(
     if enabled {
         if let Err(error) = sync_plugin_mcp(&bob_service, &plugin, true) {
             let _ = PluginService::new().toggle(&db, &plugin_id, false);
-            return Err(error);
+            return Err(mcp_sync_error(&plugin.name, error));
         }
     }
     Ok(())
@@ -300,7 +297,57 @@ pub async fn get_plugin_mcp_status(
         return Ok(vec![]);
     }
     let bundle_dir = PluginMcpService::bundle_dir(&plugin.manifest)?;
-    PluginMcpService::new().status(&plugin.id, &plugin.manifest, &bundle_dir)
+    let tests = crate::services::connection_test::ConnectionTestService::new().list(&db)?;
+    let mut statuses = PluginMcpService::new().status(&plugin.id, &plugin.manifest, &bundle_dir)?;
+    for status in &mut statuses {
+        status.last_test = tests
+            .get(
+                &crate::services::connection_test::ConnectionTestService::plugin_mcp_key(
+                    &plugin_id, &status.id,
+                ),
+            )
+            .or_else(|| {
+                tests.get(
+                    &crate::services::connection_test::ConnectionTestService::mcp_key(&status.id),
+                )
+            })
+            .map(|record| record.summary());
+    }
+    Ok(statuses)
+}
+
+#[tauri::command]
+pub async fn test_plugin_mcp(
+    plugin_id: String,
+    db: State<'_, Database>,
+    bob_service: State<'_, BobService>,
+) -> Result<Vec<PluginMcpTestResult>, AppError> {
+    let plugin = PluginService::new()
+        .get_by_id(&db, &plugin_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
+    if !PluginMcpService::has_servers(&plugin.manifest) {
+        return Err(AppError::ValidationFailed(
+            "Ce plugin ne déclare aucun serveur MCP.".into(),
+        ));
+    }
+    let bundle_dir = PluginMcpService::bundle_dir(&plugin.manifest)?;
+    // Best-effort register in Bob Shell so status stays in sync after a successful probe.
+    if plugin.install_state == "installed" {
+        if let Err(error) = sync_plugin_mcp(&bob_service, &plugin, true) {
+            tracing::warn!(
+                "MCP sync before test for {} failed (probe continues): {:?}",
+                plugin_id,
+                error
+            );
+        }
+    }
+    let mut results = PluginMcpService::new().test(&plugin.id, &plugin.manifest, &bundle_dir)?;
+    let saved = crate::services::connection_test::ConnectionTestService::new()
+        .save_plugin_mcp_tests(&db, &plugin_id, &results)?;
+    for (result, record) in results.iter_mut().zip(saved.into_iter()) {
+        result.tested_at = Some(record.tested_at);
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -316,8 +363,78 @@ pub async fn get_plugin_extension_status(
 }
 
 #[tauri::command]
+pub async fn get_plugin_resource_status(
+    plugin_id: String,
+    db: State<'_, Database>,
+    bob_service: State<'_, BobService>,
+) -> Result<Vec<PluginResourceStatus>, AppError> {
+    let plugin = PluginService::new()
+        .get_by_id(&db, &plugin_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
+    PluginExtensionService::new().resource_status(&plugin.id, &plugin.manifest, &db, &bob_service)
+}
+
+#[tauri::command]
 pub async fn validate_plugin(
     manifest: serde_json::Value,
 ) -> Result<PluginValidationResult, AppError> {
     Ok(PluginService::new().validate(&manifest))
+}
+
+#[tauri::command]
+pub async fn export_plugin_zip(
+    plugin_id: String,
+    destination: String,
+    db: State<'_, Database>,
+) -> Result<(), AppError> {
+    let plugin = PluginService::new()
+        .get_by_id(&db, &plugin_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Plugin {plugin_id} not found")))?;
+    let bundle_dir = PluginMcpService::bundle_dir(&plugin.manifest)?;
+    crate::services::plugin_archive::PluginArchiveService::new()
+        .export_dir_to_zip(&bundle_dir, std::path::Path::new(&destination))
+}
+
+#[tauri::command]
+pub async fn import_plugin_zip(
+    source: String,
+    db: State<'_, Database>,
+    bob_service: State<'_, BobService>,
+) -> Result<Plugin, AppError> {
+    let bundle = crate::services::plugin_archive::PluginArchiveService::new()
+        .import_zip_to_skills(std::path::Path::new(&source))?;
+    let slug = bundle
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_string();
+    let service = PluginService::new();
+    let _ = service.sync_agentic_bundles(&db)?;
+    let plugin = service
+        .get_all(&db)?
+        .into_iter()
+        .find(|plugin| {
+            plugin
+                .manifest
+                .get("slug")
+                .and_then(|value| value.as_str())
+                == Some(slug.as_str())
+                || plugin.id == format!("agentic-{slug}")
+        })
+        .ok_or_else(|| {
+            AppError::Plugin(
+                "Import terminé mais aucun plugin détecté — vérifiez .bob-work-plugin.json dans l’archive."
+                    .into(),
+            )
+        })?;
+    if plugin.install_state == "installed" {
+        if let Err(error) = sync_plugin_mcp(&bob_service, &plugin, true) {
+            tracing::warn!(
+                "Plugin {} imported but MCP sync failed: {:?}",
+                plugin.id,
+                error
+            );
+        }
+    }
+    Ok(plugin)
 }

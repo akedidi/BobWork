@@ -9,16 +9,16 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use rand::RngCore;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::info;
-#[cfg(test)]
-use std::cell::RefCell;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 const VAULT_KEY_FILE: &str = ".vault.key";
 const VAULT_FILE: &str = "secrets.vault";
@@ -91,7 +91,9 @@ impl SecretVaultService {
             let mut bytes = vec![];
             File::open(&path)
                 .and_then(|mut file| file.read_to_end(&mut bytes))
-                .map_err(|error| AppError::Io(format!("Impossible de lire la clé du coffre : {}", error)))?;
+                .map_err(|error| {
+                    AppError::Io(format!("Impossible de lire la clé du coffre : {}", error))
+                })?;
             if bytes.len() == 32 {
                 let mut key = [0_u8; 32];
                 key.copy_from_slice(&bytes);
@@ -103,7 +105,10 @@ impl SecretVaultService {
         }
 
         std::fs::create_dir_all(Self::data_dir()?).map_err(|error| {
-            AppError::Io(format!("Impossible de préparer le dossier de secrets : {}", error))
+            AppError::Io(format!(
+                "Impossible de préparer le dossier de secrets : {}",
+                error
+            ))
         })?;
 
         let mut key = [0_u8; 32];
@@ -124,9 +129,14 @@ impl SecretVaultService {
     }
 
     fn cipher() -> AppResult<Aes256Gcm> {
-        Ok(Aes256Gcm::new_from_slice(&Self::load_or_create_key()?).map_err(|error| {
-            AppError::Security(format!("Impossible d’initialiser le coffre chiffré : {}", error))
-        })?)
+        Ok(
+            Aes256Gcm::new_from_slice(&Self::load_or_create_key()?).map_err(|error| {
+                AppError::Security(format!(
+                    "Impossible d’initialiser le coffre chiffré : {}",
+                    error
+                ))
+            })?,
+        )
     }
 
     fn read_secrets() -> AppResult<HashMap<String, String>> {
@@ -138,7 +148,9 @@ impl SecretVaultService {
         let mut blob = vec![];
         File::open(&path)
             .and_then(|mut file| file.read_to_end(&mut blob))
-            .map_err(|error| AppError::Io(format!("Impossible de lire le coffre chiffré : {}", error)))?;
+            .map_err(|error| {
+                AppError::Io(format!("Impossible de lire le coffre chiffré : {}", error))
+            })?;
 
         if blob.len() <= NONCE_LEN {
             return Err(AppError::Security("Le coffre chiffré est corrompu.".into()));
@@ -157,11 +169,17 @@ impl SecretVaultService {
 
     fn write_secrets(map: &HashMap<String, String>) -> AppResult<()> {
         std::fs::create_dir_all(Self::data_dir()?).map_err(|error| {
-            AppError::Io(format!("Impossible de préparer le dossier de secrets : {}", error))
+            AppError::Io(format!(
+                "Impossible de préparer le dossier de secrets : {}",
+                error
+            ))
         })?;
 
         let plaintext = serde_json::to_vec(map).map_err(|error| {
-            AppError::Serialization(format!("Impossible de sérialiser le coffre local : {}", error))
+            AppError::Serialization(format!(
+                "Impossible de sérialiser le coffre local : {}",
+                error
+            ))
         })?;
 
         let mut nonce_bytes = [0_u8; NONCE_LEN];
@@ -169,7 +187,9 @@ impl SecretVaultService {
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = Self::cipher()?
             .encrypt(nonce, plaintext.as_ref())
-            .map_err(|error| AppError::Security(format!("Impossible de chiffrer le coffre : {}", error)))?;
+            .map_err(|error| {
+                AppError::Security(format!("Impossible de chiffrer le coffre : {}", error))
+            })?;
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         blob.extend_from_slice(&nonce_bytes);
@@ -182,7 +202,10 @@ impl SecretVaultService {
         options.mode(0o600);
 
         let mut file = options.open(&path).map_err(|error| {
-            AppError::Io(format!("Impossible de sauvegarder le coffre chiffré : {}", error))
+            AppError::Io(format!(
+                "Impossible de sauvegarder le coffre chiffré : {}",
+                error
+            ))
         })?;
         file.write_all(&blob).map_err(|error| {
             AppError::Io(format!("Erreur d’écriture du coffre chiffré : {}", error))
@@ -229,7 +252,10 @@ impl SecretVaultService {
         let mut map = Self::read_secrets()?;
         map.insert(account.to_string(), secret.to_string());
         Self::write_secrets(&map)?;
-        info!("Stored secret for account '{}' in encrypted local vault", account);
+        info!(
+            "Stored secret for account '{}' in encrypted local vault",
+            account
+        );
         Ok(())
     }
 
@@ -248,13 +274,19 @@ impl SecretVaultService {
             } else {
                 Self::write_secrets(&map)?;
             }
-            info!("Deleted secret for account '{}' from encrypted local vault", account);
+            info!(
+                "Deleted secret for account '{}' from encrypted local vault",
+                account
+            );
         }
         Ok(())
     }
 
     pub fn exists(&self, account: &str) -> bool {
-        self.get(account).map(|value| value.is_some()).unwrap_or(false)
+        self.get(account)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.trim().is_empty())
     }
 }
 

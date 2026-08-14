@@ -65,6 +65,16 @@ pub struct PluginValidationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectionTestSummary {
+    pub ok: bool,
+    pub message: String,
+    pub tested_at: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginMcpStatus {
     pub id: String,
     pub name: String,
@@ -74,6 +84,20 @@ pub struct PluginMcpStatus {
     pub configured: bool,
     pub enabled: bool,
     pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test: Option<ConnectionTestSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMcpTestResult {
+    pub id: String,
+    pub name: String,
+    pub ok: bool,
+    pub message: String,
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tested_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,4 +153,26 @@ pub struct PluginExtensionStatus {
     pub browser_extensions: Vec<PluginBrowserStatus>,
     pub hooks: Vec<PluginHookStatus>,
     pub scheduled_task_templates: Vec<PluginScheduleTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginResourceStatus {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub optional: bool,
+    /// ready | needs_key | needs_setup | inactive | always_on
+    pub state: String,
+    pub message: String,
+    pub setup_hint: Option<String>,
+    /// integrations | apis | mcp — where the UI should send the user to configure this source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configure_tab: Option<String>,
+    /// Environment variable name when kind is api-key (e.g. FINNHUB_API_KEY).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_key: Option<String>,
+    /// Suggested HTTPS base URL when configuring via Intégrations → APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configure_url: Option<String>,
 }

@@ -97,6 +97,63 @@ export function getSuggestedBuiltinPluginId(path: string): string | null {
 }
 
 export function getActivePluginMention(text: string): string | null {
-  const match = text.match(/@plugin:([A-Za-z0-9-]+)/)
-  return match?.[1] ?? null
+  return getActivePluginMentions(text)[0] ?? null
+}
+
+/** Unique plugin ids mentioned in composer text, in appearance order. */
+export function getActivePluginMentions(text: string): string[] {
+  return uniqueMentions(text, /@plugin:([A-Za-z0-9-]+)/g)
+}
+
+/** Unique skill slugs mentioned in composer text, in appearance order. */
+export function getActiveSkillMentions(text: string): string[] {
+  return uniqueMentions(text, /@skill:([A-Za-z0-9._-]+)/g)
+}
+
+/** Unique MCP server names mentioned in composer text, in appearance order. */
+export function getActiveMcpMentions(text: string): string[] {
+  return uniqueMentions(text, /@mcp:([A-Za-z0-9._-]+)/g)
+}
+
+export type ComposerMentionChip =
+  | { kind: 'plugin'; id: string }
+  | { kind: 'skill'; id: string }
+  | { kind: 'mcp'; id: string }
+
+/** All @plugin / @skill / @mcp chips for the composer preview, first-seen order. */
+export function getActiveComposerMentions(text: string): ComposerMentionChip[] {
+  const chips: ComposerMentionChip[] = []
+  const seen = new Set<string>()
+  const pattern = /@(plugin|skill|mcp):([A-Za-z0-9._-]+)/g
+  for (const match of text.matchAll(pattern)) {
+    const kind = match[1] as ComposerMentionChip['kind']
+    const id = match[2]
+    const key = `${kind}:${id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    chips.push({ kind, id })
+  }
+  return chips
+}
+
+/** Remove one mention token (and a following space) from composer text. */
+export function removeComposerMention(text: string, kind: ComposerMentionChip['kind'], id: string): string {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?:^|\\s)@${kind}:${escaped}(?=\\s|$)`, 'g')
+  return text
+    .replace(pattern, match => (match.startsWith(' ') || match.startsWith('\n') ? match[0] : ''))
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^\s+/, '')
+}
+
+function uniqueMentions(text: string, pattern: RegExp): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const match of text.matchAll(pattern)) {
+    const id = match[1]
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }

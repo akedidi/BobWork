@@ -5,7 +5,7 @@
 **Status:** Draft  
 **Product Name (Working Title):** Bob Work
 
-> **Décision produit 0.1.4 (9 août 2026)** — Aucun secret Bob Work n’est stocké dans le Trousseau. Les anciennes exigences Keychain de ce brouillon sont remplacées par une clé de session non persistante.
+> **Décision produit 0.1.4+ (août 2026)** — Aucun secret Bob Work n’est stocké dans le Trousseau. La clé IBM Bob et les jetons manuels d’intégration vivent dans un **coffre local chiffré (AES-256-GCM)**, persistants jusqu’à effacement explicite, et sont injectés uniquement dans le processus `bob run`.
 
 ---
 
