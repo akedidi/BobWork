@@ -1249,7 +1249,7 @@ export function MessageBubble({
               </div>
             </div>
           ) : (
-            <div className="msg-user">{msg.content}</div>
+            <div className="msg-user" data-testid="chat-message-user">{msg.content}</div>
           )}
           {!isEditing && <MessageResources msg={msg} onOpen={onOpenResource} />}
         </div>

@@ -41,9 +41,9 @@ export default function HomeView() {
   }, [])
 
   const SUGGESTIONS = [
-    { icon: '📋', label: t('home.suggestionConsult'), mode: 'plan' },
-    { icon: '💼', label: t('home.suggestionSales'), mode: 'agent' },
-    { icon: '🧩', label: t('home.suggestionDelivery'), mode: 'agent' },
+    { id: 'consult', icon: '📋', label: t('home.suggestionConsult'), mode: 'plan' },
+    { id: 'sales', icon: '💼', label: t('home.suggestionSales'), mode: 'agent' },
+    { id: 'delivery', icon: '🧩', label: t('home.suggestionDelivery'), mode: 'agent' },
   ]
 
   return (
@@ -84,7 +84,7 @@ export default function HomeView() {
         {/* Suggestions List */}
           <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 12, padding: '0 12px' }}>
             {SUGGESTIONS.map(s => (
-              <div key={s.label} onClick={() => navigate('/chat', { state: { mode: s.mode, initialPrompt: s.label } })} style={{
+              <div key={s.id} data-testid={`home-suggestion-${s.id}`} onClick={() => navigate('/chat', { state: { mode: s.mode, initialPrompt: s.label } })} style={{
                 cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 16, fontSize: 14, color: 'var(--text-secondary)'
               }}>
                 <span style={{ fontSize: 16, opacity: 0.7 }}>{s.icon}</span>

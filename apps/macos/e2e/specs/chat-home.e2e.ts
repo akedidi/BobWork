@@ -1,4 +1,4 @@
-import { expect, $ } from '@wdio/globals'
+import { browser, expect, $ } from '@wdio/globals'
 import {
   clickNewProject,
   clickSidebar,
@@ -25,8 +25,15 @@ describe('Bob Work — accueil, composeur et file de chat', () => {
 
   it('envoie une suggestion d’accueil dans le chat', async () => {
     await clickSidebar('Nouveau chat')
-    await $('div*=Préparer un brief client ou un plan de transformation').click()
-    await expect($('div.msg-user*=Préparer un brief client')).toBeDisplayed({ wait: 12_000 })
+    await $('[data-testid="home-suggestion-consult"]').click()
+    await browser.waitUntil(async () => {
+      const sentPrompt = $('[data-testid="chat-message-user"]*=Préparer un brief client')
+      return sentPrompt.isDisplayed().catch(() => false)
+    }, {
+      timeout: 20_000,
+      interval: 200,
+      timeoutMsg: 'Le prompt de suggestion n’est pas apparu dans le chat',
+    })
     await waitForHomeChatIdle()
   })
 
