@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::{backup::Backup, params, Connection};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use tracing::info;
 
@@ -26,6 +26,23 @@ pub struct DatabaseBackup {
 }
 
 impl Database {
+    /// Acquire the shared SQLite connection without turning a panic in one
+    /// worker into a permanent crash loop for every later task. SQLite writes
+    /// are atomic and rusqlite transactions roll back while unwinding, so the
+    /// connection can safely be reused after recording the poisoned state.
+    pub fn connection(&self) -> MutexGuard<'_, Connection> {
+        match self.conn.lock() {
+            Ok(connection) => connection,
+            Err(poisoned) => {
+                tracing::error!(
+                    "SQLite mutex was poisoned by a panicking worker; recovering the connection"
+                );
+                self.conn.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn new(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path).map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -238,6 +255,26 @@ fn set_private_permissions(_path: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod backup_tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn poisoned_connection_lock_is_recovered_for_later_tasks() {
+        let database = Arc::new(Database::new_in_memory().expect("database"));
+        let worker_database = Arc::clone(&database);
+        let panicked = std::thread::spawn(move || {
+            let _connection = worker_database.conn.lock().expect("initial lock");
+            panic!("simulated worker panic");
+        })
+        .join();
+
+        assert!(panicked.is_err());
+        assert!(database.conn.is_poisoned());
+        database
+            .connection()
+            .execute("CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY)", [])
+            .expect("connection remains usable");
+        assert!(!database.conn.is_poisoned());
+    }
 
     #[test]
     fn backup_restore_round_trip_and_migrations() {

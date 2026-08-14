@@ -18,7 +18,7 @@ impl TaskService {
     }
 
     pub fn get_all(&self, db: &Database, project_id: Option<&str>) -> AppResult<Vec<Task>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let mut stmt = conn.prepare(
             "SELECT id, objective, project_id, conversation_id, mode, permission_policy,
              budget, max_time, bob_process_id, start_date, end_date, summary, progress,
@@ -43,7 +43,7 @@ impl TaskService {
     }
 
     pub fn get_by_id(&self, db: &Database, id: &str) -> AppResult<Option<Task>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let result = conn.query_row(
             "SELECT id, objective, project_id, conversation_id, mode, permission_policy,
              budget, max_time, bob_process_id, start_date, end_date, summary, progress,
@@ -68,7 +68,7 @@ impl TaskService {
             .clone()
             .unwrap_or_else(|| "always_ask".to_string());
 
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         conn.execute(
             "INSERT INTO tasks (id, objective, project_id, conversation_id, mode,
              permission_policy, budget, max_time, schedule_id, state, created_at, updated_at)
@@ -118,7 +118,7 @@ impl TaskService {
 
     pub fn update_state(&self, db: &Database, id: &str, state: &str) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let start_date = if matches!(state, "starting" | "running") {
             Some(now.clone())
         } else {
@@ -141,7 +141,7 @@ impl TaskService {
 
     pub fn set_pinned(&self, db: &Database, id: &str, pinned: bool) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let changed = conn.execute(
             "UPDATE tasks SET pinned = ?1, updated_at = ?2 WHERE id = ?3",
             params![pinned, now, id],
@@ -155,7 +155,7 @@ impl TaskService {
     pub fn start_run(&self, db: &Database, task_id: &str, session_id: &str) -> AppResult<TaskRun> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let attempt: i64 = conn.query_row(
             "SELECT coalesce(max(attempt), 0) + 1 FROM task_runs WHERE task_id = ?1",
             params![task_id],
@@ -199,7 +199,7 @@ impl TaskService {
     ) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
         let state = if success { "completed" } else { "failed" };
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         if let Some(run_id) = run_id {
             conn.execute(
                 "UPDATE task_runs SET state=?1, ended_at=?2, summary=?3, error=?4,
@@ -238,7 +238,7 @@ impl TaskService {
     ) -> AppResult<TaskEvent> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let sequence: i64 = conn.query_row(
             "SELECT coalesce(max(sequence), 0) + 1 FROM task_events WHERE task_id=?1",
             params![task_id],
@@ -284,7 +284,7 @@ impl TaskService {
     ) -> AppResult<TaskIo> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         conn.execute(
             "INSERT INTO task_io
              (id, task_id, run_id, direction, io_type, name, path_or_url, mime_type, size, sha256, metadata, created_at)
@@ -311,7 +311,7 @@ impl TaskService {
         let Some(task) = self.get_by_id(db, id)? else {
             return Ok(None);
         };
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
 
         let mut run_stmt = conn.prepare(
             "SELECT id,task_id,attempt,state,shell_session_id,shell_task_id,process_id,
@@ -410,7 +410,7 @@ impl TaskService {
         db: &Database,
         conversation_id: &str,
     ) -> AppResult<Vec<Task>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let mut stmt = conn.prepare(
             "SELECT id, objective, project_id, conversation_id, mode, permission_policy,
              budget, max_time, bob_process_id, start_date, end_date, summary, progress,
@@ -453,7 +453,7 @@ impl TaskService {
         db: &Database,
         conversation_id: &str,
     ) -> AppResult<()> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         conn.execute(
             "UPDATE tasks SET resumable = 0 WHERE conversation_id = ?1",
             params![conversation_id],

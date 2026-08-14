@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import { openPreviewResource, prepareFilePreview, revealInFileManager } from '../../lib/ipc'
 import type { FilePreview, TaskDetail } from '@bob-work/shared-types'
 import { errorMessage } from '../../lib/errorMessage'
-import { normalizeBrowserUrl } from '../../lib/browserNavigation'
+import { isLocalDevelopmentBrowserUrl, isTrustedEmbeddedBrowserUrl, normalizeBrowserUrl } from '../../lib/browserNavigation'
 
 function safeFileSrc(path: string) {
   try {
@@ -451,7 +451,7 @@ function PreviewContent({
       <iframe
         src={pdfSource || (preview.previewPath ? safeFileSrc(preview.previewPath) : '')}
         title={preview.name}
-        sandbox="allow-scripts allow-forms allow-modals"
+        sandbox=""
       />
     )
   } else if (preview.kind === 'image' || (preview.kind === 'office' && rasterSource)) {
@@ -519,7 +519,10 @@ function BrowserView({ tab, onUpdate }: { tab: PanelTab; onUpdate: (update: Part
     const target = normalizeBrowserUrl(address)
     onUpdate({ target, title: hostname(target), revision: tab.revision + 1 })
   }
-  const src = useMemo(() => tab.target || 'about:blank', [tab.target, tab.revision])
+  const normalizedTarget = useMemo(() => normalizeBrowserUrl(tab.target || ''), [tab.target])
+  const trustedForEmbedding = isTrustedEmbeddedBrowserUrl(normalizedTarget)
+  const localDevelopment = isLocalDevelopmentBrowserUrl(normalizedTarget)
+  const canOpenExternally = normalizedTarget !== 'about:blank'
   return <div className="workspace-browser">
     <div className="workspace-toolbar browser-toolbar">
       <button type="button" className="workspace-tool-btn" onClick={() => onUpdate({ revision: tab.revision + 1 })} title="Recharger" aria-label="Recharger">
@@ -529,16 +532,33 @@ function BrowserView({ tab, onUpdate }: { tab: PanelTab; onUpdate: (update: Part
       <button
         type="button"
         className="workspace-action-btn"
-        disabled={!tab.target?.startsWith('http')}
-        onClick={() => tab.target && openPreviewResource(tab.target)}
+        disabled={!canOpenExternally}
+        onClick={() => canOpenExternally && openPreviewResource(normalizedTarget)}
         title="Ouvrir dans le navigateur par défaut"
       >
         <PanelIcon kind="external" />
         <span>Navigateur</span>
       </button>
     </div>
-    <div className="browser-frame-wrap"><iframe key={`${src}-${tab.revision}`} src={src} title={tab.title} sandbox="allow-forms allow-modals allow-popups allow-scripts allow-same-origin" referrerPolicy="strict-origin-when-cross-origin" /></div>
-    <div className="browser-hint">Certains sites refusent l’affichage intégré. Utilisez « Navigateur » si la page reste vide.</div>
+    <div className="browser-frame-wrap">
+      {trustedForEmbedding ? (
+        <iframe
+          key={`${normalizedTarget}-${tab.revision}`}
+          src={normalizedTarget}
+          title={tab.title}
+          sandbox={localDevelopment
+            ? 'allow-forms allow-modals allow-popups allow-scripts allow-same-origin'
+            : 'allow-forms allow-scripts'}
+          referrerPolicy={localDevelopment ? 'strict-origin-when-cross-origin' : 'no-referrer'}
+        />
+      ) : (
+        <div className="workspace-empty">
+          <strong>Ouverture externe requise</strong>
+          <p>Pour protéger vos fichiers et sessions, Bob Work n’intègre que quelques sites de documentation approuvés. Ouvrez cette adresse dans votre navigateur.</p>
+        </div>
+      )}
+    </div>
+    <div className="browser-hint">Les pages localhost sont autorisées pour le développement. Les connexions et domaines externes non approuvés restent dans votre navigateur par défaut.</div>
   </div>
 }
 

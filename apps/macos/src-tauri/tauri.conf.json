@@ -29,7 +29,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob: https:; frame-src 'self' asset: http://asset.localhost https:; media-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'",
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob: https:; frame-src 'self' asset: http://asset.localhost http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://[::1]:* https://[::1]:* https://bob.ibm.com https://www.ibm.com https://github.com https://docs.github.com https://learn.microsoft.com https://support.microsoft.com https://developer.apple.com https://support.apple.com; media-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": {

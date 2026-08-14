@@ -78,7 +78,7 @@ impl SchedulerService {
     }
 
     pub fn get_all(&self, db: &Database) -> AppResult<Vec<Schedule>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let mut stmt = conn.prepare(
             "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,last_run,
              offline_behavior,overlap_policy,state,created_at,updated_at FROM schedules ORDER BY created_at DESC"
@@ -91,7 +91,7 @@ impl SchedulerService {
     }
 
     pub fn get_by_id(&self, db: &Database, id: &str) -> AppResult<Option<Schedule>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let result = conn.query_row(
             "SELECT id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,last_run,
              offline_behavior,overlap_policy,state,created_at,updated_at FROM schedules WHERE id=?1",
@@ -105,7 +105,7 @@ impl SchedulerService {
     }
 
     pub fn get_runs(&self, db: &Database, schedule_id: &str) -> AppResult<Vec<ScheduleRun>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let mut stmt = conn.prepare(
             "SELECT id,schedule_id,task_id,scheduled_for,state,started_at,ended_at,summary,error,created_at
              FROM schedule_runs WHERE schedule_id=?1 ORDER BY scheduled_for DESC LIMIT 100"
@@ -167,7 +167,7 @@ impl SchedulerService {
             .overlap_policy
             .clone()
             .unwrap_or_else(|| "queue".into());
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "INSERT INTO schedules (id,name,instructions,project_id,plugin_or_mode,cron_or_event,run_at,timezone,next_run,
              offline_behavior,overlap_policy,state,created_at,updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'active',?12,?12)",
@@ -185,7 +185,7 @@ impl SchedulerService {
             ));
         }
         let now = Utc::now().to_rfc3339();
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "UPDATE schedules SET state=?1,updated_at=?2 WHERE id=?3",
             params![state, now, id],
         )?;
@@ -208,7 +208,7 @@ impl SchedulerService {
     ) -> AppResult<()> {
         let now = Utc::now();
         let due_ids: Vec<String> = {
-            let conn = db.conn.lock().unwrap();
+            let conn = db.connection();
             let mut stmt = conn.prepare("SELECT id FROM schedules WHERE state='active' AND next_run IS NOT NULL AND next_run<=?1")?;
             let rows = stmt
                 .query_map(params![now.to_rfc3339()], |row| row.get(0))?
@@ -389,7 +389,7 @@ impl SchedulerService {
         let task_run = TaskService::new().start_run(db, &task.id, &session_id)?;
         let schedule_run_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "INSERT INTO schedule_runs (id,schedule_id,task_id,scheduled_for,state,started_at,created_at)
              VALUES (?1,?2,?3,?4,'running',?4,?4)", params![schedule_run_id,schedule.id,task.id,now]
         )?;
@@ -521,7 +521,7 @@ impl SchedulerService {
             let message = crate::services::permission_governance::unattended_preflight_message(
                 &settings.permission_policy,
             );
-            let _ = db.conn.lock().unwrap().execute(
+            let _ = db.connection().execute(
                 "UPDATE schedule_runs SET state='failed',ended_at=?1,error=?2 WHERE id=?3",
                 params![Utc::now().to_rfc3339(), message, schedule_run_id],
             );
@@ -563,7 +563,7 @@ impl SchedulerService {
                 trust_workspace,
             },
         ) {
-            let _ = db.conn.lock().unwrap().execute(
+            let _ = db.connection().execute(
                 "UPDATE schedule_runs SET state='failed',ended_at=?1,error=?2 WHERE id=?3",
                 params![Utc::now().to_rfc3339(), error.to_string(), schedule_run_id],
             );
@@ -592,7 +592,7 @@ impl SchedulerService {
             &schedule.timezone,
             schedule.run_at.as_deref(),
         );
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "UPDATE schedules SET last_run=?1,next_run=?2,updated_at=?1 WHERE id=?3",
             params![now, next, schedule.id],
         )?;
@@ -601,7 +601,7 @@ impl SchedulerService {
 
     fn record_skipped(&self, db: &Database, schedule: &Schedule, reason: &str) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "INSERT INTO schedule_runs (id,schedule_id,scheduled_for,state,ended_at,summary,created_at)
              VALUES (?1,?2,?3,'skipped',?3,?4,?3)", params![Uuid::new_v4().to_string(),schedule.id,now,reason]
         )?;
@@ -615,7 +615,7 @@ impl SchedulerService {
         message: &str,
     ) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "INSERT INTO schedule_runs (id,schedule_id,scheduled_for,state,ended_at,error,created_at)
              VALUES (?1,?2,?3,'failed',?3,?4,?3)", params![Uuid::new_v4().to_string(),schedule.id,now,message]
         )?;
@@ -627,7 +627,7 @@ impl SchedulerService {
         db: &Database,
         schedule_id: &str,
     ) -> AppResult<Vec<(String, Option<String>)>> {
-        let conn = db.conn.lock().unwrap();
+        let conn = db.connection();
         let mut stmt = conn.prepare(
             "SELECT t.id,t.bob_process_id FROM schedule_runs sr JOIN tasks t ON t.id=sr.task_id
              WHERE sr.schedule_id=?1 AND sr.state IN ('queued','running') AND t.state IN ('queued','starting','running','awaiting_info','awaiting_approval','paused')"
@@ -653,7 +653,7 @@ impl SchedulerService {
             let _ = TaskService::new().cancel(db, &task_id);
         }
         let now = Utc::now().to_rfc3339();
-        db.conn.lock().unwrap().execute(
+        db.connection().execute(
             "UPDATE schedule_runs SET state='cancelled',ended_at=?1,summary='Annulée par la politique de chevauchement' WHERE schedule_id=?2 AND state IN ('queued','running')",
             params![now,schedule_id],
         )?;

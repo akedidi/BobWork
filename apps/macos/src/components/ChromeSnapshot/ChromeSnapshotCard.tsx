@@ -1,4 +1,5 @@
 import type { ChromeSnapshot } from '../../lib/chromeSnapshot'
+import { isLocalDevelopmentBrowserUrl, isTrustedEmbeddedBrowserUrl } from '../../lib/browserNavigation'
 
 export function ChromeSnapshotCard({
   snapshot,
@@ -13,6 +14,8 @@ export function ChromeSnapshotCard({
   const open = () => {
     if (snapshot.url) onOpen?.(snapshot.url, snapshot.title)
   }
+  const trustedForEmbedding = Boolean(snapshot.url && isTrustedEmbeddedBrowserUrl(snapshot.url))
+  const localDevelopment = Boolean(snapshot.url && isLocalDevelopmentBrowserUrl(snapshot.url))
   return (
     <article className={`chrome-snapshot-card ${snapshot.pending ? 'is-pending' : ''} ${snapshot.failed ? 'is-failed' : ''}`}>
       <header className="chrome-snapshot-bar">
@@ -24,16 +27,20 @@ export function ChromeSnapshotCard({
         {snapshot.failed ? <span className="chrome-snapshot-state is-failed">Échec</span> : null}
       </header>
       <div className="chrome-snapshot-preview">
-        {snapshot.url ? (
+        {trustedForEmbedding ? (
           <iframe
             src={snapshot.url}
             title={snapshot.title}
-            sandbox="allow-scripts allow-same-origin allow-forms"
-            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox={localDevelopment
+              ? 'allow-forms allow-modals allow-popups allow-scripts allow-same-origin'
+              : 'allow-forms allow-scripts'}
+            referrerPolicy={localDevelopment ? 'strict-origin-when-cross-origin' : 'no-referrer'}
             tabIndex={-1}
           />
         ) : (
-          <span className="chrome-snapshot-empty">En attente de l’onglet Chrome…</span>
+          <span className="chrome-snapshot-empty">
+            {snapshot.url ? 'Aperçu externe protégé' : 'En attente de l’onglet Chrome…'}
+          </span>
         )}
       </div>
       <div className="chrome-snapshot-meta">
