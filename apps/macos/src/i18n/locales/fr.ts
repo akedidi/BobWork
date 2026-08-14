@@ -79,6 +79,7 @@ export const fr: MessageTree = {
     dictationRequiresApp: 'La dictée nécessite la véritable application Bob Work. Lancez l’application de développement empaquetée plutôt que l’exécutable Tauri seul.',
     dictationUnavailable: 'La dictée est indisponible dans cette version de Bob Work. Réinstallez ou reconstruisez l’application avant de réessayer.',
     dictationWebkitUnavailable: 'La dictée Apple n’est pas disponible dans cette version de WebKit. Activez la dictée macOS ou utilisez le collage vocal.',
+    dictationPermissionDenied: 'Bob Work ne peut pas accéder au microphone. Autorisez-le dans Réglages Système → Confidentialité et sécurité → Micro, puis réessayez. Détail : {{error}}',
     dictationStartFailed: 'Impossible de démarrer la dictée Apple : {{error}}',
     dictationLabel: 'Dictée Apple',
   },

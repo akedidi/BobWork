@@ -78,6 +78,7 @@ export const en = {
     dictationRequiresApp: 'Dictation needs the real Bob Work application bundle. Start the packaged development application instead of the bare Tauri executable.',
     dictationUnavailable: 'Dictation is unavailable in this Bob Work build. Reinstall or rebuild the application, then try again.',
     dictationWebkitUnavailable: 'Apple dictation is not available in this WebKit version. Enable macOS dictation or use voice paste.',
+    dictationPermissionDenied: 'Bob Work cannot access the microphone. Allow it in System Settings → Privacy & Security → Microphone, then try again. Details: {{error}}',
     dictationStartFailed: 'Could not start Apple dictation: {{error}}',
     dictationLabel: 'Apple dictation',
   },

@@ -383,6 +383,20 @@ export default function Composer({
       setDictationStarting(false)
       return
     }
+    // WebKit speech recognition does not reliably trigger TCC in a Tauri
+    // webview. Request and immediately release the microphone first so the
+    // signed application gets the macOS prompt and refusals are explicit.
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        stream.getTracks().forEach(track => track.stop())
+      } catch (error) {
+        await dialog.alert({ message: t('composer.dictationPermissionDenied', { error: errorMessage(error) }) })
+        dictationStartingRef.current = false
+        setDictationStarting(false)
+        return
+      }
+    }
     const SpeechRecognition = (window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionLike
       webkitSpeechRecognition?: new () => SpeechRecognitionLike
