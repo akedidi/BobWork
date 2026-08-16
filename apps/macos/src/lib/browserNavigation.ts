@@ -5,13 +5,6 @@ const EXPLICIT_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 // open in the user's browser instead of inheriting Bob Work's WebView process.
 const TRUSTED_EMBEDDED_HOSTS = new Set([
   'bob.ibm.com',
-  'www.ibm.com',
-  'github.com',
-  'docs.github.com',
-  'learn.microsoft.com',
-  'support.microsoft.com',
-  'developer.apple.com',
-  'support.apple.com',
 ])
 const LOCAL_DEVELOPMENT_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 

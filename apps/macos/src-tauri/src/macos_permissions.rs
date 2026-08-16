@@ -57,7 +57,7 @@ pub fn run_applescript(source: &str) -> Result<String, String> {
         .ok_or_else(|| "Impossible de créer NSAppleScript".to_string())?;
 
     let mut error_info: Option<Retained<NSDictionary<NSString, AnyObject>>> = None;
-    let descriptor = unsafe { script.executeAndReturnError(Some(&mut error_info)) };
+    let descriptor: Option<Retained<AnyObject>> = unsafe { objc2::msg_send_id![&script, executeAndReturnError: Some(&mut error_info)] };
 
     if let Some(info) = error_info {
         let message = unsafe {
@@ -70,7 +70,13 @@ pub fn run_applescript(source: &str) -> Result<String, String> {
         return Err(message);
     }
 
-    let text: Option<Retained<NSString>> = unsafe { msg_send![&*descriptor, stringValue] };
+    let text: Option<Retained<NSString>> = unsafe {
+        if let Some(desc) = descriptor {
+            msg_send![&*desc, stringValue]
+        } else {
+            None
+        }
+    };
     Ok(text.map(|s| s.to_string()).unwrap_or_default())
 }
 

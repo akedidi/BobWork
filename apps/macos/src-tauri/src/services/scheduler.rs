@@ -178,6 +178,51 @@ impl SchedulerService {
             .ok_or_else(|| AppError::NotFound(id))
     }
 
+    pub fn update(&self, db: &Database, id: &str, input: CreateScheduleInput) -> AppResult<Schedule> {
+        if input.name.trim().is_empty() || input.instructions.trim().is_empty() {
+            return Err(AppError::ValidationFailed(
+                "Le nom et les instructions sont obligatoires.".into(),
+            ));
+        }
+        let timezone = input
+            .timezone
+            .clone()
+            .unwrap_or_else(|| Self::system_timezone());
+        let run_at = input
+            .run_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(ref value) = run_at {
+            Self::parse_run_at(value).ok_or_else(|| {
+                AppError::ValidationFailed(
+                    "L’heure d’exécution doit être au format HH:MM (ex. 09:00).".into(),
+                )
+            })?;
+        }
+        let next_run = Self::compute_next_run(&input.cron_or_event, &timezone, run_at.as_deref())
+            .ok_or_else(|| {
+            AppError::ValidationFailed("Fréquence ou expression cron invalide.".into())
+        })?;
+        let now = Utc::now().to_rfc3339();
+        let offline_behavior = input
+            .offline_behavior
+            .clone()
+            .unwrap_or_else(|| "run_on_wake".into());
+        let overlap_policy = input
+            .overlap_policy
+            .clone()
+            .unwrap_or_else(|| "queue".into());
+        db.connection().execute(
+            "UPDATE schedules SET name=?1, instructions=?2, project_id=?3, plugin_or_mode=?4, cron_or_event=?5, run_at=?6, timezone=?7, next_run=?8, offline_behavior=?9, overlap_policy=?10, updated_at=?11 WHERE id=?12",
+            params![input.name, input.instructions, input.project_id, input.plugin_or_mode, input.cron_or_event, run_at, timezone, next_run, offline_behavior, overlap_policy, now, id],
+        )?;
+        self.get_by_id(db, id)?
+            .ok_or_else(|| AppError::NotFound(id.to_string()))
+    }
+
+
     pub fn update_state(&self, db: &Database, id: &str, state: &str) -> AppResult<()> {
         if !matches!(state, "active" | "paused" | "completed") {
             return Err(AppError::ValidationFailed(
@@ -355,7 +400,7 @@ impl SchedulerService {
             db,
             CreateConversationInput {
                 project_id: schedule.project_id.clone(),
-                title: format!("[Planifiée] {}", schedule.name),
+                title: "[Planifié]".to_string(),
                 conversation_type: Some("work".into()),
                 business_mode: Some(mode.clone()),
                 bob_mode: Some(mode.clone()),
@@ -489,6 +534,7 @@ impl SchedulerService {
             settings.sandbox_mode.then(|| "Mode sandbox Bob Work : reste strictement dans le workspace. Pas de contrôle bureau/Chrome ni de chemins hors workspace.".to_string()),
             (!integrations.is_empty()).then(|| format!("Intégrations locales disponibles, sans jamais afficher leurs secrets :\n{}", integrations.join("\n"))),
             plugin_invocation,
+            Some("Contrainte d'arrière-plan : Privilégiez les outils de recherche web silencieux (requêtes HTTP, outils internes). N'ouvrez pas l'interface graphique de Chrome ou d'autres applications visuelles, afin de ne pas perturber l'utilisateur, sauf si l'instruction le demande explicitement.".to_string()),
             Some(format!("Tâche planifiée « {} » :\n{}", schedule.name, schedule.instructions)),
         ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
 
@@ -545,7 +591,7 @@ impl SchedulerService {
         if let Err(error) = bob.start_streaming_session(
             app.clone(),
             session_id,
-            conversation.id,
+            conversation.id.clone(),
             mode,
             prompt,
             workspace,
@@ -578,6 +624,10 @@ impl SchedulerService {
             );
             return Err(error);
         }
+        
+        let _ = app.emit("conversation-updated", &conversation.id);
+        let _ = app.emit("task-updated", &task.id);
+
         info!(
             "Scheduled task {} launched as task {}",
             schedule.id, task.id

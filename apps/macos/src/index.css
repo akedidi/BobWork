@@ -544,7 +544,7 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 8%, var(--bg-surface));
   }
-  .composer-mention-chip-icon { flex-shrink: 0; }
+  .composer-mention-chip .composer-mention-chip-icon { flex-shrink: 0; width: 18px; height: 18px; border-radius: 4px; align-self: flex-start; margin-top: 0px; }
   .composer-mention-chip-copy {
     display: flex; flex-direction: column; gap: 0; min-width: 0; line-height: 1.15;
   }
@@ -621,7 +621,7 @@
     opacity: 1;
   }
   .composer-attachment--image {
-    width: 88px; height: 88px;
+    width: 48px; height: 48px;
     background: var(--bg-surface);
   }
   .composer-attachment-image {
@@ -1158,6 +1158,7 @@
     color: var(--text-secondary); cursor: pointer;
   }
   .filter-pill.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .filter-count { margin-left: 3px; opacity: .72; font-variant-numeric: tabular-nums; }
 
   .task-card {
     width: 100%; padding: 14px 16px; border-radius: var(--radius-md);

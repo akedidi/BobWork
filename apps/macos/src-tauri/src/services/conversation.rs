@@ -42,7 +42,7 @@ impl ConversationService {
                  SELECT 1 FROM messages m
                  WHERE m.conversation_id = c.id AND m.author = 'user'
                )
-             ORDER BY c.pinned DESC, c.date DESC
+             ORDER BY c.date DESC
              LIMIT 50",
         )?;
 
@@ -270,6 +270,7 @@ impl ConversationService {
     pub fn add_message(&self, db: &Database, input: AddMessageInput) -> AppResult<Message> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let is_user_prompt = input.author == "user";
 
         let attachments = input
             .attachments
@@ -290,6 +291,12 @@ impl ConversationService {
                 now,
             ],
         )?;
+        if is_user_prompt {
+            conn.execute(
+                "UPDATE conversations SET date = ?1 WHERE id = ?2",
+                params![now, input.conversation_id],
+            )?;
+        }
 
         Ok(Message {
             id,

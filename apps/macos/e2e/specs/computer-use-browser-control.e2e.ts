@@ -12,9 +12,7 @@ import {
   openSettingsTab,
   prepareMacosAutomationStepForE2e,
   registerMcpServer,
-  saveSettings,
   sendHomePrompt,
-  toggleSetting,
 } from '../helpers'
 
 const MCP_BROWSER = 'mcp-e2e-computer-use'
@@ -57,8 +55,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
 
   it('bloque la capacité browser (Accès web) quand le réglage est désactivé', async () => {
     await openSettingsTab('Accès et contrôle')
-    await toggleSetting('Accès web', false)
-    await saveSettings({ webEnabled: false })
+    await ensureSettingEnabled('Accès web', false)
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',
@@ -71,9 +68,8 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
 
   it('bloque la capacité chrome quand le réglage Contrôle de Chrome est désactivé', async () => {
     await openSettingsTab('Accès et contrôle')
-    await toggleSetting('Accès web', true)
-    await toggleSetting('Contrôle de Chrome', false)
-    await saveSettings({ webEnabled: true, chromeControlEnabled: false })
+    await ensureSettingEnabled('Accès web', true)
+    await ensureSettingEnabled('Contrôle de Chrome', false)
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',
@@ -85,9 +81,8 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
 
   it('autorise browser et chrome quand les réglages et le MCP sont actifs', async () => {
     await openSettingsTab('Accès et contrôle')
-    await toggleSetting('Accès web', true)
-    await toggleSetting('Contrôle de Chrome', true)
-    await saveSettings({ webEnabled: true, chromeControlEnabled: true })
+    await ensureSettingEnabled('Accès web', true)
+    await ensureSettingEnabled('Contrôle de Chrome', true)
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
       pluginId: 'agentic-cloud-architect-agent',

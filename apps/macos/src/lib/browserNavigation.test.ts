@@ -21,13 +21,10 @@ describe('normalizeBrowserUrl', () => {
 describe('isTrustedEmbeddedBrowserUrl', () => {
   it.each([
     'https://bob.ibm.com/docs',
-    'https://github.com/openai/codex',
-    'https://learn.microsoft.com/fr-fr/',
     'http://localhost:3000/',
     'http://dev:secret@localhost:3000/private',
     'https://127.0.0.1:8443/',
     'http://[::1]:5173/',
-    'https://reader:secret@github.com/private',
   ])('allows an explicitly trusted HTTPS documentation host: %s', value => {
     expect(isTrustedEmbeddedBrowserUrl(value)).toBe(true)
   })

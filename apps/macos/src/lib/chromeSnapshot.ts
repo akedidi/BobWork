@@ -22,7 +22,25 @@ export function chromeToolShortName(name?: string | null): string {
 }
 
 export function isChromeSnapshotTool(name?: string | null): boolean {
-  return CHROME_TOOLS.has(chromeToolShortName(name))
+  if (!name) return false
+  const shortName = chromeToolShortName(name)
+  if (CHROME_TOOLS.has(shortName)) return true
+  
+  // Also match MCP Chrome DevTools tools
+  if (name.includes('chrome-devtools') || name.includes('chrome_devtools')) {
+    return name.includes('capture_screenshot') || 
+           name.includes('navigate_page') || 
+           name.includes('new_page') || 
+           name.includes('evaluate_javascript') ||
+           name.includes('list_pages') ||
+           name.includes('click_element') ||
+           name.includes('type_text') ||
+           name.includes('scroll_page') ||
+           name.includes('inspect_element') ||
+           name.includes('browser_subagent') ||
+           name.includes('browser')
+  }
+  return false
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -111,7 +129,9 @@ export function extractChromeSnapshot(event: {
     ...(parsedContent ?? {}),
   })
   const url = fields.url
-  if (!url && event.eventType !== 'tool_started') return null
+  // Never create an empty placeholder card, and never treat native app URIs
+  // (spotify:, slack:, etc.) as Chrome pages.
+  if (!url || !/^https?:\/\//i.test(url)) return null
   const pending = event.eventType === 'tool_started'
   const failed = event.eventType === 'tool_error' || event.eventType === 'error'
   const hostname = (() => {

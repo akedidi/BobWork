@@ -119,7 +119,7 @@ pub fn run() {
             {
                 // Run AppleScript inside Bob Work so TCC attaches to the app,
                 // not python3/osascript used by MCP helpers.
-                macos_applescript_bridge::start();
+                macos_applescript_bridge::start(app_handle.clone());
                 macos_notifications::set_open_handler({
                     let app = app_handle.clone();
                     move |payload| {
@@ -162,6 +162,19 @@ pub fn run() {
                             services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
                         {
                             tracing::warn!("Unable to sync built-in Chrome MCP tools: {:?}", error);
+                        }
+                    }
+                    if settings.computer_use_enabled
+                        || services::computer_use_mcp::ComputerUseMcpService::new().is_configured()
+                    {
+                        // Always refresh server.py so background-control tools stay current.
+                        if let Err(error) =
+                            services::computer_use_mcp::ComputerUseMcpService::ensure_bundle()
+                        {
+                            tracing::warn!(
+                                "Unable to refresh Computer Use MCP script: {:?}",
+                                error
+                            );
                         }
                     }
                     if settings.computer_use_enabled {
@@ -237,6 +250,13 @@ pub fn run() {
 
             // Initialize task service
             let task_service = services::task::TaskService::new();
+            match task_service.recover_orphaned_runs(&app_handle.state::<db::Database>()) {
+                Ok(count) if count > 0 => tracing::warn!(
+                    "Recovered {count} orphaned Bob task(s) left active by a previous app exit"
+                ),
+                Err(error) => tracing::warn!("Unable to recover orphaned Bob tasks: {error:?}"),
+                _ => {}
+            }
             app_handle.manage(task_service);
 
             // Initialize artifact service
@@ -600,6 +620,7 @@ pub fn run() {
             // Schedule commands
             commands::schedule::get_schedules,
             commands::schedule::create_schedule,
+            commands::schedule::update_schedule,
             commands::schedule::update_schedule_state,
             commands::schedule::delete_schedule,
             commands::schedule::get_schedule_logs,

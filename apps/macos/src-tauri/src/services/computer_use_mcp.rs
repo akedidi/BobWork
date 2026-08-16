@@ -131,12 +131,21 @@ impl ComputerUseMcpService {
                 "Le contrôle de l’ordinateur n’est disponible que sur macOS.".into(),
             );
         }
-        #[cfg(target_os = "macos")]
+        // E2E / headless CI: never run NSAppleScript — TCC dialogs hang the async
+        // runtime and freeze every subsequent IPC call (settings, MCP list, chat).
+        #[cfg(feature = "e2e")]
+        {
+            return (
+                "denied".into(),
+                "E2E : sonde Accessibilité désactivée (pas de dialogue système).".into(),
+            );
+        }
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         {
             let (app_state, app_message) = crate::macos_permissions::accessibility_status_for_app();
             // Probe System Events from *this* process (NSAppleScript), never osascript.
             let runtime = Self::probe_in_process_accessibility();
-            match (app_state.as_str(), runtime.as_str()) {
+            return match (app_state.as_str(), runtime.as_str()) {
                 ("granted", "granted") => (
                     "granted".into(),
                     "Accessibilité OK pour Bob Work (les actions UI passent par Bob Work, pas python3).".into(),
@@ -148,12 +157,13 @@ impl ComputerUseMcpService {
                     ),
                 ),
                 _ => ("denied".into(), app_message),
-            }
+            };
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            ("unavailable".into(), "Non disponible.".into())
-        }
+        #[allow(unreachable_code)]
+        (
+            "unavailable".into(),
+            "Non disponible.".into(),
+        )
     }
 
     fn probe_in_process_accessibility() -> String {
@@ -209,7 +219,16 @@ mod tests {
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("open_app"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("list_apps"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("desktop_click"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("capture_screen"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("ui_click"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("ui_set_value"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("app_command"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("bring_to_front"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("MAX_VISUAL_CAPTURES = 3"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("formatOptions"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("frontmost_app"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("Telegram"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("open\", \"-g\""));
     }
 
     #[test]

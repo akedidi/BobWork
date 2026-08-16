@@ -623,6 +623,46 @@ mod tests {
         }
 
         #[test]
+        fn new_user_prompt_moves_conversation_to_top() {
+            let db = temp_db();
+            let svc = ConversationService::new();
+            let create = |title: &str| crate::models::conversation::CreateConversationInput {
+                project_id: None,
+                title: title.to_string(),
+                conversation_type: None,
+                business_mode: None,
+                bob_mode: None,
+            };
+            let first = svc.create(&db, create("Première")).expect("first");
+            let second = svc.create(&db, create("Deuxième")).expect("second");
+            for conversation in [&first, &second] {
+                svc.add_message(&db, AddMessageInput {
+                    conversation_id: conversation.id.clone(),
+                    author: "user".into(),
+                    content: "Prompt initial".into(),
+                    attachments: None,
+                    sources: None,
+                }).expect("initial prompt");
+            }
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute("UPDATE conversations SET date='2000-01-01T00:00:00Z' WHERE id=?1", [&first.id]).unwrap();
+                conn.execute("UPDATE conversations SET date='2001-01-01T00:00:00Z' WHERE id=?1", [&second.id]).unwrap();
+            }
+            assert_eq!(svc.get_all(&db, None).unwrap()[0].id, second.id);
+
+            svc.add_message(&db, AddMessageInput {
+                conversation_id: first.id.clone(),
+                author: "user".into(),
+                content: "Nouveau prompt".into(),
+                attachments: None,
+                sources: None,
+            }).expect("new prompt");
+
+            assert_eq!(svc.get_all(&db, None).unwrap()[0].id, first.id);
+        }
+
+        #[test]
         fn test_rewind_conversation_from_message_cancels_tasks() {
             use crate::services::bob::BobService;
             use std::path::PathBuf;

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   getProjects: vi.fn(),
   getConversations: vi.fn(),
   getTasks: vi.fn(),
+  createConversation: vi.fn(),
   updateConversation: vi.fn(),
   updateTaskPinned: vi.fn(),
 }))
@@ -22,6 +23,7 @@ vi.mock('../../lib/ipc', () => ({
   getProjects: mocks.getProjects,
   getConversations: mocks.getConversations,
   getTasks: mocks.getTasks,
+  createConversation: mocks.createConversation,
   updateConversation: mocks.updateConversation,
   updateTaskPinned: mocks.updateTaskPinned,
   searchWorkspace: vi.fn().mockResolvedValue([]),
@@ -158,6 +160,17 @@ describe('Sidebar', () => {
     mocks.getProjects.mockResolvedValue(projects)
     mocks.getConversations.mockResolvedValue(conversations)
     mocks.getTasks.mockResolvedValue([])
+    mocks.createConversation.mockResolvedValue({
+      id: 'conversation-new',
+      title: 'Nouvelle conversation',
+      type: 'chat',
+      businessMode: 'agent',
+      bobMode: 'agent',
+      date: '2026-08-15T12:00:00Z',
+      pinned: false,
+      localOnly: true,
+      archived: false,
+    })
     mocks.updateConversation.mockResolvedValue(undefined)
     mocks.updateTaskPinned.mockResolvedValue(undefined)
     useAppStore.setState({ projects, conversations, tasks: [], bobStatus: 'ready', notifications: [], notificationsOpen: false, unreadConversationIds: [] })
@@ -237,6 +250,71 @@ describe('Sidebar', () => {
 
     expect(projectsHeading.compareDocumentPosition(conversationsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByText('Documents')).not.toBeInTheDocument()
+  })
+
+  it('orders Conversations by last activity, including pinned chats', async () => {
+    const olderPinned = {
+      ...useAppStore.getState().conversations[0],
+      id: 'older-pinned',
+      title: 'Ancienne épinglée',
+      pinned: true,
+      date: '2026-08-14T10:00:00Z',
+    }
+    const newest = {
+      ...olderPinned,
+      id: 'newest-chat',
+      title: 'Nouvelle active',
+      pinned: false,
+      date: '2026-08-15T10:00:00Z',
+    }
+    mocks.getConversations.mockResolvedValue([olderPinned, newest])
+    useAppStore.setState({ conversations: [olderPinned, newest] })
+
+    render(<MemoryRouter><Sidebar /></MemoryRouter>)
+
+    await screen.findByText('Nouvelle active')
+    const recent = document.querySelector('[aria-label="Conversations récentes"]')!
+    const items = Array.from(recent.querySelectorAll('[data-conversation-location="recent"]'))
+    expect(items.map(item => item.getAttribute('data-conversation-id'))).toEqual(['newest-chat', 'older-pinned'])
+    expect(document.querySelector('[data-conversation-location="pinned"][data-conversation-id="older-pinned"]')).toBeTruthy()
+  })
+
+  it('does not display a distinct draft when Nouveau chat is clicked until a prompt is sent', async () => {
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+
+    await screen.findByText('Conversation locale')
+    fireEvent.click(screen.getByText('Nouveau chat'))
+
+    await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledTimes(1))
+    
+    // The conversation is created on the backend but deliberately omitted from the sidebar
+    // until it has actual content.
+    expect(useAppStore.getState().conversations.map(item => item.id)).not.toContain('conversation-new')
+  })
+
+  it('keeps a pinned conversation selected in both Épinglés and Conversations', async () => {
+    const pinnedConversation = {
+      ...useAppStore.getState().conversations[0],
+      pinned: true,
+    }
+    mocks.getConversations.mockResolvedValue([pinnedConversation])
+    useAppStore.setState({ conversations: [pinnedConversation] })
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(document.querySelector('[data-conversation-location="pinned"]')).toBeTruthy())
+    fireEvent.click(document.querySelector('[data-conversation-location="pinned"]')!)
+    await waitFor(() => {
+      expect(document.querySelector('[data-conversation-location="pinned"]')).toHaveClass('active')
+      expect(document.querySelector('[data-conversation-location="recent"]')).toHaveClass('active')
+    })
   })
 
   it('keeps Nouveau chat outside the scrollable conversation list', async () => {

@@ -135,15 +135,25 @@ impl ChromeMcpService {
                 "Installez Google Chrome pour utiliser le contrôle navigateur.".into(),
             );
         }
-        #[cfg(target_os = "macos")]
+        // E2E / headless CI: never talk to Chrome via AppleScript — Automation
+        // TCC prompts hang the Tokio runtime and freeze the whole app.
+        #[cfg(feature = "e2e")]
+        {
+            return (
+                "denied".into(),
+                "E2E : sonde Automatisation Chrome désactivée (pas de dialogue système).".into(),
+            );
+        }
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         {
             // In-process probe only so Automation lists Bob Work, never osascript.
-            crate::macos_permissions::probe_chrome_automation_in_process()
+            return crate::macos_permissions::probe_chrome_automation_in_process();
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            ("unavailable".into(), "Non disponible.".into())
-        }
+        #[allow(unreachable_code)]
+        (
+            "unavailable".into(),
+            "Non disponible.".into(),
+        )
     }
 }
 

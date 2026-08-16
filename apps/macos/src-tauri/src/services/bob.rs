@@ -1004,7 +1004,11 @@ impl BobService {
             }
 
             // Pass prompt as positional argument to ensure it doesn't wait on stdin EOF
-            cmd.arg(&prompt);
+            let mut final_prompt = prompt.clone();
+            if final_prompt.to_lowercase().contains("tableau") || final_prompt.to_lowercase().contains("comparatif") || final_prompt.to_lowercase().contains("comparer") {
+                final_prompt.push_str("\n\nNote de formatage : Utilise des tableaux Markdown standards (GFM) avec des sauts de ligne réels entre chaque ligne du tableau.");
+            }
+            cmd.arg(&final_prompt);
 
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1061,6 +1065,8 @@ impl BobService {
             let mut active_tools = HashMap::<String, ActiveTool>::new();
             let mut protocol_error: Option<String> = None;
             let mut applied_session_cost = 0.0;
+            let mut last_text_snapshot = String::new();
+            let mut separate_next_text = false;
 
             // Read stdout and stderr concurrently, emit tokens
             loop {
@@ -1149,16 +1155,42 @@ impl BobService {
                                             }
                                         }
 
-                                        if let Some(delta) = protocol.text_delta.as_deref() {
-                                            full_output.push_str(delta);
+                                        if let Some(raw_text) = protocol.text_delta.as_deref() {
+                                            let is_snapshot = protocol.payload
+                                                .get("type")
+                                                .and_then(|value| value.as_str()) == Some("message");
+                                            let mut delta = normalize_stream_text(
+                                                &mut last_text_snapshot,
+                                                raw_text,
+                                                is_snapshot,
+                                            );
+                                            if delta.is_empty() {
+                                                continue;
+                                            }
+                                            if separate_next_text
+                                                && !full_output.is_empty()
+                                                && !delta.starts_with(char::is_whitespace)
+                                            {
+                                                delta.insert_str(0, "\n\n");
+                                            }
+                                            separate_next_text = false;
+                                            full_output.push_str(&delta);
                                             let _ = app_handle.emit("bob-token", BobTokenEvent {
                                                 session_id: sid.clone(),
                                                 conversation_id: cid.clone(),
-                                                chunk: Self::redact_secrets(delta),
+                                                chunk: Self::redact_secrets(&delta),
                                                 is_final: false,
                                                 event_type: "text".to_string(),
                                                 task_id: task_id.clone(),
                                             });
+                                        }
+
+                                        if protocol.text_delta.is_none() && matches!(
+                                            protocol.event_type.as_str(),
+                                            "tool_started" | "tool_finished" | "tool_error"
+                                        ) {
+                                            last_text_snapshot.clear();
+                                            separate_next_text = true;
                                         }
 
                                         if protocol.event_type == "error" {
@@ -1253,7 +1285,7 @@ impl BobService {
                                                     task_id: task_id.clone(),
                                                     event_type: "analysis".to_string(),
                                                     title: Some("Analyse en cours".into()),
-                                                    content: Some(delta.trim().to_string()),
+                                                    content: Some(delta.to_string()),
                                                     tool_name: None,
                                                     payload: step.clone(),
                                                 };
@@ -1315,6 +1347,7 @@ impl BobService {
                                                 &app_handle,
                                                 &description,
                                                 task_id.as_deref(),
+                                                Some(cid.as_str()),
                                             );
                                         }
                                     } else if parsed.get("type").and_then(|v| v.as_str()) == Some("message") && parsed.get("role").and_then(|v| v.as_str()) == Some("assistant") {
@@ -1475,12 +1508,20 @@ impl BobService {
         }
 
         let mut generated = String::new();
+        let mut last_text_snapshot = String::new();
         for raw in String::from_utf8_lossy(&output.stdout).lines() {
             let clean = strip_ansi(raw);
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&clean) {
                 if let Some(event) = interpret_protocol_event(&value) {
                     if let Some(delta) = event.text_delta {
-                        generated.push_str(&delta);
+                        let is_snapshot = event.payload
+                            .get("type")
+                            .and_then(|value| value.as_str()) == Some("message");
+                        generated.push_str(&normalize_stream_text(
+                            &mut last_text_snapshot,
+                            &delta,
+                            is_snapshot,
+                        ));
                     }
                 }
             }
@@ -1659,6 +1700,26 @@ fn classify_line(line: &str) -> String {
         "token"
     }
     .to_string()
+}
+
+/// Bob Shell 2 emits assistant `message` events as growing snapshots, not
+/// token deltas. Convert `Je` → `Je vais` → `Je vais ouvrir` into
+/// `Je` + ` vais` + ` ouvrir` before sending it to the UI.
+fn normalize_stream_text(last_snapshot: &mut String, text: &str, is_snapshot: bool) -> String {
+    // Bob Shell releases do not agree on the event marker for assistant
+    // snapshots. Detect cumulative text from the content itself, while still
+    // accepting genuine token deltas (which do not start with the prior chunk).
+    let _protocol_claims_snapshot = is_snapshot;
+    let delta = if text.starts_with(last_snapshot.as_str()) {
+        text[last_snapshot.len()..].to_string()
+    } else if last_snapshot.starts_with(text) {
+        String::new()
+    } else {
+        text.to_string()
+    };
+    last_snapshot.clear();
+    last_snapshot.push_str(text);
+    delta
 }
 
 #[derive(Debug)]
@@ -2700,5 +2761,46 @@ mod tests {
         assert_eq!(started, "Aperçu Chrome : https://example.com");
         let finished = tool_activity_title("browser_snapshot", &json!({}), "finished");
         assert_eq!(finished, "Aperçu Chrome : onglet actif");
+    }
+
+    #[test]
+    fn cumulative_shell_messages_become_real_deltas() {
+        let mut snapshot = String::new();
+        let chunks = ["Je", "Je vais o", "Je vais ouvrir", "Je vais ouvrir Spotify"];
+        let rendered = chunks
+            .iter()
+            .map(|chunk| normalize_stream_text(&mut snapshot, chunk, true))
+            .collect::<String>();
+        assert_eq!(rendered, "Je vais ouvrir Spotify");
+    }
+
+    #[test]
+    fn cumulative_messages_are_detected_even_when_protocol_marker_is_wrong() {
+        let mut snapshot = String::new();
+        let chunks = ["L'access", "L'accessibilité est", "L'accessibilité est accordée."];
+        let rendered = chunks
+            .iter()
+            .map(|chunk| normalize_stream_text(&mut snapshot, chunk, false))
+            .collect::<String>();
+        assert_eq!(rendered, "L'accessibilité est accordée.");
+    }
+
+    #[test]
+    fn genuine_token_deltas_still_stream_normally() {
+        let mut snapshot = String::new();
+        let chunks = ["Spotify", " est", " ouvert"];
+        let rendered = chunks
+            .iter()
+            .map(|chunk| normalize_stream_text(&mut snapshot, chunk, false))
+            .collect::<String>();
+        assert_eq!(rendered, "Spotify est ouvert");
+    }
+
+    #[test]
+    fn snapshot_state_can_be_reset_between_tool_calls() {
+        let mut snapshot = String::new();
+        assert_eq!(normalize_stream_text(&mut snapshot, "J’ouvre Spotify.", true), "J’ouvre Spotify.");
+        snapshot.clear();
+        assert_eq!(normalize_stream_text(&mut snapshot, "Accessibilité OK.", true), "Accessibilité OK.");
     }
 }

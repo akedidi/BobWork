@@ -27,12 +27,12 @@ use tracing::{debug, info};
 // ── detect_bob ────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn detect_bob(bob_service: State<'_, BobService>) -> Result<BobDetectionResult, AppError> {
+pub async fn detect_bob(bob_service: State<'_, BobService>) -> Result<BobDetectionResult, AppError> {
     Ok(bob_service.detect())
 }
 
 #[tauri::command]
-pub fn get_bob_auth_snapshot(
+pub async fn get_bob_auth_snapshot(
     bob_service: State<'_, BobService>,
 ) -> Result<crate::services::bob::BobAuthSnapshot, AppError> {
     Ok(bob_service.auth_snapshot())
@@ -48,7 +48,7 @@ pub async fn get_bob_capabilities(
 }
 
 #[tauri::command]
-pub fn get_bob_profile(
+pub async fn get_bob_profile(
     workspace: Option<String>,
     bob_service: State<'_, BobService>,
 ) -> Result<ShellProfile, AppError> {
@@ -457,8 +457,9 @@ pub async fn send_message(
             sources: None,
         },
     )?;
-    // First user prompt makes the conversation listable in the sidebar.
-    let _ = app_handle.emit("conversation-updated", &conversation_id);
+    // The conversation list updates *after* the title is generated to avoid 
+    // flashing "Nouvelle conversation" before the summary is ready.
+    // let _ = app_handle.emit("conversation-updated", &conversation_id);
     let should_generate_title = conv_service
         .get_by_id(&db, &conversation_id)
         .ok()
@@ -811,6 +812,7 @@ pub async fn send_message(
             &app_handle,
             &approval.human_description,
             Some(task.id.as_str()),
+            Some(conversation_id.as_str()),
         );
         true
     } else {
@@ -841,6 +843,10 @@ pub async fn send_message(
             generate_first_prompt_title(title_app_handle, title_conversation_id, title_prompt)
                 .await;
         });
+    } else {
+        // If we are not generating a title (e.g. subsequent prompts), 
+        // emit the update immediately so the sidebar sorts by recent activity.
+        let _ = app_handle.emit("conversation-updated", &conversation_id);
     }
 
     // 8. Return session_id so the frontend can correlate events
@@ -853,7 +859,7 @@ pub async fn send_message(
 }
 
 fn is_automatic_title_placeholder(title: &str) -> bool {
-    matches!(title.trim(), "" | "Nouvelle conversation" | "Nouveau chat")
+    matches!(title.trim(), "" | "Nouvelle conversation" | "Nouveau chat" | "[Planifié]")
 }
 
 async fn generate_first_prompt_title(
@@ -878,15 +884,24 @@ async fn generate_first_prompt_title(
 
     let db = app_handle.state::<Database>();
     let service = ConversationService::new();
-    let still_automatic = service
+    let current_title = service
         .get_by_id(&db, &conversation_id)
         .ok()
         .flatten()
-        .is_some_and(|conversation| is_automatic_title_placeholder(&conversation.title));
-    if !still_automatic {
+        .map(|c| c.title)
+        .unwrap_or_default();
+
+    if !is_automatic_title_placeholder(&current_title) {
         return;
     }
-    if service.update_title(&db, &conversation_id, &title).is_ok() {
+
+    let final_title = if current_title.trim() == "[Planifié]" {
+        format!("[Planifié] {}", title)
+    } else {
+        title
+    };
+
+    if service.update_title(&db, &conversation_id, &final_title).is_ok() {
         let _ = app_handle.emit("conversation-updated", &conversation_id);
     }
 }
@@ -1011,7 +1026,7 @@ fn build_prompt_with_history(
         )),
         (!web_enabled).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette demande.".to_string()),
         sandbox_mode.then(|| "Mode sandbox Bob Work : reste strictement dans le workspace fourni. N’accède pas au bureau macOS, à Chrome, ni à des chemins hors workspace. N’utilise pas --trust / hors périmètre.".to_string()),
-        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, desktop_click, desktop_type, press_key). N’exécute jamais `osascript`, `python3` ni un script Terminal pour piloter l’UI — macOS demanderait alors une permission à python3/osascript. Si Accessibilité est refusée ou l’arbre UI est vide, arrête-toi et demande d’autoriser **Bob Work** (pas python3, pas Terminal) dans Réglages Système → Confidentialité et sécurité → Accessibilité, ou Réglages Bob Work → Accès et contrôle → Demander Accessibilité. Les URI d’app (`open spotify:…`) restent acceptables.".to_string()),
+        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, press_key). Style ChatGPT Work : reste dans Bob Work et pilote les apps en arrière-plan. open_app sans activate (défaut). Préfère get_app_state puis ui_click / ui_set_value / app_command — sans focus_app. N’appelle focus_app ni bring_to_front=true qu’en dernier recours (fenêtre masquée, saisie clavier globale indispensable). Ne vérifie pas que frontmost=true avant d’agir. Si l’arbre AX est pauvre, capture_screen sans bring_to_front (max 3). Jamais d’action dans Bob Work ou ChatGPT. Ne raconte pas chaque micro-action. N’utilise jamais un aperçu Chrome pour une app Mac ni une URI non HTTP(S). N’exécute jamais osascript/python3/Terminal pour piloter l’UI. Si Accessibilité ou Enregistrement de l’écran est refusé, demande d’autoriser **Bob Work**.".to_string()),
         chrome_control_enabled.then(|| "Contrôle Chrome Bob Work : utilise uniquement bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, demande d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation.".to_string()),
         (!integration_context.is_empty()).then(|| format!("Intégrations locales disponibles (utilise les variables d’environnement nommées, sans jamais les afficher) :\n{}", integration_context.join("\n"))),
     ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");

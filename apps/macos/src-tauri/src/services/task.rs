@@ -17,6 +17,30 @@ impl TaskService {
         Self
     }
 
+    /// A Bob Shell child cannot be reattached after the desktop host exits.
+    /// Close those orphaned runs at startup instead of showing an eternal
+    /// spinner/reflection for a session that no longer exists in memory.
+    pub fn recover_orphaned_runs(&self, db: &Database) -> AppResult<usize> {
+        let now = Utc::now().to_rfc3339();
+        let message = "Bob Work a été interrompu pendant l’exécution. Relancez la tâche.";
+        let errors = serde_json::json!([message]).to_string();
+        let conn = db.connection();
+        let changed = conn.execute(
+            "UPDATE tasks
+             SET state='failed', end_date=?1, updated_at=?1, last_event_at=?1,
+                 errors=?2, bob_process_id=NULL
+             WHERE state IN ('starting','running')",
+            params![now, errors],
+        )?;
+        conn.execute(
+            "UPDATE task_runs
+             SET state='failed', ended_at=?1, error=?2
+             WHERE state='running'",
+            params![now, message],
+        )?;
+        Ok(changed)
+    }
+
     pub fn get_all(&self, db: &Database, project_id: Option<&str>) -> AppResult<Vec<Task>> {
         let conn = db.connection();
         let mut stmt = conn.prepare(
@@ -492,5 +516,33 @@ impl TaskService {
             updated_at: row.get(20)?,
             pinned: row.get::<_, bool>(21).unwrap_or(false),
         })
+    }
+}
+
+#[cfg(test)]
+mod orphan_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn active_run_from_previous_process_is_failed_at_startup() {
+        let db = Database::new_in_memory().expect("database");
+        db.run_migrations().expect("migrations");
+        let service = TaskService::new();
+        let task = service.create(&db, CreateTaskInput {
+            objective: "Action bureau".into(),
+            project_id: None,
+            conversation_id: None,
+            mode: Some("agent".into()),
+            permission_policy: None,
+            budget: None,
+            max_time: None,
+            schedule_id: None,
+        }).expect("task");
+        service.start_run(&db, &task.id, "stale-session").expect("run");
+
+        assert_eq!(service.recover_orphaned_runs(&db).expect("recover"), 1);
+        let recovered = service.get_by_id(&db, &task.id).unwrap().unwrap();
+        assert_eq!(recovered.state, "failed");
+        assert!(recovered.bob_process_id.is_none());
     }
 }

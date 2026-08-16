@@ -306,6 +306,10 @@ export default function SettingsView() {
     setComputerUseLoading(true)
     setChromeError(null)
     setComputerUseError(null)
+    // When this tab is open, refresh status cards — but never auto-probe MCP
+    // tools on every toggle. Those probes spawn python and can stall UI work;
+    // tools are listed when the user clicks « Revérifier » or when status loads
+    // after enable below with a fire-and-forget that must not block IPC.
     getChromeControlStatus()
       .then(status => {
         setChromeError(null)
@@ -327,12 +331,12 @@ export default function SettingsView() {
       })
       .finally(() => setComputerUseLoading(false))
     if (settings?.computerUseEnabled) {
-      testMcpServer('bob-work-computer-use').then(setComputerUseTools).catch(() => setComputerUseTools(null))
+      void testMcpServer('bob-work-computer-use').then(setComputerUseTools).catch(() => setComputerUseTools(null))
     } else {
       setComputerUseTools(null)
     }
     if (settings?.chromeControlEnabled) {
-      testMcpServer('bob-work-chrome-control').then(setChromeTools).catch(() => setChromeTools(null))
+      void testMcpServer('bob-work-chrome-control').then(setChromeTools).catch(() => setChromeTools(null))
     } else {
       setChromeTools(null)
     }

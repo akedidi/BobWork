@@ -492,6 +492,7 @@ dependencies = [
  "block2",
  "chrono",
  "chrono-tz",
+ "core-graphics",
  "cron",
  "dirs 5.0.1",
  "dotenvy",

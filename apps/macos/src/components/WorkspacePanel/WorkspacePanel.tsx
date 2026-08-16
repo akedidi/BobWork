@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent }
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { open as chooseFile } from '@tauri-apps/plugin-dialog'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { openPreviewResource, prepareFilePreview, revealInFileManager } from '../../lib/ipc'
 import type { FilePreview, TaskDetail } from '@bob-work/shared-types'
 import { errorMessage } from '../../lib/errorMessage'
@@ -457,7 +458,7 @@ function PreviewContent({
   } else if (preview.kind === 'image' || (preview.kind === 'office' && rasterSource)) {
     body = <img src={rasterSource} alt={`Aperçu de ${preview.name} — ${pageLabel} ${safePage}`} />
   } else if (preview.kind === 'markdown') {
-    body = <div className="markdown-preview"><ReactMarkdown>{preview.content ?? ''}</ReactMarkdown></div>
+    body = <div className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.content ?? ''}</ReactMarkdown></div>
   } else if (preview.kind === 'text') {
     body = <pre className="text-preview">{preview.content}</pre>
   } else {

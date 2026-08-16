@@ -31,6 +31,15 @@ pub async fn update_schedule_state(
 }
 
 #[tauri::command]
+pub async fn update_schedule(
+    id: String,
+    input: CreateScheduleInput,
+    db: State<'_, Database>,
+) -> Result<Schedule, AppError> {
+    SchedulerService::new().update(&db, &id, input)
+}
+
+#[tauri::command]
 pub async fn delete_schedule(id: String, db: State<'_, Database>) -> Result<(), AppError> {
     SchedulerService::new().delete(&db, &id)
 }

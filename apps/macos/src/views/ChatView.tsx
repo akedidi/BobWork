@@ -10,6 +10,7 @@ import { Copy, Check, Pencil } from 'lucide-react'
 import Composer from '../components/Composer/Composer'
 import WorkspacePanel, { type PanelActivity, type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   sendMessage, stopTask,
   getConversation, getMessages, createConversation, updateConversation, getTaskDetail, cancelTask, getTasks, getPlugin,
@@ -242,6 +243,9 @@ export default function ChatView() {
           setConversationPinned(conv.pinned)
           setBobMode(conv.bobMode ?? 'agent')
         }
+        const activeTask = latestActiveTaskForConversation(allTasks, id)
+        const ownsInFlightPrompt = runningRef.current
+          && activeSessionRef.current?.conversationId === id
         setMsgs(prev => {
           const loaded = messages.map(m => ({
             id: m.id,
@@ -253,7 +257,9 @@ export default function ChatView() {
             attachments: m.attachments,
             sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
           }))
-          const optimistic = prev.filter(p => p.state !== 'done' && !loaded.some(l => l.content === p.content))
+          const optimistic = (activeTask || ownsInFlightPrompt)
+            ? prev.filter(p => p.state !== 'done' && !loaded.some(l => l.content === p.content))
+            : []
           return [...loaded, ...optimistic]
         })
         // Backfill gallery for files Bob already wrote (e.g. Desktop PPTX).
@@ -263,7 +269,9 @@ export default function ChatView() {
             void registerExternalArtifact(path, id).catch(() => {})
           }
         }
-        if (id) {
+        // A newly-created conversation can finish this load before send_message
+        // has created its task. Do not let that short window cancel the local run.
+        if (id && !(ownsInFlightPrompt && !activeTask)) {
           applyActiveTaskForConversation(
             id,
             allTasks,
@@ -389,9 +397,6 @@ export default function ChatView() {
 
   // ── Subscribe to Tauri Bob events ────────────────────────────
   const subscribeToSession = useCallback(async (conversationId: string) => {
-    // Clean up any previous listeners
-    unlistenRef.current.forEach(fn => fn())
-    unlistenRef.current = []
 
     const matchesActiveSession = (payload: { sessionId: string; conversationId: string }) => {
       const active = activeSessionRef.current
@@ -407,6 +412,7 @@ export default function ChatView() {
 
       if (event.payload.eventType === 'thought' && event.payload.chunk) {
         setThinkingText(current => appendThinkingText(current, event.payload.chunk))
+        return
       }
 
       // Keep protocol/stderr errors out of the reply body — shown as a footer on done.
@@ -431,6 +437,10 @@ export default function ChatView() {
         })
         return
       }
+
+      // Activities have their own Reflection/panel rendering. Never duplicate
+      // them into the assistant answer body.
+      if (!['text', 'token', 'tool_use'].includes(event.payload.eventType)) return
 
       setMsgs(prev => {
         const streaming = prev.find(m => m.state === 'streaming')
@@ -566,6 +576,9 @@ export default function ChatView() {
       // The Rust side already saves it via bob-session-done handler — no duplicate needed
     })
 
+    // Clean up any listeners that were active previously or created by a concurrent
+    // execution of subscribeToSession before we swap to the new ones.
+    unlistenRef.current.forEach(fn => fn())
     unlistenRef.current = [unToken, unActivity, unDone]
   }, [])
 
@@ -599,6 +612,24 @@ export default function ChatView() {
           setThinkingText('')
           unlistenRef.current.forEach(fn => fn())
           unlistenRef.current = []
+          // The final session event can race with listener registration. The
+          // terminal task state is authoritative, so replace any stale
+          // "Réflexion" placeholder with messages already persisted by Rust.
+          getMessages(convId).then(messages => {
+            if (disposed) return
+            setMsgs(messages.map(message => ({
+              id: message.id,
+              role: (message.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+              content: message.content,
+              ts: message.createdAt,
+              state: 'done' as const,
+              persisted: true,
+              attachments: message.attachments,
+              sources: mergeMessageSources(message.sources, sourcesFromLocalPaths(message.content)),
+            })))
+          }).catch(error => {
+            if (!disposed) setLoadError(error)
+          })
         })
         .catch(() => {})
     }).then(fn => {
@@ -685,6 +716,11 @@ export default function ChatView() {
       }
     }
 
+    // Claim the new route before its asynchronous history request resolves.
+    // Otherwise that initial empty result can arrive after the optimistic first
+    // prompt and erase it from the view while the backend is starting the task.
+    activeSessionRef.current = { conversationId: cid, sessionId: null }
+
     const mentionedPluginIds = Array.from(text.matchAll(/@plugin:([A-Za-z0-9-]+)/g), match => match[1])
     const approvedPluginIds: string[] = []
     for (const pluginId of mentionedPluginIds) {
@@ -723,8 +759,6 @@ export default function ChatView() {
         }
       } catch { /* the backend performs the authoritative plugin check */ }
     }
-    activeSessionRef.current = { conversationId: cid, sessionId: null }
-
     try {
       // Install listeners before invoking the backend. Bob Shell can emit its
       // first JSONL records before the Tauri command returns its session id.
@@ -1267,7 +1301,7 @@ export function MessageBubble({
       <div className="msg-assistant prose">
         {msg.content && (
           <div style={isHardError ? { color: 'var(--danger)' } : undefined}>
-            <ReactMarkdown components={{ a: ({ href, children }) => <a href={href} onClick={event => {
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} onClick={event => {
               if (!href) return
               event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
             }}>{children}</a> }}>{linkifyLocalFilePaths(msg.content)}</ReactMarkdown>
@@ -1417,10 +1451,26 @@ export function appendThinkingText(current: string, chunk: string): string {
   if (!current) return next
   if (current === next || current.endsWith(next)) return current
   if (next.startsWith(current)) return next
-  if (next.length <= 48 && !next.includes('\n') && !current.endsWith('\n')) {
-    return `${current} ${next}`.replace(/\s{2,}/g, ' ').trim()
+
+  for (let i = Math.min(current.length, next.length); i > 0; i--) {
+    if (current.endsWith(next.slice(0, i))) {
+      return current + next.slice(i)
+    }
   }
-  return `${current}\n${next}`
+
+  let combined = ""
+  if (next.length <= 48 && !next.includes('\n') && !current.endsWith('\n')) {
+    combined = `${current} ${next}`.replace(/\s{2,}/g, ' ').trim()
+  } else {
+    combined = `${current}\n${next}`
+  }
+  
+  // Collapse adjacent duplicated words to handle LLM streaming hiccups
+  combined = combined.replace(/(\b\w+\b)(?:\s+\1\b)+/gi, '$1')
+  // Also handle exact substrings that are glued together like "JeJe" -> "Je"
+  combined = combined.replace(/([a-zA-Z]{2,})\1+/gi, '$1')
+  
+  return combined
 }
 
 export function latestThinkingLine(text: string): string {

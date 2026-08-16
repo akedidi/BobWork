@@ -100,7 +100,7 @@ pub fn needs_unattended_preflight(policy: &str, risk: &RiskContext, has_user_gra
 
 pub fn unattended_preflight_message(policy: &str) -> String {
     format!(
-        "Politique « {} » : une tâche planifiée ne peut pas afficher de carte d’approbation. Enregistrez la clé IBM Bob dans le coffre (Réglages → IBM Bob), accordez une autorisation persistante « Toujours », ou choisissez « Ne jamais demander ».",
+        "Politique « {} » : une tâche planifiée ne peut pas afficher de carte d'approbation. Pour autoriser l'exécution en arrière-plan, allez dans Réglages → Autorisations et choisissez la politique « Toujours » (ou « Ne jamais demander » pour bloquer silencieusement).",
         policy_label(policy)
     )
 }

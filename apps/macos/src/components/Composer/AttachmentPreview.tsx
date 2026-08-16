@@ -52,8 +52,8 @@ export default function AttachmentPreview({ path, onRemove }: Props) {
           <img
             src={convertFileSrc(path)}
             alt={name}
-            width={72}
-            height={72}
+            width={48}
+            height={48}
             draggable={false}
             onError={() => setPreviewFailed(true)}
           />

@@ -44,6 +44,20 @@ describe('chromeSnapshot', () => {
     expect(snap?.text).toContain('illustrative')
   })
 
+  it('ignores empty previews and native application URIs', () => {
+    expect(extractChromeSnapshot({
+      eventType: 'tool_started',
+      toolName: 'browser_snapshot',
+      title: 'Aperçu Chrome…',
+      payload: {},
+    })).toBeNull()
+    expect(extractChromeSnapshot({
+      eventType: 'tool_finished',
+      toolName: 'browser_snapshot',
+      payload: { url: 'spotify:search:Me Gustas Tu Manu Chao' },
+    })).toBeNull()
+  })
+
   it('upgrades a pending snapshot when the tool finishes', () => {
     const pending = extractChromeSnapshot({
       eventType: 'tool_started',

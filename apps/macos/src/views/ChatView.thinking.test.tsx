@@ -12,6 +12,8 @@ import { useAppStore } from '../stores/appStore'
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: Record<string, unknown> }) => unknown>(),
   sendMessage: vi.fn(),
+  getMessages: vi.fn(),
+  getTasks: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -31,12 +33,12 @@ vi.mock('../lib/ipc', () => ({
   sendMessage: mocks.sendMessage,
   stopTask: vi.fn().mockResolvedValue(undefined),
   getConversation: vi.fn().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false }),
-  getMessages: vi.fn().mockResolvedValue([]),
+  getMessages: mocks.getMessages,
   createConversation: vi.fn(),
   updateConversation: vi.fn().mockResolvedValue(undefined),
   getTaskDetail: vi.fn().mockResolvedValue(null),
   cancelTask: vi.fn().mockResolvedValue(undefined),
-  getTasks: vi.fn().mockResolvedValue([]),
+  getTasks: mocks.getTasks,
   getBobModes: vi.fn().mockResolvedValue([
     { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'test' },
   ]),
@@ -86,6 +88,8 @@ describe('Chat live thinking', () => {
     useAppStore.setState({ builderSession: null })
     mocks.listeners.clear()
     mocks.sendMessage.mockReset().mockResolvedValue({ sessionId: 'session-1', taskId: 'task-1' })
+    mocks.getMessages.mockReset().mockResolvedValue([])
+    mocks.getTasks.mockReset().mockResolvedValue([])
   })
 
   it('shows reasoning below the dotted loader while Bob is working', async () => {
@@ -117,6 +121,35 @@ describe('Chat live thinking', () => {
 
     expect(screen.getByText(/Je vérifie la structure du projet/)).toBeVisible()
     expect(screen.getByRole('status', { name: 'Réflexion en cours' })).toBeVisible()
+  })
+
+  it('replaces infinite reflection with the persisted reply when the task finishes', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Ouvre Spotify' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    expect(await screen.findByText('Analyse de la demande…')).toBeVisible()
+
+    mocks.getMessages.mockResolvedValue([{
+      id: 'assistant-final',
+      conversationId: 'conv-1',
+      author: 'assistant',
+      content: 'Spotify est ouvert.',
+      attachments: [], sources: [], citations: [], toolsUsed: [], sendState: 'sent', errors: [],
+      associatedArtifacts: [], associatedApprovals: [], createdAt: '2026-08-15T01:00:00Z',
+    }])
+    mocks.getTasks.mockResolvedValue([])
+    await waitFor(() => expect(mocks.listeners.has('task-updated')).toBe(true))
+    await act(async () => {
+      await mocks.listeners.get('task-updated')?.({ payload: { id: 'task-1' } })
+    })
+
+    expect(await screen.findByText('Spotify est ouvert.')).toBeVisible()
+    expect(screen.queryByText('Analyse de la demande…')).not.toBeInTheDocument()
   })
 })
 

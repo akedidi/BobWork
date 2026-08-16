@@ -120,6 +120,12 @@ export default function TasksView() {
     if (filter === 'done') return DONE_STATES.includes(task.state)
     return true
   }), [tasks, filter])
+  const filterCounts = useMemo(() => ({
+    all: tasks.length,
+    pinned: tasks.filter(task => task.pinned).length,
+    active: tasks.filter(task => ACTIVE_STATES.includes(task.state)).length,
+    done: tasks.filter(task => DONE_STATES.includes(task.state)).length,
+  }), [tasks])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -130,7 +136,9 @@ export default function TasksView() {
 
       <div style={{ padding: '0 20px 12px', display: 'flex', gap: 6 }}>
         {([['all', t('tasks.filterAll')], ['pinned', t('tasks.filterPinned')], ['active', t('tasks.filterActive')], ['done', t('tasks.filterDone')]] as const).map(([key, label]) => (
-          <button key={key} className={`filter-pill ${filter === key ? 'active' : ''}`} onClick={() => setFilter(key)}>{label}</button>
+          <button key={key} className={`filter-pill ${filter === key ? 'active' : ''}`} onClick={() => setFilter(key)}>
+            {label} <span className="filter-count">{filterCounts[key]}</span>
+          </button>
         ))}
       </div>
 

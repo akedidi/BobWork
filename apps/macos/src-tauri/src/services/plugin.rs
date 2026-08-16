@@ -2343,14 +2343,14 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-computer-use",
             name: "Computer Use",
-            version: "1.0.2",
-            description: "Ouvre et pilote des apps Mac (Telegram, etc.) : lire l’écran, cliquer et taper via Accessibilité.",
+            version: "1.0.5",
+            description: "Contrôle n’importe quelle app Mac en arrière-plan : ouvrir, lire l’UI, cliquer, saisir via Accessibilité (style ChatGPT Work).",
             category: "executable",
             manifest: serde_json::json!({
                 "name": "Computer Use",
                 "slug": "bob-work-computer-use",
-                "version": "1.0.2",
-                "description": "Ouvre et pilote des apps Mac (Telegram, etc.) : lire l’écran, cliquer et taper via Accessibilité.",
+                "version": "1.0.5",
+                "description": "Contrôle n’importe quelle app Mac en arrière-plan : ouvrir, lire l’UI, cliquer, saisir via Accessibilité (style ChatGPT Work).",
                 "category": "executable",
                 "builtin": true,
                 "icon": "computer",
@@ -2366,7 +2366,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "tiers": [
                         {"id": "T3", "kind": "local-mcp", "provider": "bob-work-computer-use", "required": true, "activation": "Réglages → Contrôle de l’ordinateur"}
                     ],
-                    "designNotes": "Le MCP global bob-work-computer-use est installé quand le réglage est activé (comme Chrome). Pas de simulation : Accessibilité macOS requise pour cliquer/taper ; open_app fonctionne via /usr/bin/open."
+                    "designNotes": "MCP global bob-work-computer-use pour tout le bureau macOS (pas une app précise). Background-first : ui_click / ui_set_value / app_command sans voler le focus. Accessibilité requise ; open_app via /usr/bin/open -g."
                 },
                 "browserExtensions": [{
                     "id": "desktop",
@@ -2377,18 +2377,19 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                 }],
                 "specializedMode": {
                     "label": "Mode Computer Use",
-                    "description": "Contrôle local du Mac : applications, fenêtres, clics et saisie via le MCP bob-work-computer-use.",
+                    "description": "Contrôle local de n’importe quelle application Mac via le MCP bob-work-computer-use, sans forcer le premier plan.",
                     "inputExtensions": [],
                     "outputFormats": ["md"],
                     "allowedTools": [
                         "accessibility_status", "list_apps", "open_app", "focus_app",
-                        "get_app_state", "desktop_click", "desktop_type", "press_key", "use_mcp_tool"
+                        "get_app_state", "ui_click", "ui_set_value", "app_command",
+                        "capture_screen", "desktop_click", "desktop_type", "press_key", "use_mcp_tool"
                     ],
                     "preferredLibraries": [],
-                    "workflow": "1) Vérifier accessibility_status. 2) open_app (ex. Telegram). 3) get_app_state pour lire l’UI. 4) desktop_click / desktop_type / press_key. 5) Confirmer le résultat. Demander confirmation avant actions destructrices.",
+                    "workflow": "1) accessibility_status. 2) open_app sans activate (toute app Mac). 3) get_app_state. 4) ui_click / ui_set_value / app_command en arrière-plan. 5) focus_app seulement en dernier recours. 6) Vérifier le résultat.",
                     "sandbox": "macos-accessibility"
                 },
-                "instructions": "Mode Computer Use Bob Work. Le serveur MCP `bob-work-computer-use` doit être actif (Réglages → Accès et contrôle → Contrôle de l’ordinateur). Outils : accessibility_status, list_apps, open_app, focus_app, get_app_state, desktop_click, desktop_type, press_key.\n\nN’exécute jamais `osascript`, `python3` ni un script Terminal pour piloter l’UI — la permission Accessibilité doit aller à l’app **Bob Work**, pas à python3. Si Accessibilité est refusée ou l’arbre UI est vide, demande d’autoriser Bob Work dans Réglages Système → Confidentialité et sécurité → Accessibilité (ou Réglages Bob Work → Demander Accessibilité), puis réessaie. Exemple Telegram : open_app({app:\"Telegram\"}) puis get_app_state({app:\"Telegram\"}) avant toute saisie. Ne simule jamais une action réussie si l’outil renvoie ok:false. Reste sur le Mac local ; pas d’upload d’écran cloud."
+                "instructions": "Mode Computer Use Bob Work (style ChatGPT Work). MCP `bob-work-computer-use` requis. Tu contrôles n’importe quelle app macOS (Messages, Finder, Slack, Spotify, Notes, Terminal, etc.) — pas seulement une app précise.\n\nOutils : accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, press_key.\n\nReste dans Bob Work : ne vole pas le focus. open_app sans activate. Préfère ui_click / ui_set_value / app_command. focus_app et bring_to_front=true seulement si indispensable. Ne exige pas frontmost=true. Si l’arbre AX est pauvre, une capture sans focus (max 3). Pas de clic dans Bob Work/ChatGPT. Pas d’aperçu Chrome pour une app Mac. Pas d’osascript/python3/Terminal. Autorisations Accessibilité + Enregistrement d’écran pour Bob Work."
             }),
         },
         BuiltinPlugin {

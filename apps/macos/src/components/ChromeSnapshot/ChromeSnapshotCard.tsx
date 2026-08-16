@@ -10,6 +10,9 @@ export function ChromeSnapshotCard({
   onOpen?: (url: string, title?: string) => void
 }) {
   const t = useT()
+  // Persisted activity from native apps may predate the extractor guard.
+  // Native schemes and empty snapshots must never become Chrome cards.
+  if (!/^https?:\/\//i.test(snapshot.url)) return null
   const hostname = (() => {
     try { return snapshot.url ? new URL(snapshot.url).hostname : '' } catch { return '' }
   })()

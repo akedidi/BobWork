@@ -8,8 +8,7 @@ use crate::models::workspace::{
 use crate::services::bob::BobService;
 use crate::services::bob_analytics::BobAnalyticsService;
 use crate::services::workspace::WorkspaceService;
-use tauri::State;
-
+use tauri::{Manager, State};
 #[tauri::command]
 pub async fn search_workspace(
     query: String,
@@ -141,28 +140,43 @@ pub async fn revoke_permission_grant(id: String, db: State<'_, Database>) -> Res
 }
 
 #[tauri::command]
-pub fn get_usage_status(
+pub async fn get_usage_status(
     force: Option<bool>,
-    db: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<UsageStatus, AppError> {
-    Ok(WorkspaceService::new().usage_status_with_refresh(&db, force.unwrap_or(false)))
+    tokio::task::spawn_blocking(move || {
+        let db = app.state::<Database>();
+        WorkspaceService::new().usage_status_with_refresh(&db, force.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| AppError::Unknown(e.to_string()))
 }
 
 #[tauri::command]
-pub fn get_bobalytics(
+pub async fn get_bobalytics(
     scope: Option<String>,
     range_days: Option<i64>,
-    db: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<BobalyticsReport, AppError> {
-    BobAnalyticsService::new().report(&db, BobalyticsQuery { scope, range_days })
+    tokio::task::spawn_blocking(move || {
+        let db = app.state::<Database>();
+        BobAnalyticsService::new().report(&db, BobalyticsQuery { scope, range_days })
+    })
+    .await
+    .map_err(|e| AppError::Unknown(e.to_string()))?
 }
 
 #[tauri::command]
-pub fn export_bobalytics(
+pub async fn export_bobalytics(
     path: String,
     scope: Option<String>,
     range_days: Option<i64>,
-    db: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    BobAnalyticsService::new().export_csv(&db, BobalyticsQuery { scope, range_days }, &path)
+    tokio::task::spawn_blocking(move || {
+        let db = app.state::<Database>();
+        BobAnalyticsService::new().export_csv(&db, BobalyticsQuery { scope, range_days }, &path)
+    })
+    .await
+    .map_err(|e| AppError::Unknown(e.to_string()))?
 }

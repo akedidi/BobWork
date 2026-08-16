@@ -234,6 +234,7 @@ pub fn notify_approval_required<R: Runtime>(
     app: &AppHandle<R>,
     description: &str,
     task_id: Option<&str>,
+    conversation_id: Option<&str>,
 ) {
     push_notification(
         app,
@@ -241,7 +242,7 @@ pub fn notify_approval_required<R: Runtime>(
         description,
         "approval",
         task_id,
-        None,
+        conversation_id,
         false,
     );
 }

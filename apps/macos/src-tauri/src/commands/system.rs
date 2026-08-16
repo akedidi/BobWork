@@ -335,12 +335,16 @@ pub async fn export_diagnostics(
 
 #[tauri::command]
 pub async fn get_chrome_control_status() -> Result<MacosChromeControlStatus, AppError> {
-    Ok(ChromeMcpService::new().status())
+    tokio::task::spawn_blocking(|| ChromeMcpService::new().status())
+        .await
+        .map_err(|error| AppError::Io(format!("Statut Chrome indisponible : {error}")))
 }
 
 #[tauri::command]
 pub async fn get_computer_use_status() -> Result<MacosComputerUseStatus, AppError> {
-    Ok(ComputerUseMcpService::new().status())
+    tokio::task::spawn_blocking(|| ComputerUseMcpService::new().status())
+        .await
+        .map_err(|error| AppError::Io(format!("Statut Computer Use indisponible : {error}")))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

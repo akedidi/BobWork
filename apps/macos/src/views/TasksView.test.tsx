@@ -54,8 +54,22 @@ describe('TasksView pinning', () => {
     render(<MemoryRouter><TasksView /></MemoryRouter>)
 
     await screen.findByText('Préparer le rapport client')
-    fireEvent.click(screen.getByRole('button', { name: 'Épinglées' }))
+    fireEvent.click(screen.getByRole('button', { name: /Épinglées/ }))
     expect(screen.getByText('Préparer le rapport client')).toBeVisible()
+  })
+
+  it('makes the difference between all tasks and history explicit', async () => {
+    mocks.getTasks.mockResolvedValue([
+      task,
+      { ...task, id: 'task-2', objective: 'Tâche en cours', state: 'running' },
+    ])
+    render(<MemoryRouter><TasksView /></MemoryRouter>)
+
+    expect(await screen.findByRole('button', { name: 'Toutes 2' })).toBeVisible()
+    const history = screen.getByRole('button', { name: 'Historique 1' })
+    fireEvent.click(history)
+    expect(screen.getByText('Préparer le rapport client')).toBeVisible()
+    expect(screen.queryByText('Tâche en cours')).not.toBeInTheDocument()
   })
 
   it('updates the open detail when navigation targets another task', async () => {

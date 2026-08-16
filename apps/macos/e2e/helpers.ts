@@ -301,11 +301,16 @@ export async function registerMcpServer(
   env?: Record<string, string>,
 ) {
   await clickSidebar('Intégrations et MCP')
-  const serversTab = $('button=Serveurs MCP')
+  const serversTab = $(
+    '//button[normalize-space()="Serveurs MCP" or normalize-space()="MCP servers" or normalize-space()="Servidores MCP"]',
+  )
   await serversTab.waitForClickable({ timeout: 10_000 })
   await serversTab.click()
   const nameInput = $('input[placeholder="mon-serveur"]')
-  await nameInput.waitForDisplayed({ timeout: 10_000 })
+  await nameInput.waitForDisplayed({
+    timeout: 15_000,
+    timeoutMsg: 'Formulaire MCP (placeholder mon-serveur) introuvable — onglet Serveurs MCP encore en chargement ?',
+  })
   await nameInput.setValue(name)
   await selectValue(await labelled('Transport', 'select'), 'stdio')
   // Form: commande python3 + arguments = chemin du script
@@ -359,12 +364,26 @@ export async function ensureCloudArchitectPlugin() {
     await clickSidebar('Nouveau chat')
     return
   }
+  // Prefer IPC seed when the UI list is empty so later suites do not depend on
+  // a slow chat round-trip that can fail if the runtime was previously blocked.
+  try {
+    const plugins = await invokeTauri<Array<{ id?: string; name?: string }>>('get_plugins')
+    if (plugins.some(plugin => plugin.name === 'Cloud Architect Agent' || plugin.id?.includes('cloud-architect'))) {
+      await clickSidebar('Nouveau chat')
+      return
+    }
+  } catch {
+    /* fall through to chat creation */
+  }
   await clickSidebar('Nouveau chat')
   const creator = $('textarea[placeholder="Sur quoi travailler ?"]')
   await creator.waitForDisplayed({ timeout: 12_000 })
   await creator.setValue('CREATE_CLOUD_ARCHITECT_PLUGIN_E2E Crée un plugin agentique Cloud Architect avec un outil Python utilisable en CLI, local et sans dépendance réseau.')
   await $('button[aria-label="Envoyer le prompt"]').click()
-  await $('p*=Plugin Cloud Architect Agent créé').waitForDisplayed({ timeout: 15_000 })
+  await $('p*=Plugin Cloud Architect Agent créé').waitForDisplayed({ timeout: 20_000 })
+  await clickSidebar('Plugins')
+  await row.waitForDisplayed({ timeout: 12_000 })
+  await clickSidebar('Nouveau chat')
 }
 
 export async function openSettingsTab(label: string) {
@@ -400,7 +419,16 @@ export async function ensureSettingEnabled(label: string, enabled: boolean) {
     'Contrôle de Chrome': 'chromeControlEnabled',
   }
   const key = settingKeys[label]
-  await saveSettings(key ? { [key]: enabled } : undefined)
+  try {
+    await saveSettings(key ? { [key]: enabled } : undefined)
+  } catch (error) {
+    // Debounced UI save can lose a race when status probes were blocking IPC.
+    // Force the expected keys through the backend, then re-check.
+    if (!key) throw error
+    const current = await invokeTauri<Record<string, unknown>>('get_settings')
+    await invokeTauri('update_settings', { settings: { ...current, [key]: enabled } })
+    await saveSettings({ [key]: enabled })
+  }
 }
 
 export async function saveSettings(expected?: Record<string, unknown>) {
@@ -419,7 +447,9 @@ export async function saveSettings(expected?: Record<string, unknown>) {
 
 export async function openIntegrationsCategory(category?: string) {
   await clickSidebar('Intégrations et MCP')
-  const integrationsTab = $('button=Intégrations')
+  const integrationsTab = $(
+    '//button[normalize-space()="Intégrations" or normalize-space()="Integrations" or normalize-space()="Integraciones"]',
+  )
   await integrationsTab.waitForClickable({ timeout: 10_000 })
   await integrationsTab.click()
   if (!category) return

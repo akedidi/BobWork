@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   createConversation: vi.fn(),
   updateConversation: vi.fn(),
+  getConversation: vi.fn(),
+  getMessages: vi.fn(),
+  getTasks: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -27,13 +30,13 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('../lib/ipc', () => ({
   sendMessage: mocks.sendMessage,
   stopTask: vi.fn().mockResolvedValue(undefined),
-  getConversation: vi.fn().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false }),
-  getMessages: vi.fn().mockResolvedValue([]),
+  getConversation: mocks.getConversation,
+  getMessages: mocks.getMessages,
   createConversation: mocks.createConversation,
   updateConversation: mocks.updateConversation,
   getTaskDetail: vi.fn().mockResolvedValue(null),
   cancelTask: vi.fn().mockResolvedValue(undefined),
-  getTasks: vi.fn().mockResolvedValue([]),
+  getTasks: mocks.getTasks,
   getBobModes: vi.fn().mockResolvedValue([
     { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'test' },
   ]),
@@ -56,6 +59,9 @@ describe('Chat prompt queue', () => {
     useAppStore.setState({ builderSession: null })
     mocks.listeners.clear()
     mocks.updateConversation.mockReset().mockResolvedValue(undefined)
+    mocks.getConversation.mockReset().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false })
+    mocks.getMessages.mockReset().mockResolvedValue([])
+    mocks.getTasks.mockReset().mockResolvedValue([])
     mocks.createConversation.mockReset().mockResolvedValue({
       id: 'conv-builder', title: 'Création de skill', pinned: false,
     })
@@ -133,6 +139,32 @@ describe('Chat prompt queue', () => {
     await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Création de skill' }),
     ))
+  })
+
+  it('keeps the first prompt visible when the new conversation history resolves late', async () => {
+    let resolveHistory: (messages: never[]) => void = () => {}
+    mocks.getMessages.mockReset().mockImplementation(() => new Promise(resolve => { resolveHistory = resolve }))
+    mocks.createConversation.mockResolvedValue({
+      id: 'conv-new', title: 'Nouvelle conversation', pinned: false,
+    })
+
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <Routes>
+          <Route path="/chat/:id?" element={<ChatView />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Mon tout premier prompt' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    expect(await screen.findByText('Mon tout premier prompt')).toBeVisible()
+
+    await waitFor(() => expect(mocks.getMessages).toHaveBeenCalledWith('conv-new'))
+    await act(async () => { resolveHistory([]) })
+
+    expect(screen.getByText('Mon tout premier prompt')).toBeVisible()
   })
 })
 

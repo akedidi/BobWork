@@ -81,8 +81,8 @@ static DELEGATE: OnceLock<Retained<BobWorkNotificationDelegate>> = OnceLock::new
 
 /// `true` when the process runs inside a `.app` (required by UN).
 pub fn is_available() -> bool {
-    let path = NSBundle::mainBundle().bundlePath().to_string();
-    path.ends_with(".app") || path.contains(".app/")
+    let bundle = NSBundle::mainBundle();
+    bundle.bundleIdentifier().is_some()
 }
 
 fn require_app_bundle() -> Result<(), String> {

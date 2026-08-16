@@ -4,7 +4,7 @@
 // ============================================================
 
 import { useEffect, useMemo, useState } from 'react'
-import { getSchedules, createSchedule, updateScheduleState, deleteSchedule, getScheduleRuns, runScheduleNow, getBobModes, getProjects } from '../lib/ipc'
+import { getSchedules, createSchedule, updateSchedule, updateScheduleState, deleteSchedule, getScheduleRuns, runScheduleNow, getBobModes, getProjects } from '../lib/ipc'
 import type { Schedule, ScheduleRun, CreateScheduleInput, BobMode, Project } from '@bob-work/shared-types'
 import { listen } from '@tauri-apps/api/event'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -47,16 +47,17 @@ function FormField({ label, children }: { label: string; children: React.ReactNo
 
 // ── Create modal ──────────────────────────────────────────────
 
-export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () => void; onDone: () => void; initialTemplate?: PluginTemplateState }) {
+export function CreateModal({ onClose, onDone, initialTemplate, existingSchedule }: { onClose: () => void; onDone: () => void; initialTemplate?: PluginTemplateState; existingSchedule?: Schedule }) {
   const [form, setForm] = useState<CreateScheduleInput>(() => ({
-    name: initialTemplate?.name ?? '',
-    instructions: initialTemplate?.instructions ?? '',
-    cronOrEvent: initialTemplate?.cronOrEvent ?? 'every day',
-    runAt: currentLocalTime(),
-    timezone: 'Europe/Paris',
-    offlineBehavior: initialTemplate?.offlineBehavior ?? 'run_on_wake',
-    overlapPolicy: initialTemplate?.overlapPolicy ?? 'queue',
-    pluginOrMode: initialTemplate ? `plugin:${initialTemplate.pluginId}` : undefined,
+    name: existingSchedule?.name ?? initialTemplate?.name ?? '',
+    instructions: existingSchedule?.instructions ?? initialTemplate?.instructions ?? '',
+    cronOrEvent: existingSchedule?.cronOrEvent ?? initialTemplate?.cronOrEvent ?? 'every day',
+    runAt: existingSchedule?.runAt ?? currentLocalTime(),
+    timezone: existingSchedule?.timezone ?? 'Europe/Paris',
+    offlineBehavior: existingSchedule?.offlineBehavior ?? initialTemplate?.offlineBehavior ?? 'run_on_wake',
+    overlapPolicy: existingSchedule?.overlapPolicy ?? initialTemplate?.overlapPolicy ?? 'queue',
+    pluginOrMode: existingSchedule?.pluginOrMode ?? (initialTemplate ? `plugin:${initialTemplate.pluginId}` : undefined),
+    projectId: existingSchedule?.projectId ?? undefined,
   }))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -82,10 +83,14 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
         projectId: form.projectId?.trim() || undefined,
         runAt: showRunAtField(form.cronOrEvent) ? form.runAt?.trim() || undefined : undefined,
       }
-      await createSchedule(payload)
+      if (existingSchedule) {
+        await updateSchedule(existingSchedule.id, payload)
+      } else {
+        await createSchedule(payload)
+      }
       onDone()
     } catch (e) {
-      setError(errorMessage(e, 'Impossible de créer la planification.'))
+      setError(errorMessage(e, existingSchedule ? 'Impossible de modifier la planification.' : 'Impossible de créer la planification.'))
     } finally {
       setLoading(false)
     }
@@ -103,15 +108,15 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
         background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)', padding: 28, width: 480, maxWidth: '90vw',
       }}>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20 }}>Nouvelle planification</div>
-
-        <FormField label="Nom">
-          <input value={form.name} onChange={e => set('name', e.target.value)}
-            placeholder="Ex : Rapport quotidien" style={inputStyle} />
-        </FormField>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+          {existingSchedule ? 'Modifier la planification' : 'Nouvelle planification'}
+        </div>
 
         <FormField label="Instructions pour Bob">
-          <textarea value={form.instructions} onChange={e => set('instructions', e.target.value)}
+          <textarea value={form.instructions} onChange={e => {
+            set('instructions', e.target.value)
+            set('name', e.target.value.split('\n')[0].slice(0, 50))
+          }}
             rows={4} placeholder="Génère un rapport des tickets en cours et envoie-le…"
             style={{ ...inputStyle, fontFamily: 'inherit', resize: 'vertical' }} />
         </FormField>
@@ -194,7 +199,7 @@ export function CreateModal({ onClose, onDone, initialTemplate }: { onClose: () 
             disabled={loading || !form.name.trim() || !form.instructions.trim()}
             className="btn-primary"
           >
-            {loading ? 'Création…' : 'Créer'}
+            {loading ? 'Enregistrement…' : (existingSchedule ? 'Enregistrer' : 'Créer')}
           </button>
         </div>
       </ModalPanel>
@@ -282,6 +287,7 @@ export default function ScheduleView() {
   const [loadError, setLoadError] = useState<unknown>(null)
   const [actionError, setActionError] = useState<unknown>(null)
   const [showModal, setShowModal] = useState(false)
+  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null)
   const [viewingLogsFor, setViewingLogsFor] = useState<Schedule | null>(null)
   const [runningId, setRunningId] = useState<string | null>(null)
   const location = useLocation()
@@ -401,6 +407,7 @@ export default function ScheduleView() {
                 projectName={s.projectId ? projectNameById.get(s.projectId) : undefined}
                 stateLabel={stateLabel}
                 onToggle={() => handleToggle(s)}
+                onEdit={() => setEditingSchedule(s)}
                 onDelete={() => handleDelete(s)}
                 onViewLogs={() => setViewingLogsFor(s)}
                 onRunNow={() => handleRunNow(s)}
@@ -411,11 +418,12 @@ export default function ScheduleView() {
         )}
       </div>
 
-      {showModal && (
+      {(showModal || editingSchedule) && (
         <CreateModal
           initialTemplate={initialTemplate}
-          onClose={() => { setShowModal(false); setInitialTemplate(undefined) }}
-          onDone={() => { setShowModal(false); setInitialTemplate(undefined); load() }}
+          existingSchedule={editingSchedule ?? undefined}
+          onClose={() => { setShowModal(false); setEditingSchedule(null); setInitialTemplate(undefined) }}
+          onDone={() => { setShowModal(false); setEditingSchedule(null); setInitialTemplate(undefined); load() }}
         />
       )}
 
@@ -432,12 +440,13 @@ export default function ScheduleView() {
 // ── Schedule card ─────────────────────────────────────────────
 
 function ScheduleCard({
-  schedule, projectName, stateLabel, onToggle, onDelete, onViewLogs, onRunNow, running
+  schedule, projectName, stateLabel, onToggle, onEdit, onDelete, onViewLogs, onRunNow, running
 }: {
   schedule: Schedule
   projectName?: string
   stateLabel: Record<string, string>
   onToggle: () => void
+  onEdit: () => void
   onDelete: () => void
   onViewLogs: () => void
   onRunNow: () => void
@@ -514,20 +523,35 @@ function ScheduleCard({
           </div>
         </div>
 
-        {/* Delete */}
-        <button
-          onClick={onDelete}
-          title="Supprimer"
-          style={{
-            flexShrink: 0, background: 'none', border: 'none',
-            cursor: 'pointer', color: 'var(--text-muted)', padding: 4, borderRadius: 4,
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-          </svg>
-        </button>
+        {/* Actions */}
+        <div style={{ flexShrink: 0, display: 'flex', gap: 8 }}>
+          <button
+            onClick={onEdit}
+            title="Modifier"
+            style={{
+              background: 'none', border: 'none',
+              cursor: 'pointer', color: 'var(--text-muted)', padding: 4, borderRadius: 4,
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </button>
+          <button
+            onClick={onDelete}
+            title="Supprimer"
+            style={{
+              background: 'none', border: 'none',
+              cursor: 'pointer', color: 'var(--text-muted)', padding: 4, borderRadius: 4,
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   )

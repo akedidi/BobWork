@@ -463,6 +463,9 @@ export const getSchedules = () => invoke<Schedule[]>('get_schedules');
 export const createSchedule = (input: CreateScheduleInput) =>
   invoke<Schedule>('create_schedule', { input });
 
+export const updateSchedule = (id: string, input: CreateScheduleInput) =>
+  invoke<Schedule>('update_schedule', { id, input });
+
 export const updateScheduleState = (id: string, state: string) =>
   invoke<void>('update_schedule_state', { id, state });
 

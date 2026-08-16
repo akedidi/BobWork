@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Archive, FolderTree } from 'lucide-react'
 import { useAppStore } from '../../stores/appStore'
-import { getProjects, getConversations, getTasks, detectBob, getBobAuthSnapshot, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus } from '../../lib/ipc'
+import { createConversation, getProjects, getConversations, getTasks, detectBob, getBobAuthSnapshot, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus } from '../../lib/ipc'
 import { errorMessage } from '../../lib/errorMessage'
 import { useT } from '../../i18n'
 import { listen } from '@tauri-apps/api/event'
@@ -59,6 +59,7 @@ export default function Sidebar() {
   const [projectPicker, setProjectPicker] = useState<{ conversationId: string } | null>(null)
   const [usage, setUsage] = useState<UsageStatus | null>(null)
   const [sidebarLoadError, setSidebarLoadError] = useState<string | null>(null)
+
   const searchTriggerRef = useRef<HTMLButtonElement>(null)
 
   const activeTasksByConversation = useMemo(
@@ -78,6 +79,11 @@ export default function Sidebar() {
   const openConversation = (conversationId: string) => {
     markConversationRead(conversationId)
     navigate(`/chat/${conversationId}`)
+  }
+
+  const startNewConversation = () => {
+    navigate('/')
+    setSidebarLoadError(null)
   }
 
   const conversationIcon = (conversationId: string, idle?: ReactNode) => {
@@ -256,7 +262,10 @@ export default function Sidebar() {
     location.pathname === path || location.pathname.startsWith(path + '/')
 
   const recentConversations = conversations
-    .filter(conversation => !conversation.pinned && !conversation.projectId)
+    .filter(conversation => !conversation.projectId && !conversation.archived)
+    // Pinned chats stay visible here too; Épinglés is a shortcut, not a sort key.
+    // Order by last activity (date) only — never hoist pinned to the top.
+    .sort((left, right) => Date.parse(right.date) - Date.parse(left.date))
     .slice(0, 12)
 
   const pinnedConversations = conversations.filter(conversation => conversation.pinned)
@@ -264,6 +273,7 @@ export default function Sidebar() {
 
   const searchRecentChats = conversations
     .filter(conversation => !conversation.archived)
+    .sort((left, right) => Date.parse(right.date) - Date.parse(left.date))
     .slice(0, 10)
 
   const projectNameById = (projectId?: string | null) => {
@@ -476,7 +486,12 @@ export default function Sidebar() {
       ) : (
         <>
           <div className="sidebar-nav">
-            <div className="sidebar-item" onClick={() => navigate('/')} style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
+            <div
+              className="sidebar-item"
+              onClick={() => { void startNewConversation() }}
+              aria-disabled={false}
+              style={{ fontWeight: 500, color: 'var(--text-primary)' }}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
               {t('nav.newChat')}
             </div>
@@ -516,7 +531,14 @@ export default function Sidebar() {
             {/* Pinned */}
             <div className="sidebar-section-label" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'none', paddingLeft: 8 }}>Épinglés</div>
             {pinnedConversations.length === 0 && pinnedTasks.length === 0 ? <div style={{ padding: '7px 10px 16px', color: 'var(--text-muted)', fontSize: 11.5 }}>Aucun élément épinglé</div> : <>
-              {pinnedConversations.map(conversation => <div key={conversation.id} className="sidebar-item" onClick={() => openConversation(conversation.id)} title={conversation.title}>
+              {pinnedConversations.map(conversation => <div
+                key={conversation.id}
+                data-conversation-id={conversation.id}
+                data-conversation-location="pinned"
+                className={`sidebar-item ${isActive(`/chat/${conversation.id}`) ? 'active' : ''}`}
+                onClick={() => openConversation(conversation.id)}
+                title={conversation.title}
+              >
                 {conversationIcon(conversation.id, <span aria-hidden="true" style={{ opacity: .55 }}>◇</span>)}
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conversation.title}</span>
                 <button className="sidebar-inline-action" onClick={event => { event.stopPropagation(); setConversationPinned(conversation.id, false) }} title="Désépingler la conversation" aria-label={`Désépingler ${conversation.title}`}><PinIcon filled /></button>
@@ -606,6 +628,7 @@ export default function Sidebar() {
                 <div
                   key={conversation.id}
                   data-conversation-id={conversation.id}
+                  data-conversation-location="recent"
                   className={`sidebar-item ${isActive(`/chat/${conversation.id}`) ? 'active' : ''}`}
                   onClick={() => { if (editingId !== conversation.id) openConversation(conversation.id) }}
                   onDoubleClick={() => startEdit(conversation.id, conversation.title)}
