@@ -1,0 +1,7 @@
+interface:
+  display_name: "RFP / RFQ / RFT"
+  short_description: "Analyse les appels d’offres, sécurise la conformité et orche"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-rfp to extrais toutes les exigences de cet appel d’offres."
+policy:
+  allow_implicit_invocation: true

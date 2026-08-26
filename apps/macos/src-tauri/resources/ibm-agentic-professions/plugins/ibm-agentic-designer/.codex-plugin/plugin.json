@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-designer",
+  "version": "1.0.0",
+  "description": "Transforme un besoin en expérience validée, accessible et prête pour le développement, selon une démarche compatible IBM Enterprise Design Thinking et Carbon.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "designer"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Designer",
+    "shortDescription": "Transforme un besoin en expérience validée, accessible et prête ",
+    "longDescription": "Transforme un besoin en expérience validée, accessible et prête pour le développement, selon une démarche compatible IBM Enterprise Design Thinking et Carbon. Workflow : Besoin → recherche UX → parcours → architecture de l’information → conception UX/UI → design system → accessibilité → Design Review → handoff dev.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Cadre ce besoin et prépare un plan de recherche UX.",
+      "Conçois le parcours et les écrans de cette fonctionnalité.",
+      "Réalise une Design Review accessible avant handoff."
+    ]
+  }
+}

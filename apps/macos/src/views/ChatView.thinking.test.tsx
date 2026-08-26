@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatView, {
   appendThinkingText,
@@ -15,6 +15,11 @@ const mocks = vi.hoisted(() => ({
   getMessages: vi.fn(),
   getTasks: vi.fn(),
 }))
+
+function ConversationSwitcher() {
+  const navigate = useNavigate()
+  return <button type="button" onClick={() => navigate('/chat/conv-2')}>Changer de conversation</button>
+}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: Record<string, unknown> }) => unknown) => {
@@ -123,6 +128,66 @@ describe('Chat live thinking', () => {
     expect(screen.getByRole('status', { name: 'Réflexion en cours' })).toBeVisible()
   })
 
+  it('stops auto-scrolling when the user moves away from the bottom', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Réponse longue' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-token')).toBe(true))
+
+    const scrollArea = screen.getByLabelText('Messages de la conversation')
+    Object.defineProperties(scrollArea, {
+      scrollHeight: { configurable: true, value: 1200 },
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, value: 200, writable: true },
+    })
+    fireEvent.scroll(scrollArea)
+
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView)
+    scrollIntoView.mockClear()
+    await act(async () => {
+      await mocks.listeners.get('bob-token')?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'thought',
+        chunk: 'Nouvelle réflexion pendant la lecture.',
+      } })
+    })
+
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(scrollArea.scrollTop).toBe(200)
+  })
+
+  it('ne mélange jamais les événements d’outil avec le texte de la réponse', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Teste un outil' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-token')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-token')?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'tool_use',
+        chunk: '> Exécution de l’outil web_fetch…',
+        isFinal: false,
+      } })
+    })
+
+    expect(screen.queryByText(/Exécution de l’outil web_fetch/)).not.toBeInTheDocument()
+  })
+
   it('replaces infinite reflection with the persisted reply when the task finishes', async () => {
     render(
       <MemoryRouter initialEntries={['/chat/conv-1']}>
@@ -150,6 +215,76 @@ describe('Chat live thinking', () => {
 
     expect(await screen.findByText('Spotify est ouvert.')).toBeVisible()
     expect(screen.queryByText('Analyse de la demande…')).not.toBeInTheDocument()
+  })
+
+  it('removes the sub-agent frame as soon as the session completes', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Compare trois API météo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-activity')).toBe(true))
+    await waitFor(() => expect(mocks.listeners.has('bob-session-done')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'tool_started',
+        toolName: 'spawn_subagent',
+        title: 'Délégation à un sous-agent',
+        payload: { tool_id: 'tool-open-meteo', parameters: { name: 'explore', description: 'Analyse **Open-Meteo**.' } },
+      } })
+    })
+    expect(screen.getByRole('region', { name: 'Sous-agents de la tâche principale' })).toBeVisible()
+
+    await act(async () => {
+      await mocks.listeners.get('bob-session-done')?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        success: true,
+        fullOutput: 'Comparaison terminée.',
+        taskId: 'task-1',
+      } })
+    })
+
+    expect(screen.queryByRole('region', { name: 'Sous-agents de la tâche principale' })).not.toBeInTheDocument()
+  })
+
+  it('does not carry a live sub-agent frame into another conversation', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <ConversationSwitcher />
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Compare trois API météo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-activity')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'tool_started',
+        toolName: 'spawn_subagent',
+        title: 'Délégation à un sous-agent',
+        payload: { tool_id: 'tool-open-meteo', parameters: { name: 'explore', description: 'Analyse **Open-Meteo**.' } },
+      } })
+    })
+    expect(screen.getByText('Open-Meteo')).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Changer de conversation' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Sous-agents de la tâche principale' })).not.toBeInTheDocument()
+    })
   })
 })
 

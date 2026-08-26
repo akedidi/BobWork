@@ -7,14 +7,18 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::c_void;
+use std::sync::mpsc;
 
+use block2::RcBlock;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{AnyThread, ClassType};
+use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
     NSAppleScript, NSAppleScriptErrorMessage, NSDictionary, NSObject, NSString,
 };
+use objc2_speech::{SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -30,6 +34,145 @@ unsafe extern "C" {
 
 pub fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }.as_bool()
+}
+
+/// Mirrors AVAuthorizationStatus for the microphone in a UI-safe format.
+///
+/// WebKit's getUserMedia prompt is not consistently surfaced by WKWebView.
+/// Asking AVFoundation from Bob Work's process ensures macOS presents the
+/// first-run TCC prompt for the correct app identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneAuthorization {
+    NotDetermined,
+    Denied,
+    Restricted,
+    Authorized,
+}
+
+impl MicrophoneAuthorization {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::NotDetermined => "not_determined",
+            Self::Denied => "denied",
+            Self::Restricted => "restricted",
+            Self::Authorized => "authorized",
+        }
+    }
+
+    pub fn is_authorized(self) -> bool {
+        matches!(self, Self::Authorized)
+    }
+}
+
+fn audio_media_type() -> Result<&'static objc2_av_foundation::AVMediaType, String> {
+    // AVMediaTypeAudio is a framework constant and is present on every
+    // supported macOS release. The generated binding exposes it as optional
+    // because it is an external Objective-C symbol.
+    unsafe { AVMediaTypeAudio.as_ref() }
+        .ok_or_else(|| "Le type audio AVFoundation est indisponible.".into())
+        .copied()
+}
+
+fn map_microphone_status(status: AVAuthorizationStatus) -> MicrophoneAuthorization {
+    match status {
+        AVAuthorizationStatus::Authorized => MicrophoneAuthorization::Authorized,
+        AVAuthorizationStatus::Denied => MicrophoneAuthorization::Denied,
+        AVAuthorizationStatus::Restricted => MicrophoneAuthorization::Restricted,
+        _ => MicrophoneAuthorization::NotDetermined,
+    }
+}
+
+pub fn microphone_authorization() -> Result<MicrophoneAuthorization, String> {
+    let media_type = audio_media_type()?;
+    Ok(map_microphone_status(unsafe {
+        AVCaptureDevice::authorizationStatusForMediaType(media_type)
+    }))
+}
+
+/// Requests microphone access for Bob Work and waits for macOS's response.
+/// macOS only displays its sheet once; later calls simply return the stored
+/// decision, which lets the UI route a refusal to System Settings.
+pub fn request_microphone_access() -> Result<MicrophoneAuthorization, String> {
+    let current = microphone_authorization()?;
+    if current != MicrophoneAuthorization::NotDetermined {
+        return Ok(current);
+    }
+
+    let media_type = audio_media_type()?;
+    let (tx, rx) = mpsc::channel::<bool>();
+    let handler = RcBlock::new(move |granted: Bool| {
+        let _ = tx.send(granted.as_bool());
+    });
+    unsafe {
+        AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &handler);
+    }
+    // Keep the Objective-C block alive until AVFoundation has called it.
+    let granted = rx
+        .recv()
+        .map_err(|error| format!("La demande microphone n’a pas abouti : {error}"))?;
+    if granted {
+        Ok(MicrophoneAuthorization::Authorized)
+    } else {
+        microphone_authorization()
+    }
+}
+
+/// Mirrors SFSpeechRecognizerAuthorizationStatus for the dictation flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechRecognitionAuthorization {
+    NotDetermined,
+    Denied,
+    Restricted,
+    Authorized,
+}
+
+impl SpeechRecognitionAuthorization {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::NotDetermined => "not_determined",
+            Self::Denied => "denied",
+            Self::Restricted => "restricted",
+            Self::Authorized => "authorized",
+        }
+    }
+}
+
+fn map_speech_status(
+    status: SFSpeechRecognizerAuthorizationStatus,
+) -> SpeechRecognitionAuthorization {
+    match status {
+        SFSpeechRecognizerAuthorizationStatus::Authorized => {
+            SpeechRecognitionAuthorization::Authorized
+        }
+        SFSpeechRecognizerAuthorizationStatus::Denied => SpeechRecognitionAuthorization::Denied,
+        SFSpeechRecognizerAuthorizationStatus::Restricted => {
+            SpeechRecognitionAuthorization::Restricted
+        }
+        _ => SpeechRecognitionAuthorization::NotDetermined,
+    }
+}
+
+pub fn speech_recognition_authorization() -> SpeechRecognitionAuthorization {
+    map_speech_status(unsafe { SFSpeechRecognizer::authorizationStatus() })
+}
+
+/// Requests Apple's Speech Recognition authorization when it has not already
+/// been decided. This is separate from microphone permission on macOS.
+pub fn request_speech_recognition_access() -> Result<SpeechRecognitionAuthorization, String> {
+    let current = speech_recognition_authorization();
+    if current != SpeechRecognitionAuthorization::NotDetermined {
+        return Ok(current);
+    }
+
+    let (tx, rx) = mpsc::channel::<SpeechRecognitionAuthorization>();
+    let handler = RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
+        let _ = tx.send(map_speech_status(status));
+    });
+    unsafe {
+        SFSpeechRecognizer::requestAuthorization(&handler);
+    }
+    rx.recv()
+        .map_err(|error| format!("La demande de reconnaissance vocale n’a pas abouti : {error}"))
 }
 
 /// Registers Bob Work under System Settings → Accessibility and may show the
@@ -57,7 +200,8 @@ pub fn run_applescript(source: &str) -> Result<String, String> {
         .ok_or_else(|| "Impossible de créer NSAppleScript".to_string())?;
 
     let mut error_info: Option<Retained<NSDictionary<NSString, AnyObject>>> = None;
-    let descriptor: Option<Retained<AnyObject>> = unsafe { objc2::msg_send_id![&script, executeAndReturnError: Some(&mut error_info)] };
+    let descriptor: Option<Retained<AnyObject>> =
+        unsafe { objc2::msg_send_id![&script, executeAndReturnError: Some(&mut error_info)] };
 
     if let Some(info) = error_info {
         let message = unsafe {

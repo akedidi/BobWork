@@ -1,0 +1,7 @@
+interface:
+  display_name: "Change Manager"
+  short_description: "Planifie les impacts humains d’une transformation, traite le"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-change-manager to analyse les impacts et la readiness de ce changement."
+policy:
+  allow_implicit_invocation: true

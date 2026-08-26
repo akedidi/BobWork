@@ -1,0 +1,7 @@
+interface:
+  display_name: "product-discovery"
+  short_description: "Réduire les risques valeur, utilisabilité, faisabilité et vi"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $product-discovery to réduire les risques valeur, utilisabilité, faisabilité et viabilité avant delivery."
+policy:
+  allow_implicit_invocation: true

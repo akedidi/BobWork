@@ -1,0 +1,7 @@
+interface:
+  display_name: "ui-design"
+  short_description: "Produire une interface cohérente, responsive et prête à cons"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ui-design to produire une interface cohérente, responsive et prête à construire."
+policy:
+  allow_implicit_invocation: true

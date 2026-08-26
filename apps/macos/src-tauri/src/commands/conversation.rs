@@ -16,11 +16,38 @@ use tauri::{AppHandle, Emitter, State};
 #[tauri::command]
 pub async fn get_conversations(
     project_id: Option<String>,
+    app_handle: AppHandle,
     db: State<'_, Database>,
 ) -> Result<Vec<Conversation>, AppError> {
     let service = ConversationService::new();
     let _ = service.purge_promptless(&db);
-    service.get_all(&db, project_id.as_deref())
+    let conversations = service.get_all(&db, project_id.as_deref())?;
+
+    // Repair conversations whose first title job was interrupted or collided
+    // with an already-running Bob task. The scheduler de-duplicates requests
+    // and waits for an idle Bob window before generating the title.
+    for conversation in &conversations {
+        if !matches!(
+            conversation.title.trim(),
+            "" | "Nouvelle conversation" | "Nouveau chat" | "[Planifié]"
+        ) {
+            continue;
+        }
+        let first_prompt = service
+            .get_messages(&db, &conversation.id)?
+            .into_iter()
+            .find(|message| message.author == "user")
+            .map(|message| message.content);
+        if let Some(first_prompt) = first_prompt {
+            crate::commands::bob::schedule_conversation_title(
+                app_handle.clone(),
+                conversation.id.clone(),
+                first_prompt,
+            );
+        }
+    }
+
+    Ok(conversations)
 }
 
 #[tauri::command]

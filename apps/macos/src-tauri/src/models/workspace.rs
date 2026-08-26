@@ -21,6 +21,9 @@ pub struct Skill {
     pub source_path: String,
     pub scope: String,
     pub enabled: bool,
+    /// Optional local key (`designer`) or HTTPS favicon URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
     /// Deployed by a Bob Work built-in plugin (`builtin-*`) or integration skill.
     #[serde(default)]
     pub builtin: bool,
@@ -38,6 +41,8 @@ pub struct SaveSkillInput {
     pub slug: String,
     pub description: String,
     pub content: String,
+    #[serde(default)]
+    pub icon: Option<String>,
     pub workspace: Option<String>,
 }
 

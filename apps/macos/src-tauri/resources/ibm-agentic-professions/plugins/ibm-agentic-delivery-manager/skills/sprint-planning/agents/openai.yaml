@@ -1,0 +1,7 @@
+interface:
+  display_name: "sprint-planning"
+  short_description: "Construire un objectif de sprint cohérent et un plan adaptab"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $sprint-planning to construire un objectif de sprint cohérent et un plan adaptable."
+policy:
+  allow_implicit_invocation: true

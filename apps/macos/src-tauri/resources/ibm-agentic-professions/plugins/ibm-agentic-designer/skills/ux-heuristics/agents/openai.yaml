@@ -1,0 +1,7 @@
+interface:
+  display_name: "ux-heuristics"
+  short_description: "Évaluer rapidement une interface avec des heuristiques expli"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ux-heuristics to évaluer rapidement une interface avec des heuristiques explicites."
+policy:
+  allow_implicit_invocation: true

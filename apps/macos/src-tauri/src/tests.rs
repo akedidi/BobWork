@@ -636,28 +636,44 @@ mod tests {
             let first = svc.create(&db, create("Première")).expect("first");
             let second = svc.create(&db, create("Deuxième")).expect("second");
             for conversation in [&first, &second] {
-                svc.add_message(&db, AddMessageInput {
-                    conversation_id: conversation.id.clone(),
-                    author: "user".into(),
-                    content: "Prompt initial".into(),
-                    attachments: None,
-                    sources: None,
-                }).expect("initial prompt");
+                svc.add_message(
+                    &db,
+                    AddMessageInput {
+                        conversation_id: conversation.id.clone(),
+                        author: "user".into(),
+                        content: "Prompt initial".into(),
+                        attachments: None,
+                        sources: None,
+                    },
+                )
+                .expect("initial prompt");
             }
             {
                 let conn = db.conn.lock().unwrap();
-                conn.execute("UPDATE conversations SET date='2000-01-01T00:00:00Z' WHERE id=?1", [&first.id]).unwrap();
-                conn.execute("UPDATE conversations SET date='2001-01-01T00:00:00Z' WHERE id=?1", [&second.id]).unwrap();
+                conn.execute(
+                    "UPDATE conversations SET date='2000-01-01T00:00:00Z' WHERE id=?1",
+                    [&first.id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE conversations SET date='2001-01-01T00:00:00Z' WHERE id=?1",
+                    [&second.id],
+                )
+                .unwrap();
             }
             assert_eq!(svc.get_all(&db, None).unwrap()[0].id, second.id);
 
-            svc.add_message(&db, AddMessageInput {
-                conversation_id: first.id.clone(),
-                author: "user".into(),
-                content: "Nouveau prompt".into(),
-                attachments: None,
-                sources: None,
-            }).expect("new prompt");
+            svc.add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: first.id.clone(),
+                    author: "user".into(),
+                    content: "Nouveau prompt".into(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("new prompt");
 
             assert_eq!(svc.get_all(&db, None).unwrap()[0].id, first.id);
         }
@@ -1167,6 +1183,7 @@ mod tests {
             assert_eq!(settings.language, "auto");
             assert_eq!(settings.theme, "system");
             assert_eq!(settings.permission_policy, "ask_for_important");
+            assert!(settings.retain_audio_recordings);
             assert!(settings.font_size >= 12 && settings.font_size <= 20);
         }
 
@@ -1180,6 +1197,7 @@ mod tests {
             settings.language = "en".to_string();
             settings.font_size = 16;
             settings.reduced_motion = true;
+            settings.retain_audio_recordings = true;
 
             svc.update_all(&db, &settings).expect("update");
 
@@ -1188,6 +1206,7 @@ mod tests {
             assert_eq!(loaded.language, "en");
             assert_eq!(loaded.font_size, 16);
             assert!(loaded.reduced_motion);
+            assert!(loaded.retain_audio_recordings);
         }
 
         #[test]

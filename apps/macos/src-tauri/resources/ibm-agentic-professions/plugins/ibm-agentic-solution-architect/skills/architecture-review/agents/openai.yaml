@@ -1,0 +1,7 @@
+interface:
+  display_name: "architecture-review"
+  short_description: "Évaluer une architecture contre exigences, drivers et risque"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $architecture-review to évaluer une architecture contre exigences, drivers et risques."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "ux-research"
+  short_description: "Planifier et synthétiser une recherche UX traçable."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ux-research to planifier et synthétiser une recherche UX traçable."
+policy:
+  allow_implicit_invocation: true

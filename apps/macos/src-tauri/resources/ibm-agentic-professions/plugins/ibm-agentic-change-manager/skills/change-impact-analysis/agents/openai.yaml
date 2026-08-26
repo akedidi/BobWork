@@ -1,0 +1,7 @@
+interface:
+  display_name: "change-impact-analysis"
+  short_description: "Évaluer précisément ce qui change pour chaque population."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $change-impact-analysis to évaluer précisément ce qui change pour chaque population."
+policy:
+  allow_implicit_invocation: true

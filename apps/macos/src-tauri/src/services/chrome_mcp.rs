@@ -150,10 +150,7 @@ impl ChromeMcpService {
             return crate::macos_permissions::probe_chrome_automation_in_process();
         }
         #[allow(unreachable_code)]
-        (
-            "unavailable".into(),
-            "Non disponible.".into(),
-        )
+        ("unavailable".into(), "Non disponible.".into())
     }
 }
 
@@ -181,6 +178,16 @@ mod tests {
     fn bundled_script_exposes_chrome_tools() {
         assert!(CHROME_MCP_SCRIPT.contains("chrome_list_tabs"));
         assert!(CHROME_MCP_SCRIPT.contains("chrome_execute_js"));
+        assert!(CHROME_MCP_SCRIPT.contains("web_fetch"));
+        assert!(CHROME_MCP_SCRIPT.contains("fetch_background_url"));
+        assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_ALLOW_VISIBLE_CHROME"));
+        let compatibility_body = CHROME_MCP_SCRIPT
+            .split("def browser_snapshot(arguments: dict) -> dict:")
+            .nth(1)
+            .and_then(|value| value.split("\ndef handle_call").next())
+            .expect("browser_snapshot body");
+        assert!(compatibility_body.contains("fetch_background_url"));
+        assert!(!compatibility_body.contains("chrome_open_url"));
     }
 
     #[test]

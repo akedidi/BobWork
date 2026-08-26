@@ -178,7 +178,12 @@ impl SchedulerService {
             .ok_or_else(|| AppError::NotFound(id))
     }
 
-    pub fn update(&self, db: &Database, id: &str, input: CreateScheduleInput) -> AppResult<Schedule> {
+    pub fn update(
+        &self,
+        db: &Database,
+        id: &str,
+        input: CreateScheduleInput,
+    ) -> AppResult<Schedule> {
         if input.name.trim().is_empty() || input.instructions.trim().is_empty() {
             return Err(AppError::ValidationFailed(
                 "Le nom et les instructions sont obligatoires.".into(),
@@ -221,7 +226,6 @@ impl SchedulerService {
         self.get_by_id(db, id)?
             .ok_or_else(|| AppError::NotFound(id.to_string()))
     }
-
 
     pub fn update_state(&self, db: &Database, id: &str, state: &str) -> AppResult<()> {
         if !matches!(state, "active" | "paused" | "completed") {
@@ -396,11 +400,23 @@ impl SchedulerService {
                 .clone()
                 .unwrap_or_else(|| "agent".into())
         };
+        let first_line = schedule
+            .instructions
+            .lines()
+            .next()
+            .unwrap_or("Nouvelle tâche")
+            .trim();
+        let mut title_suffix = first_line.chars().take(60).collect::<String>();
+        if first_line.chars().count() > 60 {
+            title_suffix.push_str("...");
+        }
+        let title = format!("[Planifié] {}", title_suffix);
+
         let conversation = ConversationService::new().create(
             db,
             CreateConversationInput {
                 project_id: schedule.project_id.clone(),
-                title: "[Planifié]".to_string(),
+                title,
                 conversation_type: Some("work".into()),
                 business_mode: Some(mode.clone()),
                 bob_mode: Some(mode.clone()),
@@ -417,6 +433,10 @@ impl SchedulerService {
             },
         )?;
         let settings = SettingsService::new().get(db)?;
+        if settings.chrome_control_enabled {
+            // Scheduled runs must not reuse a stale Chrome MCP payload either.
+            crate::services::chrome_mcp::ChromeMcpService::ensure_bundle()?;
+        }
         let task = TaskService::new().create(
             db,
             CreateTaskInput {
@@ -527,6 +547,13 @@ impl SchedulerService {
         integration_ids.sort();
         integration_ids.dedup();
         let integrations = integration_context(bob, &integration_ids);
+        let visible_chrome_requested = settings.chrome_control_enabled
+            && !settings.sandbox_mode
+            && (crate::services::bob::explicitly_requests_visible_chrome(&schedule.instructions)
+                || scheduled_plugin.as_ref().is_some_and(|plugin| {
+                    plugin.id.to_lowercase().contains("chrome")
+                        || plugin.name.to_lowercase().contains("chrome")
+                }));
         let prompt = [
             (!settings.global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", settings.global_instructions.trim())),
             project.as_ref().and_then(|p| p.custom_instructions.as_ref()).filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
@@ -541,7 +568,7 @@ impl SchedulerService {
         let workspace = project.and_then(|p| p.local_path);
         let risk = crate::services::permission_governance::RiskContext {
             computer_use: settings.computer_use_enabled,
-            chrome: settings.chrome_control_enabled,
+            chrome: visible_chrome_requested,
             mcp: settings.mcp_enabled,
             web: settings.web_enabled,
         }
@@ -607,6 +634,7 @@ impl SchedulerService {
                 plugin_hooks,
                 resume_task_id: None,
                 trust_workspace,
+                allow_visible_chrome: visible_chrome_requested,
             },
         ) {
             let _ = db.connection().execute(
@@ -624,7 +652,7 @@ impl SchedulerService {
             );
             return Err(error);
         }
-        
+
         let _ = app.emit("conversation-updated", &conversation.id);
         let _ = app.emit("task-updated", &task.id);
 

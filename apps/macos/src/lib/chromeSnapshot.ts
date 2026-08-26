@@ -2,6 +2,8 @@ export type ChromeSnapshot = {
   id: string
   url: string
   title: string
+  imagePath?: string
+  background?: boolean
   headings: string[]
   actions: string[]
   text: string
@@ -10,6 +12,7 @@ export type ChromeSnapshot = {
 }
 
 const CHROME_TOOLS = new Set([
+  'web_fetch',
   'browser_snapshot',
   'chrome_read_front_tab',
   'chrome_open_url',
@@ -69,11 +72,11 @@ function parseMaybeJson(value: unknown): unknown {
   }
 }
 
-type CollectedChromeSnapshot = Pick<ChromeSnapshot, 'url' | 'title' | 'headings' | 'actions' | 'text'>
+type CollectedChromeSnapshot = Pick<ChromeSnapshot, 'url' | 'title' | 'imagePath' | 'headings' | 'actions' | 'text'>
 
 function collectFrom(source: Record<string, unknown> | null, depth = 0): CollectedChromeSnapshot {
   if (!source) {
-    return { url: '', title: '', headings: [] as string[], actions: [] as string[], text: '' }
+    return { url: '', title: '', imagePath: '', headings: [] as string[], actions: [] as string[], text: '' }
   }
   const tab = asRecord(source.tab)
   const outline = asRecord(source.outline)
@@ -82,7 +85,7 @@ function collectFrom(source: Record<string, unknown> | null, depth = 0): Collect
     : null
   const fromNested: CollectedChromeSnapshot = nested && nested !== source
     ? collectFrom(nested, depth + 1)
-    : { url: '', title: '', headings: [] as string[], actions: [] as string[], text: '' }
+    : { url: '', title: '', imagePath: '', headings: [] as string[], actions: [] as string[], text: '' }
   return {
     url: asString(source.url)
       || asString(source.requested_url)
@@ -93,6 +96,11 @@ function collectFrom(source: Record<string, unknown> | null, depth = 0): Collect
       || asString(tab?.title)
       || asString(outline?.title)
       || fromNested.title,
+    imagePath: asString(source.screenshot_path)
+      || asString(source.screenshotPath)
+      || asString(source.image_path)
+      || asString(source.imagePath)
+      || fromNested.imagePath,
     headings: asStringList(source.headings).length
       ? asStringList(source.headings)
       : asStringList(outline?.headings).length
@@ -120,7 +128,7 @@ export function extractChromeSnapshot(event: {
     || asString(payload.tool_name)
     || asString(payload.toolName)
     || asString(input?.name)
-  if (!isChromeSnapshotTool(toolName) && !/aperçu chrome/i.test(event.title || '')) return null
+  if (!isChromeSnapshotTool(toolName) && !/(?:aperçu chrome|lecture web|source web)/i.test(event.title || '')) return null
 
   const parsedContent = asRecord(parseMaybeJson(event.content))
   const fields = collectFrom({
@@ -134,13 +142,18 @@ export function extractChromeSnapshot(event: {
   if (!url || !/^https?:\/\//i.test(url)) return null
   const pending = event.eventType === 'tool_started'
   const failed = event.eventType === 'tool_error' || event.eventType === 'error'
+  const backgroundWeb = ['web_fetch', 'browser_snapshot'].includes(chromeToolShortName(toolName))
   const hostname = (() => {
     try { return url ? new URL(url).hostname : '' } catch { return '' }
   })()
   return {
     id: `${toolName || 'chrome'}:${url || 'pending'}`,
     url,
-    title: fields.title || hostname || (pending ? 'Aperçu Chrome…' : 'Chrome'),
+    title: fields.title || hostname || (backgroundWeb
+      ? (pending ? 'Lecture web…' : 'Source web')
+      : (pending ? 'Aperçu Chrome…' : 'Chrome')),
+    imagePath: fields.imagePath || undefined,
+    background: backgroundWeb,
     headings: fields.headings,
     actions: fields.actions,
     text: fields.text,
@@ -158,6 +171,7 @@ export function upsertChromeSnapshot(list: ChromeSnapshot[], next: ChromeSnapsho
     ...current,
     ...next,
     title: next.title && next.title !== 'Chrome' ? next.title : current.title,
+    imagePath: next.imagePath || current.imagePath,
     headings: next.headings.length ? next.headings : current.headings,
     actions: next.actions.length ? next.actions : current.actions,
     text: next.text || current.text,

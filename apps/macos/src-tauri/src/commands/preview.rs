@@ -464,6 +464,7 @@ mod tests {
         assert_eq!(classify_extension("xlsx").0, "office");
         assert_eq!(classify_extension("md").0, "markdown");
         assert_eq!(classify_extension("pdf").0, "pdf");
+        assert_eq!(classify_extension("svg").0, "image");
     }
 
     #[test]

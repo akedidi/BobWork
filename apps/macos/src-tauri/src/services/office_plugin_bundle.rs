@@ -1,5 +1,6 @@
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 const OFFICE_MCP_SCRIPT: &str = include_str!("../../resources/office/office_mcp.py");
@@ -10,6 +11,10 @@ const IBM_PURSUIT_LIB: &str = include_str!("../../resources/consulting/ibm_pursu
 const IBM_PURSUIT_MCP_SERVER: &str = include_str!("../../resources/consulting/mcp/server.py");
 const IBM_PURSUIT_CLI_SCRIPT: &str =
     include_str!("../../resources/consulting/scripts/brief_pursuit.py");
+const CLOUD_ARCHITECT_BUNDLE: &[u8] =
+    include_bytes!("../../resources/cloud-architect/cloud-architect.zip");
+const IBM_AGENTIC_PROFESSIONS_BUNDLE: &[u8] =
+    include_bytes!("../../resources/ibm-agentic-professions/ibm-agentic-professions.zip");
 
 pub struct OfficePluginBundle;
 
@@ -18,6 +23,8 @@ impl OfficePluginBundle {
         Self::mcp_script_for(manifest).is_some()
             || Self::is_cto_bundle(manifest)
             || Self::is_ibm_pursuit_bundle(manifest)
+            || Self::is_cloud_architect_bundle(manifest)
+            || Self::is_ibm_agentic_profession_bundle(manifest)
     }
 
     fn is_cto_bundle(manifest: &Value) -> bool {
@@ -26,6 +33,19 @@ impl OfficePluginBundle {
 
     fn is_ibm_pursuit_bundle(manifest: &Value) -> bool {
         Self::mcp_env_contains(manifest, "BOB_IBM_PURSUIT")
+    }
+
+    fn is_cloud_architect_bundle(manifest: &Value) -> bool {
+        manifest.get("slug").and_then(Value::as_str) == Some("cloud-architect")
+            && manifest.get("builtin").and_then(Value::as_bool) == Some(true)
+    }
+
+    fn is_ibm_agentic_profession_bundle(manifest: &Value) -> bool {
+        manifest
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug.starts_with("ibm-agentic-"))
+            && manifest.get("builtin").and_then(Value::as_bool) == Some(true)
     }
 
     fn is_python_work_bundle(manifest: &Value) -> bool {
@@ -77,6 +97,22 @@ impl OfficePluginBundle {
         manifest: &Value,
         overwrite_embedded: bool,
     ) -> AppResult<()> {
+        if Self::is_cloud_architect_bundle(manifest) {
+            return Self::write_cloud_architect_bundle(
+                skill_dir,
+                plugin_id,
+                manifest,
+                overwrite_embedded,
+            );
+        }
+        if Self::is_ibm_agentic_profession_bundle(manifest) {
+            return Self::write_ibm_agentic_profession_bundle(
+                skill_dir,
+                plugin_id,
+                manifest,
+                overwrite_embedded,
+            );
+        }
         if Self::is_cto_bundle(manifest) {
             return Self::write_cto_python_bundle(
                 skill_dir,
@@ -120,6 +156,147 @@ impl OfficePluginBundle {
             AppError::Plugin(format!("Failed to write .bob-work-plugin.json: {}", error))
         })?;
 
+        Ok(())
+    }
+
+    fn write_cloud_architect_bundle(
+        skill_dir: &Path,
+        plugin_id: &str,
+        manifest: &Value,
+        overwrite_embedded: bool,
+    ) -> AppResult<()> {
+        let cursor = Cursor::new(CLOUD_ARCHITECT_BUNDLE);
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|error| {
+            AppError::Plugin(format!("Failed to open Cloud Architect bundle: {}", error))
+        })?;
+
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|error| {
+                AppError::Plugin(format!("Failed to read Cloud Architect bundle: {}", error))
+            })?;
+            let Some(relative_path) = entry.enclosed_name() else {
+                return Err(AppError::Plugin(
+                    "Cloud Architect bundle contains an unsafe path".into(),
+                ));
+            };
+            let output_path = skill_dir.join(relative_path);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&output_path)?;
+                continue;
+            }
+            if output_path.exists() && !overwrite_embedded {
+                continue;
+            }
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|error| {
+                AppError::Plugin(format!(
+                    "Failed to unpack Cloud Architect bundle: {}",
+                    error
+                ))
+            })?;
+            let mut output = std::fs::File::create(&output_path)?;
+            output.write_all(&bytes)?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(mode));
+            }
+        }
+
+        std::fs::write(
+            skill_dir.join(".bob-work-plugin.json"),
+            serde_json::to_string_pretty(manifest).map_err(|error| {
+                AppError::Plugin(format!(
+                    "Failed to serialize Cloud Architect manifest: {}",
+                    error
+                ))
+            })?,
+        )?;
+        std::fs::write(skill_dir.join(".bob-work-plugin-id"), plugin_id)?;
+        Ok(())
+    }
+
+    fn write_ibm_agentic_profession_bundle(
+        skill_dir: &Path,
+        plugin_id: &str,
+        manifest: &Value,
+        overwrite_embedded: bool,
+    ) -> AppResult<()> {
+        let slug = manifest
+            .get("slug")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AppError::Plugin("Agentic profession manifest is missing slug".into())
+            })?;
+        let cursor = Cursor::new(IBM_AGENTIC_PROFESSIONS_BUNDLE);
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|error| {
+            AppError::Plugin(format!(
+                "Failed to open IBM agentic professions bundle: {}",
+                error
+            ))
+        })?;
+        let prefix = Path::new(slug);
+
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|error| {
+                AppError::Plugin(format!(
+                    "Failed to read IBM agentic professions bundle: {}",
+                    error
+                ))
+            })?;
+            let Some(archive_path) = entry.enclosed_name() else {
+                return Err(AppError::Plugin(
+                    "IBM agentic professions bundle contains an unsafe path".into(),
+                ));
+            };
+            let Ok(relative_path) = archive_path.strip_prefix(prefix) else {
+                continue;
+            };
+            if relative_path.as_os_str().is_empty() {
+                continue;
+            }
+            // PluginDeployService generates the root file from manifest.instructions
+            // and preserves its enabled/disabled state. The archive supplies the
+            // detailed sub-skills and references around that canonical root.
+            if relative_path == Path::new("SKILL.md") {
+                continue;
+            }
+            let output_path = skill_dir.join(relative_path);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&output_path)?;
+                continue;
+            }
+            if output_path.exists() && !overwrite_embedded {
+                continue;
+            }
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|error| {
+                AppError::Plugin(format!(
+                    "Failed to unpack IBM agentic profession {}: {}",
+                    slug, error
+                ))
+            })?;
+            let mut output = std::fs::File::create(&output_path)?;
+            output.write_all(&bytes)?;
+        }
+
+        std::fs::write(
+            skill_dir.join(".bob-work-plugin.json"),
+            serde_json::to_string_pretty(manifest).map_err(|error| {
+                AppError::Plugin(format!(
+                    "Failed to serialize IBM agentic profession manifest: {}",
+                    error
+                ))
+            })?,
+        )?;
+        std::fs::write(skill_dir.join(".bob-work-plugin-id"), plugin_id)?;
         Ok(())
     }
 
@@ -317,6 +494,128 @@ mod tests {
     use super::OfficePluginBundle;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn writes_built_in_cloud_architect_bundle_with_d2() {
+        let temp = std::env::temp_dir().join(format!(
+            "bob-work-cloud-architect-bundle-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../resources/cloud-architect/manifest.json"
+        ))
+        .expect("manifest");
+
+        OfficePluginBundle::write_bundle(&temp, "builtin-cloud-architect", &manifest, true)
+            .expect("bundle");
+
+        assert!(temp
+            .join("skills/senior-cloud-architect/SKILL.md")
+            .is_file());
+        assert!(temp.join("scripts/d2_runtime.py").is_file());
+        let d2 = temp.join("vendor/d2/v0.7.1/bin/d2");
+        assert!(d2.is_file());
+        assert!(fs::metadata(&d2).expect("D2 metadata").len() > 1_000_000);
+        assert_eq!(
+            fs::read_to_string(temp.join(".bob-work-plugin-id")).expect("plugin id"),
+            "builtin-cloud-architect"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn writes_all_built_in_ibm_agentic_professions_with_specialized_skills() {
+        let cases = [
+            (
+                "builtin-ibm-agentic-designer",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-designer/manifest.json"
+                ),
+                "skills/accessibility-audit/SKILL.md",
+                10,
+            ),
+            (
+                "builtin-ibm-agentic-consultant",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-consultant/manifest.json"
+                ),
+                "skills/red-team-review/SKILL.md",
+                10,
+            ),
+            (
+                "builtin-ibm-agentic-rfp",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-rfp/manifest.json"
+                ),
+                "skills/compliance-matrix/SKILL.md",
+                8,
+            ),
+            (
+                "builtin-ibm-agentic-product-manager",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-product-manager/manifest.json"
+                ),
+                "skills/rice/SKILL.md",
+                11,
+            ),
+            (
+                "builtin-ibm-agentic-delivery-manager",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-delivery-manager/manifest.json"
+                ),
+                "skills/raid/SKILL.md",
+                10,
+            ),
+            (
+                "builtin-ibm-agentic-change-manager",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-change-manager/manifest.json"
+                ),
+                "skills/adkar/SKILL.md",
+                10,
+            ),
+            (
+                "builtin-ibm-agentic-solution-architect",
+                include_str!(
+                    "../../resources/ibm-agentic-professions/plugins/ibm-agentic-solution-architect/manifest.json"
+                ),
+                "skills/c4/SKILL.md",
+                14,
+            ),
+        ];
+
+        for (plugin_id, raw_manifest, expected_skill, expected_count) in cases {
+            let temp = std::env::temp_dir().join(format!(
+                "bob-work-agentic-profession-bundle-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let manifest: serde_json::Value = serde_json::from_str(raw_manifest).expect("manifest");
+
+            OfficePluginBundle::write_bundle(&temp, plugin_id, &manifest, true).expect("bundle");
+
+            assert!(temp.join(expected_skill).is_file(), "{plugin_id}");
+            assert!(temp.join("references/sources.md").is_file(), "{plugin_id}");
+            assert!(
+                temp.join(".codex-plugin/plugin.json").is_file(),
+                "{plugin_id}"
+            );
+            assert_eq!(
+                fs::read_to_string(temp.join(".bob-work-plugin-id")).expect("plugin id"),
+                plugin_id
+            );
+            let deployed_manifest: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(temp.join(".bob-work-plugin.json")).expect("manifest"),
+            )
+            .expect("valid JSON");
+            assert_eq!(deployed_manifest["builtin"], true);
+            assert_eq!(
+                deployed_manifest["skills"].as_array().map(Vec::len),
+                Some(expected_count),
+                "{plugin_id}"
+            );
+            let _ = fs::remove_dir_all(temp);
+        }
+    }
 
     #[test]
     fn writes_office_mcp_bundle_for_specialized_plugins() {

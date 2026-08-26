@@ -1,0 +1,7 @@
+interface:
+  display_name: "requirements-analysis"
+  short_description: "Transformer les besoins en exigences fonctionnelles traçable"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $requirements-analysis to transformer les besoins en exigences fonctionnelles traçables."
+policy:
+  allow_implicit_invocation: true

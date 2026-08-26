@@ -528,17 +528,24 @@ mod orphan_recovery_tests {
         let db = Database::new_in_memory().expect("database");
         db.run_migrations().expect("migrations");
         let service = TaskService::new();
-        let task = service.create(&db, CreateTaskInput {
-            objective: "Action bureau".into(),
-            project_id: None,
-            conversation_id: None,
-            mode: Some("agent".into()),
-            permission_policy: None,
-            budget: None,
-            max_time: None,
-            schedule_id: None,
-        }).expect("task");
-        service.start_run(&db, &task.id, "stale-session").expect("run");
+        let task = service
+            .create(
+                &db,
+                CreateTaskInput {
+                    objective: "Action bureau".into(),
+                    project_id: None,
+                    conversation_id: None,
+                    mode: Some("agent".into()),
+                    permission_policy: None,
+                    budget: None,
+                    max_time: None,
+                    schedule_id: None,
+                },
+            )
+            .expect("task");
+        service
+            .start_run(&db, &task.id, "stale-session")
+            .expect("run");
 
         assert_eq!(service.recover_orphaned_runs(&db).expect("recover"), 1);
         let recovered = service.get_by_id(&db, &task.id).unwrap().unwrap();

@@ -1,0 +1,7 @@
+interface:
+  display_name: "security"
+  short_description: "Intégrer la sécurité par menace, contrôle et preuve."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $security to intégrer la sécurité par menace, contrôle et preuve."
+policy:
+  allow_implicit_invocation: true

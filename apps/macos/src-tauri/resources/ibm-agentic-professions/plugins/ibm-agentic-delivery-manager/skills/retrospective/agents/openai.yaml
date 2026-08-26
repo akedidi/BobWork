@@ -1,0 +1,7 @@
+interface:
+  display_name: "retrospective"
+  short_description: "Améliorer qualité et efficacité par une expérimentation d’éq"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $retrospective to améliorer qualité et efficacité par une expérimentation d’équipe sûre."
+policy:
+  allow_implicit_invocation: true

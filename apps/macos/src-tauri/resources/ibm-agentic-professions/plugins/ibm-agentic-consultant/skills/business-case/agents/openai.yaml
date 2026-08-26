@@ -1,0 +1,7 @@
+interface:
+  display_name: "business-case"
+  short_description: "Évaluer valeur, coût, risque et faisabilité d’une décision."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $business-case to évaluer valeur, coût, risque et faisabilité d’une décision."
+policy:
+  allow_implicit_invocation: true

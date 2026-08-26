@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type WheelEvent } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { open as chooseFile } from '@tauri-apps/plugin-dialog'
 import ReactMarkdown from 'react-markdown'
@@ -504,7 +504,10 @@ function PreviewContent({
       <div className="preview-zoom-viewport">
         <div
           className="preview-zoom-surface"
-          style={{ zoom }}
+          style={{
+            zoom,
+            '--preview-image-max-width': `${Math.round(zoom * 100)}%`,
+          } as CSSProperties}
         >
           {body}
         </div>

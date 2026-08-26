@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   deleteSkill, getSkills, saveSkill, setSkillEnabled,
 } from '../lib/ipc'
-import { PluginIcon, resolveIconFromText } from '../components/PluginIcon'
+import { PluginIcon, resolveSkillIcon } from '../components/PluginIcon'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import { errorMessage } from '../lib/errorMessage'
 import { isBuiltinSkill, sortSkillsForDisplay } from '../lib/builtinCatalog'
@@ -206,7 +206,7 @@ export default function ExtensionsView() {
               const deletable = canDeleteSkill(skill)
               return <div className={`skill-list-row ${selectedSkillKey === key ? 'selected' : ''} ${skill.enabled ? '' : 'disabled'}`} key={key}>
                 <button className="skill-row-main" onClick={() => { setSelectedSkillKey(key); setSkillPanel('detail') }}>
-                  <PluginIcon icon={resolveIconFromText(skill.slug, skill.name, skill.description)} size="md" className="skill-row-icon" />
+                  <PluginIcon icon={resolveSkillIcon(skill)} size="md" className="skill-row-icon" />
                   <span className="skill-row-copy"><strong>{skill.name}</strong><small>{skill.description || 'Aucune description'}</small></span>
                   <span className="skill-row-badges">
                     {isBuiltinSkill(skill) ? <span className="skill-builtin-badge">Intégré</span> : null}
@@ -238,7 +238,7 @@ export default function ExtensionsView() {
 
         {skillPanel === 'detail' && selectedSkill && <aside className="skill-detail-panel" aria-label={`Détails du skill ${selectedSkill.name}`}>
           <div className="skill-panel-heading">
-            <div className="skill-detail-title"><PluginIcon icon={resolveIconFromText(selectedSkill.slug, selectedSkill.name, selectedSkill.description)} size="lg" className="skill-row-icon" /><div><h2>{selectedSkill.name}{isBuiltinSkill(selectedSkill) ? <span className="skill-builtin-badge">Intégré</span> : null}</h2><small>{selectedSkill.slug}</small></div></div>
+            <div className="skill-detail-title"><PluginIcon icon={resolveSkillIcon(selectedSkill)} size="lg" className="skill-row-icon" /><div><h2>{selectedSkill.name}{isBuiltinSkill(selectedSkill) ? <span className="skill-builtin-badge">Intégré</span> : null}</h2><small>{selectedSkill.slug}</small></div></div>
             <button className="icon-btn" aria-label="Fermer les détails" onClick={closeSkillPanel}>×</button>
           </div>
           <div className="skill-detail-status">

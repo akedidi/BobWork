@@ -160,10 +160,11 @@ fn run_native_input_on_main_thread(
 ) -> Result<String, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_native_input(&request)
-        }))
-        .unwrap_or_else(|_| Err("Le contrôle natif macOS a rencontré une erreur interne.".into()));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_native_input(&request)))
+                .unwrap_or_else(|_| {
+                    Err("Le contrôle natif macOS a rencontré une erreur interne.".into())
+                });
         let _ = sender.send(result);
     })
     .map_err(|error| format!("Impossible de planifier l’action native : {error}"))?;
@@ -173,7 +174,9 @@ fn run_native_input_on_main_thread(
 }
 
 fn run_native_input(request: &BridgeRequest) -> Result<String, String> {
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event::{
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton,
+    };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
 
@@ -189,9 +192,21 @@ fn run_native_input(request: &BridgeRequest) -> Result<String, String> {
         Some("click") => {
             let point = CGPoint::new(request.x.unwrap_or(0.0), request.y.unwrap_or(0.0));
             let right = request.button.as_deref() == Some("right");
-            let button = if right { CGMouseButton::Right } else { CGMouseButton::Left };
-            let down_type = if right { CGEventType::RightMouseDown } else { CGEventType::LeftMouseDown };
-            let up_type = if right { CGEventType::RightMouseUp } else { CGEventType::LeftMouseUp };
+            let button = if right {
+                CGMouseButton::Right
+            } else {
+                CGMouseButton::Left
+            };
+            let down_type = if right {
+                CGEventType::RightMouseDown
+            } else {
+                CGEventType::LeftMouseDown
+            };
+            let up_type = if right {
+                CGEventType::RightMouseUp
+            } else {
+                CGEventType::LeftMouseUp
+            };
             for _ in 0..request.clicks.unwrap_or(1).clamp(1, 2) {
                 CGEvent::new_mouse_event(source()?, down_type, point, button)
                     .map_err(|_| "Impossible de créer le clic macOS.".to_string())?
@@ -215,12 +230,22 @@ fn run_native_input(request: &BridgeRequest) -> Result<String, String> {
             Ok("typed".into())
         }
         Some("key") => {
-            let key_code = request.key_code.ok_or_else(|| "key_code manquant".to_string())?;
+            let key_code = request
+                .key_code
+                .ok_or_else(|| "key_code manquant".to_string())?;
             let mut flags = CGEventFlags::empty();
-            if request.command.unwrap_or(false) { flags |= CGEventFlags::CGEventFlagCommand; }
-            if request.shift.unwrap_or(false) { flags |= CGEventFlags::CGEventFlagShift; }
-            if request.option.unwrap_or(false) { flags |= CGEventFlags::CGEventFlagAlternate; }
-            if request.control.unwrap_or(false) { flags |= CGEventFlags::CGEventFlagControl; }
+            if request.command.unwrap_or(false) {
+                flags |= CGEventFlags::CGEventFlagCommand;
+            }
+            if request.shift.unwrap_or(false) {
+                flags |= CGEventFlags::CGEventFlagShift;
+            }
+            if request.option.unwrap_or(false) {
+                flags |= CGEventFlags::CGEventFlagAlternate;
+            }
+            if request.control.unwrap_or(false) {
+                flags |= CGEventFlags::CGEventFlagControl;
+            }
             for down_state in [true, false] {
                 let event = CGEvent::new_keyboard_event(source()?, key_code, down_state)
                     .map_err(|_| "Impossible de créer la touche macOS.".to_string())?;

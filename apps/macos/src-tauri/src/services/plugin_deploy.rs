@@ -280,9 +280,19 @@ impl PluginDeployService {
             description.to_string()
         };
         let safe_description = description.replace('\n', " ").replace('"', "\\\"");
+        let icon = manifest
+            .get("icon")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let icon_line = if icon.is_empty() {
+            String::new()
+        } else {
+            format!("icon: {icon}\n")
+        };
         format!(
-            "---\nname: {}\ndescription: \"{}\"\nuser-invocable: true\n---\n\n{}\n",
-            slug, safe_description, skill_body
+            "---\nname: {}\ndescription: \"{}\"\n{}user-invocable: true\n---\n\n{}\n",
+            slug, safe_description, icon_line, skill_body
         )
     }
 

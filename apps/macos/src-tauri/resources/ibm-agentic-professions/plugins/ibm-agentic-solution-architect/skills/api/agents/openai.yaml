@@ -1,0 +1,7 @@
+interface:
+  display_name: "API"
+  short_description: "Concevoir une API cohérente, sécurisée et évolutive."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $api to concevoir une API cohérente, sécurisée et évolutive."
+policy:
+  allow_implicit_invocation: true

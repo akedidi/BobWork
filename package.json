@@ -13,6 +13,8 @@
     "mac:test:e2e": "pnpm --filter macos run test:e2e",
     "mac:test:live-bob-oauth": "pnpm --filter macos run test:e2e:live-bob-oauth",
     "mac:smoke:bob": "bash apps/macos/scripts/smoke-bob-shell.sh",
+    "mac:cache:trim": "bash apps/macos/scripts/trim-build-cache.sh",
+    "mac:cache:clean": "bash apps/macos/scripts/trim-build-cache.sh --force",
     "security:audit:js": "pnpm audit --audit-level=high --ignore CVE-2026-56876",
     "security:audit:rust": "cargo audit --file apps/macos/src-tauri/Cargo.lock",
     "security:audit": "pnpm security:audit:js && pnpm security:audit:rust",

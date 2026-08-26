@@ -1,0 +1,7 @@
+interface:
+  display_name: "dependency-analysis"
+  short_description: "Identifier et réduire les dépendances qui menacent le flux."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $dependency-analysis to identifier et réduire les dépendances qui menacent le flux."
+policy:
+  allow_implicit_invocation: true

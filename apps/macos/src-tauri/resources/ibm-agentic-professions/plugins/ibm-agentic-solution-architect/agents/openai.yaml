@@ -1,0 +1,7 @@
+interface:
+  display_name: "Solution Architect"
+  short_description: "Conçoit une architecture cible traçable depuis les exigences"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-solution-architect to extrais FR, NFR, contraintes et drivers d’architecture."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "accessibility-audit"
+  short_description: "Auditer l’accessibilité contre WCAG 2.2 et les critères IBM/"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $accessibility-audit to auditer l’accessibilité contre WCAG 2.2 et les critères IBM/Carbon applicables."
+policy:
+  allow_implicit_invocation: true

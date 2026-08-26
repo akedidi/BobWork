@@ -19,6 +19,7 @@ describe('composerAttachments', () => {
     expect(getFileVisualKind('/tmp/data.xlsx')).toBe('spreadsheet')
     expect(getFileVisualKind('/tmp/slides.pptx')).toBe('presentation')
     expect(getFileVisualKind('/tmp/photo.png')).toBe('image')
+    expect(getFileVisualKind('/tmp/meeting-recording.m4a')).toBe('audio')
     expect(getFileVisualKind('/tmp/project', true)).toBe('folder')
   })
 

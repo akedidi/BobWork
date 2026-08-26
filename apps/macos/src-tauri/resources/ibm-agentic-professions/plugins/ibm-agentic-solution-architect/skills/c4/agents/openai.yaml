@@ -1,0 +1,7 @@
+interface:
+  display_name: "C4"
+  short_description: "Communiquer l’architecture aux bons niveaux avec le modèle C"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $c4 to communiquer l’architecture aux bons niveaux avec le modèle C4."
+policy:
+  allow_implicit_invocation: true

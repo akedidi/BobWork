@@ -6,6 +6,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, type MutableRefObject } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import { Copy, Check, Pencil } from 'lucide-react'
 import Composer from '../components/Composer/Composer'
 import WorkspacePanel, { type PanelActivity, type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
@@ -22,14 +23,17 @@ import type { MessageAttachment, MessageSource, TaskDetail } from '@bob-work/sha
 import { useT } from '../i18n'
 import { errorMessage } from '../lib/errorMessage'
 import { isActiveTaskState, latestActiveTaskForConversation } from '../lib/activeTasks'
-import { useAppStore } from '../stores/appStore'
+import { useAppStore, useConversationStore } from '../stores/appStore'
+import { useConversationUpdated, useConversationMessagesChanged, useTaskUpdated, useBobSessionDone } from '../hooks/useTauriEvents'
 import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath } from '../lib/localFilePaths'
 import { PluginIcon, iconForFileName } from '../components/PluginIcon'
 import { ChromeSnapshotCard } from '../components/ChromeSnapshot/ChromeSnapshotCard'
+import { AUTO_PREVIEW_EXT, INLINE_IMAGE_EXT } from "../constants/fileTypes"
 import { extractChromeSnapshot, upsertChromeSnapshot, type ChromeSnapshot } from '../lib/chromeSnapshot'
 import { useAppDialog } from '../components/AppDialog'
+import { SubagentStatusPanel } from '../components/SubagentStatus/SubagentStatusPanel'
+import bobAvatarIcon from '../assets/bob-avatar.png'
 
-const AUTO_PREVIEW_EXT = /\.(pptx?|docx?|xlsx?|pdf)$/i
 
 function sourcesFromLocalPaths(content: string): MessageSource[] {
   return extractLocalFilePaths(content).map(path => ({
@@ -62,6 +66,97 @@ function mergeMessageSources(...groups: (MessageSource[] | undefined)[]): Messag
     }
   }
   return Array.from(byKey.values())
+}
+
+async function registerMessageArtifacts(
+  messages: Awaited<ReturnType<typeof getMessages>>,
+  conversationId: string,
+): Promise<void> {
+  const registrations: Promise<unknown>[] = []
+  for (const message of messages) {
+    if (message.author === 'user') continue
+    const paths = new Set([
+      ...extractLocalFilePaths(message.content),
+      ...(message.sources ?? []).map(source => source.path).filter((path): path is string => !!path),
+    ])
+    for (const path of paths) registrations.push(registerExternalArtifact(path, conversationId))
+  }
+  await Promise.allSettled(registrations)
+}
+
+export function normalizeAssistantMarkdown(markdown: string): string {
+  let normalized = markdown.replace(/^(#{1,6})(?=[^\s#])/gm, '$1 ')
+
+  // Some streamed answers lose the line break between two table rows. Restore
+  // it before asking remark-gfm to parse the table.
+  if (/\|\s*\|\s*:?-{3}/.test(normalized)) {
+    normalized = normalized.replace(/\|\s*\|(?=\s*-)/g, '|\n|')
+    normalized = normalized.replace(/\|\s*\|(?=\s*[^|\-])/g, '|\n|')
+  }
+
+  const lines = normalized.split('\n')
+  const tableCells = (line: string): string[] | null => {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null
+    return trimmed.slice(1, -1).split('|').map(cell => cell.trim())
+  }
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const delimiters = tableCells(lines[index])
+    if (!delimiters?.length || !delimiters.every(cell => /^:?-{3,}:?$/.test(cell))) continue
+
+    // A flattened block can leave prose/the heading directly before the first
+    // header pipe. Move that prefix back to its own line.
+    const firstPipe = lines[index - 1].indexOf('|')
+    if (firstPipe > 0 && lines[index - 1].slice(0, firstPipe).trim()) {
+      const prefix = lines[index - 1].slice(0, firstPipe).trimEnd()
+      const header = lines[index - 1].slice(firstPipe)
+      lines.splice(index - 1, 1, prefix, header)
+      index += 1
+    }
+
+    const headerCells = tableCells(lines[index - 1])
+    if (!headerCells || headerCells.length >= delimiters.length) continue
+
+    // This is the malformed header emitted by the architecture report:
+    // `Label Couleur` represents two data columns. Repair it semantically.
+    const lastHeader = headerCells[headerCells.length - 1] ?? ''
+    const splitHeader = lastHeader.match(/^(Label)\s+(Couleur|Color)$/i)
+    if (headerCells.length + 1 === delimiters.length && splitHeader) {
+      headerCells.splice(-1, 1, splitHeader[1], splitHeader[2])
+    }
+
+    // Keep other imperfect LLM tables renderable without inventing labels.
+    while (headerCells.length < delimiters.length) headerCells.push('')
+    lines[index - 1] = `| ${headerCells.join(' | ')} |`
+  }
+
+  normalized = lines.join('\n')
+  return normalized
+}
+
+function renderableImageSource(source: string): string {
+  if (!source) return ''
+  if (/^(?:https?:|data:|blob:|asset:)/i.test(source)) return source
+  let localPath = source
+  if (/^file:\/\//i.test(source)) {
+    try { localPath = decodeURIComponent(new URL(source).pathname) } catch { localPath = source.replace(/^file:\/\//i, '') }
+  }
+  if (!localPath.startsWith('/')) return source
+  // Markdown parsers preserve percent-encoding in absolute paths. Tauri's
+  // asset protocol expects the real filesystem path (not `%20` segments).
+  try { localPath = decodeURIComponent(localPath) } catch { /* keep malformed input unchanged */ }
+  try { return convertFileSrc(localPath) } catch { return source }
+}
+
+function ResilientImage({ source, alt, className }: { source: string; alt: string; className?: string }) {
+  const t = useT()
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [source])
+  if (failed || !source) {
+    return <span className={`${className ? `${className}-fallback ` : ''}image-preview-fallback`}>{t('chat.imagePreviewUnavailable')}</span>
+  }
+  return <img className={className} src={renderableImageSource(source)} alt={alt} loading="lazy" onError={() => setFailed(true)} />
 }
 
 function applyActiveTaskForConversation(
@@ -178,7 +273,11 @@ export default function ChatView() {
   const [convId, setConvId] = useState<string | null>(id ?? null)
   const [convTitle, setConvTitle] = useState('Nouvelle conversation')
   const [conversationPinned, setConversationPinned] = useState(false)
-  const [msgs, setMsgs] = useState<Msg[]>([])
+  const setConversationStoreMsgs = useConversationStore(s => s.setMessages)
+  const msgs = useConversationStore(s => convId ? (s.messages[convId] || []) : [])
+  const setMsgs = useCallback((updater: Msg[] | ((prev: Msg[]) => Msg[])) => {
+    if (convId) setConversationStoreMsgs(convId, updater)
+  }, [convId, setConversationStoreMsgs])
   const [isRunning, setIsRunning] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [taskId, setTaskId] = useState<string | null>(null)
@@ -194,6 +293,8 @@ export default function ChatView() {
   const [bobMode, setBobMode] = useState('agent')
 
   const bottomRef = useRef<HTMLDivElement>(null)
+  const messageScrollRef = useRef<HTMLDivElement>(null)
+  const autoScrollEnabledRef = useRef(true)
   const unlistenRef = useRef<UnlistenFn[]>([])
   const runningRef = useRef(false)
   const queueRef = useRef<QueuedPrompt[]>([])
@@ -205,10 +306,27 @@ export default function ChatView() {
     setPromptQueue(next)
   }, [])
 
-  // Auto-scroll on new content
+  // Keep following the response while the reader remains at the bottom.
+  // Assigning scrollTop synchronously avoids competing smooth-scroll
+  // animations when the final answer, activities and previews settle.
+  useLayoutEffect(() => {
+    if (!autoScrollEnabledRef.current) return
+    const container = messageScrollRef.current
+    if (!container) return
+    container.scrollTop = container.scrollHeight
+  }, [msgs, thinkingText, isRunning])
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [msgs, thinkingText])
+    autoScrollEnabledRef.current = true
+    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+  }, [id])
+
+  const handleMessageScroll = useCallback(() => {
+    const container = messageScrollRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    autoScrollEnabledRef.current = distanceFromBottom <= 80
+  }, [])
 
   // ── Load existing conversation ───────────────────────────────
   useEffect(() => {
@@ -216,7 +334,6 @@ export default function ChatView() {
       setConvId(null)
       setConvTitle('Nouvelle conversation')
       setConversationPinned(false)
-      setMsgs([])
       setActivities([])
       setThinkingText('')
       setTaskId(null)
@@ -230,23 +347,30 @@ export default function ChatView() {
       setLoadError(null)
       return
     }
+    const ownsInFlightPromptAtNavigation = runningRef.current
+      && activeSessionRef.current?.conversationId === id
     setConvId(id)
+    // Activity is live, conversation-scoped state. Never let the previous
+    // conversation's tools or sub-agents flash while this history is loading.
+    if (!ownsInFlightPromptAtNavigation) setActivities([])
     useAppStore.getState().markConversationRead(id)
     setConversationPinned(false)
     setLoadingHistory(true)
     setLoadError(null)
 
     Promise.all([getConversation(id), getMessages(id), getTasks()])
-      .then(([conv, messages, allTasks]) => {
+      .then(async ([conv, messages, allTasks]) => {
         if (conv) {
           setConvTitle(conv.title)
           setConversationPinned(conv.pinned)
           setBobMode(conv.bobMode ?? 'agent')
         }
+        // Restore asset-protocol access before local image previews mount.
+        await registerMessageArtifacts(messages, id)
         const activeTask = latestActiveTaskForConversation(allTasks, id)
         const ownsInFlightPrompt = runningRef.current
           && activeSessionRef.current?.conversationId === id
-        setMsgs(prev => {
+        setConversationStoreMsgs(id, prev => {
           const loaded = messages.map(m => ({
             id: m.id,
             role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
@@ -262,13 +386,6 @@ export default function ChatView() {
             : []
           return [...loaded, ...optimistic]
         })
-        // Backfill gallery for files Bob already wrote (e.g. Desktop PPTX).
-        for (const message of messages) {
-          if (message.author === 'user') continue
-          for (const path of extractLocalFilePaths(message.content)) {
-            void registerExternalArtifact(path, id).catch(() => {})
-          }
-        }
         // A newly-created conversation can finish this load before send_message
         // has created its task. Do not let that short window cancel the local run.
         if (id && !(ownsInFlightPrompt && !activeTask)) {
@@ -312,9 +429,11 @@ export default function ChatView() {
     let unlisten: (() => void) | null = null
     listen<string>('conversation-messages-changed', event => {
       if (event.payload !== convId || editingMessageId) return
-      getMessages(convId).then(messages => {
+      getMessages(convId).then(async messages => {
         if (disposed || runningRef.current) return
-        setMsgs(messages.map(m => ({
+        await registerMessageArtifacts(messages, convId)
+        if (disposed || runningRef.current) return
+        setConversationStoreMsgs(convId, messages.map(m => ({
           id: m.id,
           role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
           content: m.content,
@@ -324,12 +443,6 @@ export default function ChatView() {
           attachments: m.attachments,
           sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
         })))
-        for (const message of messages) {
-          if (message.author === 'user') continue
-          for (const path of extractLocalFilePaths(message.content)) {
-            void registerExternalArtifact(path, convId).catch(() => {})
-          }
-        }
         setActivities([])
         setTaskDetail(null)
         setTaskId(null)
@@ -343,7 +456,7 @@ export default function ChatView() {
   }, [convId, editingMessageId])
 
   // ── Handle initial prompt from HomeView ──────────────────────
-  const routeState = location.state as { initialPrompt?: string; mode?: string; attachmentPaths?: string[]; projectId?: string; resumeTaskId?: string } | null
+  const routeState = location.state as { initialPrompt?: string; mode?: string; attachmentPaths?: string[]; projectId?: string; resumeTaskId?: string; focusComposer?: boolean } | null
   const initialPrompt = routeState?.initialPrompt
   const initialMode = routeState?.mode ?? 'agent'
   const initialHandledKey = useRef<string | null>(null)
@@ -419,7 +532,7 @@ export default function ChatView() {
       if (event.payload.eventType === 'error') {
         const errorText = event.payload.chunk?.trim()
         if (!errorText) return
-        setMsgs(prev => {
+        setConversationStoreMsgs(conversationId, prev => {
           const streaming = prev.find(m => m.state === 'streaming')
           if (streaming) {
             return prev.map(m =>
@@ -440,9 +553,9 @@ export default function ChatView() {
 
       // Activities have their own Reflection/panel rendering. Never duplicate
       // them into the assistant answer body.
-      if (!['text', 'token', 'tool_use'].includes(event.payload.eventType)) return
+      if (!['text', 'token'].includes(event.payload.eventType)) return
 
-      setMsgs(prev => {
+      setConversationStoreMsgs(conversationId, prev => {
         const streaming = prev.find(m => m.state === 'streaming')
         if (streaming) {
           return prev.map(m =>
@@ -476,19 +589,14 @@ export default function ChatView() {
       }
       const snapshot = extractChromeSnapshot(event.payload)
       if (snapshot) {
-        setMsgs(prev => prev.map(message =>
+        setConversationStoreMsgs(conversationId, prev => prev.map(message =>
           message.state === 'streaming'
             ? { ...message, snapshots: upsertChromeSnapshot(message.snapshots ?? [], snapshot) }
             : message,
         ))
       }
-      if (
-        eventType.includes('subagent')
-        || eventType.includes('graph')
-        || toolName === 'spawn_subagent'
-      ) {
-        setPanelOpen(true)
-      }
+      // Sub-agent activity is displayed inline above the composer. The right
+      // preview panel remains user-controlled for web pages and files.
     })
 
     // bob-session-done: finalise + persist
@@ -500,14 +608,13 @@ export default function ChatView() {
       activeSessionRef.current = null
 
       const localSources = sourcesFromLocalPaths(fullOutput || '')
-      for (const source of localSources) {
-        if (source.path) {
-          void registerExternalArtifact(source.path, event.payload.conversationId).catch(() => {})
-        }
-      }
+      await Promise.allSettled(localSources
+        .map(source => source.path)
+        .filter((path): path is string => !!path)
+        .map(path => registerExternalArtifact(path, event.payload.conversationId)))
 
       // Finalize the streaming message or create it if it didn't exist (fast execution)
-      setMsgs(prev => {
+      setConversationStoreMsgs(conversationId, prev => {
         const finalizeAssistant = (contentRaw: string, priorError?: string, priorSources?: MessageSource[]): Pick<Msg, 'content' | 'error' | 'state' | 'sources'> => {
           const content = contentRaw.trim()
           const errorText = success ? undefined : (error || priorError)
@@ -551,6 +658,7 @@ export default function ChatView() {
       runningRef.current = false
       setSessionId(null)
       setThinkingText('')
+      setActivities([])
 
       const firstDoc = localSources.find(source => source.path && AUTO_PREVIEW_EXT.test(source.path))
       if (success && firstDoc?.path) {
@@ -580,7 +688,7 @@ export default function ChatView() {
     // execution of subscribeToSession before we swap to the new ones.
     unlistenRef.current.forEach(fn => fn())
     unlistenRef.current = [unToken, unActivity, unDone]
-  }, [])
+  }, [setConversationStoreMsgs])
 
   useEffect(() => {
     if (!convId || !isRunning) return
@@ -610,6 +718,7 @@ export default function ChatView() {
           setSessionId(null)
           activeSessionRef.current = null
           setThinkingText('')
+          setActivities([])
           unlistenRef.current.forEach(fn => fn())
           unlistenRef.current = []
           // The final session event can race with listener registration. The
@@ -617,7 +726,7 @@ export default function ChatView() {
           // "Réflexion" placeholder with messages already persisted by Rust.
           getMessages(convId).then(messages => {
             if (disposed) return
-            setMsgs(messages.map(message => ({
+            setConversationStoreMsgs(convId, messages.map(message => ({
               id: message.id,
               role: (message.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
               content: message.content,
@@ -668,6 +777,7 @@ export default function ChatView() {
       return
     }
 
+    autoScrollEnabledRef.current = true
     runningRef.current = true
     setIsRunning(true)
     setThinkingText(FALLBACK_THINKING)
@@ -685,7 +795,6 @@ export default function ChatView() {
       persisted: false,
       attachments: attachmentPaths.map((path, index) => ({ id: `attachment-${index}`, name: path.split('/').pop() || path, size: 0, type: 'file', path })),
     }
-    setMsgs(prev => [...prev, userMsg])
     setActivities([])
     setTaskDetail(null)
 
@@ -707,8 +816,6 @@ export default function ChatView() {
         setConvId(cid)
         setConvTitle(conv.title)
         setConversationPinned(conv.pinned)
-        // Update URL without re-mounting
-        navigate(`/chat/${cid}`, { replace: true, state: null })
       } catch {
         // fallback: use ephemeral ID
         cid = `ephemeral-${Date.now()}`
@@ -720,6 +827,13 @@ export default function ChatView() {
     // Otherwise that initial empty result can arrive after the optimistic first
     // prompt and erase it from the view while the backend is starting the task.
     activeSessionRef.current = { conversationId: cid, sessionId: null }
+    setConversationStoreMsgs(cid, prev => [...prev, userMsg])
+
+    if (!cid.startsWith('ephemeral-') && id !== cid) {
+      // Update URL without re-mounting. The optimistic prompt is already stored
+      // under the definitive conversation id before the history load begins.
+      navigate(`/chat/${cid}`, { replace: true, state: null })
+    }
 
     const mentionedPluginIds = Array.from(text.matchAll(/@plugin:([A-Za-z0-9-]+)/g), match => match[1])
     const approvedPluginIds: string[] = []
@@ -744,7 +858,7 @@ export default function ChatView() {
             confirmLabel: t('chat.authorize'),
           })
           if (!accepted) {
-            setMsgs(prev => [...prev, {
+            setConversationStoreMsgs(cid, prev => [...prev, {
               id: `permission-${Date.now()}`,
               role: 'assistant',
               content: `Exécution annulée : le plugin ${plugin.name} n’a pas été autorisé.`,
@@ -773,7 +887,7 @@ export default function ChatView() {
         approvedPluginIds,
       })
 
-      setMsgs(prev => prev.map(m =>
+      setConversationStoreMsgs(cid, prev => prev.map(m =>
         m.id === userMsg.id ? { ...m, id: result.userMessageId || m.id, persisted: true } : m
       ))
 
@@ -789,7 +903,7 @@ export default function ChatView() {
       activeSessionRef.current = null
       unlistenRef.current.forEach(fn => fn())
       unlistenRef.current = []
-      setMsgs(prev => [...prev, {
+      setConversationStoreMsgs(cid, prev => [...prev, {
         id: `err-${Date.now()}`,
         role: 'assistant',
         content: `Erreur : ${errorMessage(err)}`,
@@ -799,7 +913,7 @@ export default function ChatView() {
       runningRef.current = false
       setIsRunning(false)
     }
-  }, [builderMode, convId, navigate, replaceQueue, subscribeToSession])
+  }, [builderMode, convId, id, navigate, replaceQueue, setConversationStoreMsgs, subscribeToSession])
 
   const handleSend = useCallback((text: string, mode: string, attachmentPaths: string[] = [], projectId?: string, resumeTaskId?: string) => {
     if (!text.trim()) return
@@ -866,6 +980,7 @@ export default function ChatView() {
     setIsRunning(false)
     setSessionId(null)
     setThinkingText('')
+    setActivities([])
     if (currentTaskId) setTaskId(null)
     unlistenRef.current.forEach(fn => fn())
     unlistenRef.current = []
@@ -967,6 +1082,14 @@ export default function ChatView() {
     }
   }
 
+  const displayedConversationId = id ?? convId
+  const visibleActivities = displayedConversationId
+    ? activities.filter(event => event.conversationId === displayedConversationId)
+    : []
+  const showSubagentStatus = isRunning
+    && !!displayedConversationId
+    && activeSessionRef.current?.conversationId === displayedConversationId
+
   // ── Render ───────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
@@ -1011,7 +1134,7 @@ export default function ChatView() {
       {panelOpen && (
         <WorkspacePanel
           detail={taskDetail}
-          live={activities as PanelActivity[]}
+          live={visibleActivities as PanelActivity[]}
           running={isRunning}
           request={previewRequest}
           onClose={() => setPanelOpen(false)}
@@ -1060,7 +1183,12 @@ export default function ChatView() {
       )}
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', display: msgs.length === 0 && !loadError && !loadingHistory ? 'none' : 'block' }}>
+      <div
+        ref={messageScrollRef}
+        onScroll={handleMessageScroll}
+        aria-label="Messages de la conversation"
+        style={{ flex: 1, overflowY: 'auto', padding: '8px 0', display: msgs.length === 0 && !loadError && !loadingHistory ? 'none' : 'block' }}
+      >
         {loadError ? (
           <LoadErrorBanner
             error={loadError}
@@ -1069,13 +1197,14 @@ export default function ChatView() {
               setLoadingHistory(true)
               setLoadError(null)
               Promise.all([getConversation(id), getMessages(id), getTasks()])
-                .then(([conv, messages, allTasks]) => {
+                .then(async ([conv, messages, allTasks]) => {
                   if (conv) {
                     setConvTitle(conv.title)
                     setConversationPinned(conv.pinned)
                     setBobMode(conv.bobMode ?? 'agent')
                   }
-                  setMsgs(messages.map(m => ({
+                  await registerMessageArtifacts(messages, id)
+                  setConversationStoreMsgs(id, messages.map(m => ({
                     id: m.id,
                     role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
                     content: m.content,
@@ -1085,12 +1214,6 @@ export default function ChatView() {
                     attachments: m.attachments,
                     sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
                   })))
-                  for (const message of messages) {
-                    if (message.author === 'user') continue
-                    for (const path of extractLocalFilePaths(message.content)) {
-                      void registerExternalArtifact(path, id).catch(() => {})
-                    }
-                  }
                   applyActiveTaskForConversation(
                     id,
                     allTasks,
@@ -1104,7 +1227,7 @@ export default function ChatView() {
             fallback={t('chat.loadFailed')}
           />
         ) : null}
-        {loadingHistory ? (
+        {loadingHistory && msgs.length === 0 ? (
           <LoadingMessages />
         ) : (
           <div style={{ maxWidth: 720, margin: '0 auto', padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -1139,7 +1262,7 @@ export default function ChatView() {
               <WorkingIndicator
                 thinking={thinkingText}
                 loading
-                snapshots={activities.reduce<ChromeSnapshot[]>((list, event) => {
+                snapshots={visibleActivities.reduce<ChromeSnapshot[]>((list, event) => {
                   const snapshot = extractChromeSnapshot(event)
                   return snapshot ? upsertChromeSnapshot(list, snapshot) : list
                 }, [])}
@@ -1165,6 +1288,7 @@ export default function ChatView() {
             onClear={() => replaceQueue([])}
           />
         )}
+        {showSubagentStatus && <SubagentStatusPanel events={visibleActivities} />}
         <Composer
           placeholder={
             builderMode === 'plugin_builder'
@@ -1176,6 +1300,7 @@ export default function ChatView() {
           showModePill
           showProjectPill
           initialProjectId={routeState?.projectId}
+          focusRequestKey={routeState?.focusComposer ? location.key : undefined}
           onSend={handleSend}
           onStop={handleStop}
           busy={isRunning}
@@ -1301,10 +1426,20 @@ export function MessageBubble({
       <div className="msg-assistant prose">
         {msg.content && (
           <div style={isHardError ? { color: 'var(--danger)' } : undefined}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} onClick={event => {
-              if (!href) return
-              event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
-            }}>{children}</a> }}>{linkifyLocalFilePaths(msg.content)}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+              table: ({ node: _node, ...props }) => (
+                <div className="markdown-table-scroll" role="region" aria-label="Tableau défilant horizontalement" tabIndex={0}>
+                  <table {...props} />
+                </div>
+              ),
+              a: ({ href, children }) => <a href={href} onClick={event => {
+                if (!href) return
+                event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
+              }}>{children}</a>,
+              img: ({ src, alt }) => (
+                <ResilientImage source={src || ''} alt={alt || 'Image'} className="markdown-inline-image" />
+              ),
+            }}>{normalizeAssistantMarkdown(linkifyLocalFilePaths(msg.content))}</ReactMarkdown>
           </div>
         )}
         {msg.error && (
@@ -1313,9 +1448,9 @@ export function MessageBubble({
           </p>
         )}
         <MessageResources msg={msg} onOpen={onOpenResource} />
-        {msg.snapshots && msg.snapshots.length > 0 ? (
+        {msg.snapshots?.some(snapshot => !snapshot.background) ? (
           <div className="chrome-snapshot-stack">
-            {msg.snapshots.map(snapshot => (
+            {msg.snapshots.filter(snapshot => !snapshot.background).map(snapshot => (
               <ChromeSnapshotCard key={snapshot.id} snapshot={snapshot} onOpen={(url, title) => onOpenResource(url, title, 'web')} />
             ))}
           </div>
@@ -1346,6 +1481,13 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
       path: item.path,
       url: item.url,
     })),
+    (msg.snapshots ?? [])
+      .filter(snapshot => snapshot.background && snapshot.url)
+      .map(snapshot => ({
+        id: snapshot.id,
+        title: snapshot.title,
+        url: snapshot.url,
+      })),
   )
   const resources = merged
     .map(item => ({
@@ -1356,31 +1498,56 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
     }))
     .filter(item => item.target)
   if (!resources.length) return null
+  const imageResources = msg.role === 'assistant'
+    ? resources.filter(item => item.target && INLINE_IMAGE_EXT.test(item.target))
+    : []
   return (
-    <div className="message-resources">
-      {resources.map(item => {
-        const label = item.name || fileNameFromPath(item.target || '')
-        return (
-          <button
-            className="message-resource-chip"
-            key={`${item.kind}-${normalizeLocalFilePathKey(item.target || item.id)}`}
-            onClick={() => item.target && onOpen(item.target, item.name, item.kind)}
-            title={item.target}
-          >
-            {item.kind === 'web' ? (
-              <span className="message-resource-glyph" aria-hidden="true">◎</span>
-            ) : (
-              <PluginIcon
-                icon={iconForFileName(label || item.target || '')}
-                size="sm"
-                className="message-resource-icon"
-              />
-            )}
-            <span>{label}</span>
-          </button>
-        )
-      })}
-    </div>
+    <>
+      {imageResources.length > 0 && (
+        <div className="message-image-previews" aria-label="Images générées">
+          {imageResources.map(item => {
+            const label = item.name || fileNameFromPath(item.target || '')
+            return (
+              <button
+                type="button"
+                className="message-image-preview"
+                key={`preview-${item.kind}-${normalizeLocalFilePathKey(item.target || item.id)}`}
+                onClick={() => item.target && onOpen(item.target, item.name, item.kind)}
+                aria-label={`Ouvrir l’aperçu ${label}`}
+                title={item.target}
+              >
+                <ResilientImage source={item.target || ''} alt={`Aperçu de ${label}`} className="message-image-preview-visual" />
+                <span>{label}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <div className="message-resources">
+        {resources.map(item => {
+          const label = item.name || fileNameFromPath(item.target || '')
+          return (
+            <button
+              className="message-resource-chip"
+              key={`${item.kind}-${normalizeLocalFilePathKey(item.target || item.id)}`}
+              onClick={() => item.target && onOpen(item.target, item.name, item.kind)}
+              title={item.target}
+            >
+              {item.kind === 'web' ? (
+                <span className="message-resource-glyph" aria-hidden="true">◎</span>
+              ) : (
+                <PluginIcon
+                  icon={iconForFileName(label || item.target || '')}
+                  size="sm"
+                  className="message-resource-icon"
+                />
+              )}
+              <span>{label}</span>
+            </button>
+          )
+        })}
+      </div>
+    </>
   )
 }
 
@@ -1427,18 +1594,40 @@ function PinIcon({ filled = false }: { filled?: boolean }) {
 
 function BobAvatar({ streaming, error }: { streaming?: boolean; error?: boolean }) {
   return (
-    <div style={{
-      width: 28, height: 28, borderRadius: 8, flexShrink: 0,
-      background: error
-        ? 'var(--danger)'
-        : streaming
-          ? 'linear-gradient(135deg, #4338ca, #0891b2)'
-          : 'linear-gradient(135deg, #4338ca, #0891b2)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: 13, fontWeight: 700, color: 'white', marginTop: 2,
-      boxShadow: streaming ? '0 0 0 2px var(--accent)' : undefined,
-      transition: 'box-shadow .3s',
-    }}>B</div>
+    <div
+      data-streaming={streaming ? 'true' : 'false'}
+      data-error={error ? 'true' : 'false'}
+      style={{
+        width: 30,
+        height: 28,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginTop: 2,
+        position: 'relative',
+      }}
+    >
+      <img
+        src={bobAvatarIcon}
+        alt="Bob"
+        style={{ width: 30, height: 28, objectFit: 'contain', display: 'block' }}
+      />
+      {error ? (
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            right: -1,
+            bottom: -1,
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            background: 'var(--danger)',
+          }}
+        />
+      ) : null}
+    </div>
   )
 }
 

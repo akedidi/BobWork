@@ -11,8 +11,8 @@ Quand tu crées ou refactors un **plugin** (pas un skill seul), vise le niveau *
 ## Minimum Work-level
 
 1. **Mode produit** : `specializedMode` (label, outils, workflow).
-2. **Surface exécutable** : CLI / MCP local / MCP distant.
-3. **Exploration des intégrations** : OAuth, MCP, API publique, API+clé, web search, LLM Bob, Computer Use/Chrome — retenir selon le workflow.
+2. **Surface exécutable** : CLI, shell, binaire embarqué, MCP local ou MCP distant.
+3. **Exploration** : outils locaux (CLI/shell/binaires type Mermaid), OAuth, MCP, API, web search, LLM Bob, Computer Use/Chrome — retenir selon le workflow.
 4. **`description`** = bénéfice utilisateur (1–2 phrases). **`resources`** + **`connectorStrategy`** listent les intégrations (y compris optionnelles) — pas la description.
 5. Permissions honnêtes ; zéro secret en clair.
 6. Explique tes choix (retenu vs écarté).
@@ -22,7 +22,8 @@ Quand tu crées ou refactors un **plugin** (pas un skill seul), vise le niveau *
 | Kind | Exemples |
 |------|----------|
 | oauth | GitHub, Slack, Monday, Microsoft |
-| mcp / stdio-cli | Bundle local, MCP global Bob |
+| mcp / stdio-cli / shell / node-cli | Bundle local, scripts, CLI Node |
+| bundled-bin | mermaid, d2, ffmpeg, pandoc (épinglés, hors ligne) |
 | api-public / api-key | Stooq, Finnhub `${KEY}` |
 | web-search | Accès web Bob |
 | bob-llm | Synthèse / raisonnement chat |

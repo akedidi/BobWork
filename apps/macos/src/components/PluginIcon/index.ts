@@ -7,5 +7,6 @@ export {
   resolveIconFromText,
   resolveIntegrationIcon,
   resolvePluginIcon,
+  resolveSkillIcon,
 } from './PluginIcon'
 export type { PluginIconId } from './PluginIcon'

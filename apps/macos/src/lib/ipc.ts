@@ -165,8 +165,24 @@ export const exportConversations = (path: string, format: ConversationExportForm
   invoke<ConversationTransferSummary>('export_conversations', { path, format });
 
 export const openMacosPrivacyPane = (
-  pane: 'accessibility' | 'automation' | 'notifications' | 'microphone' | 'speech',
+  pane: 'accessibility' | 'automation' | 'notifications' | 'microphone' | 'speech' | 'screen-recording',
 ) => invoke<void>('open_macos_privacy_pane', { pane });
+
+export type MicrophoneAuthorizationState = 'not_determined' | 'denied' | 'restricted' | 'authorized';
+
+export const getMicrophoneAuthorizationState = () =>
+  invoke<MicrophoneAuthorizationState>('microphone_authorization_state');
+
+export const requestMicrophonePermission = () =>
+  invoke<MicrophoneAuthorizationState>('request_microphone_permission');
+
+export interface VoiceDictationPermission {
+  microphone: MicrophoneAuthorizationState;
+  speechRecognition: MicrophoneAuthorizationState;
+}
+
+export const requestVoiceDictationPermission = () =>
+  invoke<VoiceDictationPermission>('request_voice_dictation_permission');
 
 export interface VoiceDictationAvailability {
   available: boolean;
@@ -352,12 +368,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   notificationsEnabled: true,
   notifyTaskComplete: true,
   voiceOnDevice: true,
+  retainAudioRecordings: true,
   taskRetentionDays: 30,
   telemetryEnabled: false,
   computerUseEnabled: false,
   chromeControlEnabled: false,
   sandboxMode: false,
   crossConversationContext: false,
+  remoteControlEnabled: false,
 }
 
 /** In-memory settings so Settings UI can paint without waiting on IPC. */
@@ -397,6 +415,20 @@ export const updateSettings = async (settings: AppSettings) => {
   await invoke<void>('update_settings', { settings })
   cachedSettings = settings
 }
+
+export interface RemoteControlStatus {
+  enabled: boolean
+  state: 'disabled' | 'starting' | 'ready' | 'error' | string
+  publicUrl?: string | null
+  connectionUrl?: string | null
+  error?: string | null
+}
+
+export const getRemoteControlStatus = () =>
+  invoke<RemoteControlStatus>('get_remote_control_status')
+
+export const restartRemoteControl = () =>
+  invoke<RemoteControlStatus>('restart_remote_control')
 
 // ── System Commands ───────────────────────────────────────────
 
@@ -629,6 +661,26 @@ export const prepareFilePreview = (path: string) =>
 
 export const allowComposerAttachments = (paths: string[]) =>
   invoke<string[]>('allow_composer_attachments', { paths });
+
+export const startNativeAudioRecording = () =>
+  invoke<void>('start_native_audio_recording');
+
+export interface MeetingRecording {
+  id: string;
+  createdAt: string;
+  format: 'm4a/aac' | string;
+  recordingPath: string;
+  microphonePath?: string | null;
+  systemAudioPath?: string | null;
+  manifestPath: string;
+  transcriptPath?: string | null;
+}
+
+export const stopNativeAudioRecording = () =>
+  invoke<MeetingRecording>('stop_native_audio_recording');
+
+export const getNativeAudioRecordingLevel = () =>
+  invoke<number>('native_audio_recording_level');
 
 
 export const openPreviewResource = (target: string) =>

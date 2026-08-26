@@ -854,6 +854,8 @@ export interface AppSettings {
   notificationsEnabled: boolean;
   notifyTaskComplete: boolean;
   voiceOnDevice: boolean;
+  /** Keep microphone + system-audio recordings after they have been attached to a message. */
+  retainAudioRecordings: boolean;
   taskRetentionDays: number;
   telemetryEnabled: boolean;
   computerUseEnabled: boolean;
@@ -865,6 +867,8 @@ export interface AppSettings {
    * (preferring the same project) to enrich prompts — ChatGPT-style.
    */
   crossConversationContext: boolean;
+  /** Publish the authenticated mobile-control API through a Cloudflare Quick Tunnel. */
+  remoteControlEnabled: boolean;
 }
 
 export interface BobMode {
@@ -919,6 +923,8 @@ export interface WorkspaceSkill {
   sourcePath: string;
   scope: string;
   enabled: boolean;
+  /** Local key or HTTPS favicon URL chosen for the skill. */
+  icon?: string;
   /** True when the skill is deployed by a Bob Work built-in plugin/integration. */
   builtin?: boolean;
   /** Filesystem birth time of SKILL.md when available. */
@@ -931,6 +937,7 @@ export interface SaveSkillInput {
   slug: string;
   description: string;
   content: string;
+  icon?: string;
   workspace?: string;
 }
 

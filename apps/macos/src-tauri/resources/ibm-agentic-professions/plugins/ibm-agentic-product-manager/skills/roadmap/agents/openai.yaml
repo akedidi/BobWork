@@ -1,0 +1,7 @@
+interface:
+  display_name: "roadmap"
+  short_description: "Communiquer une séquence orientée résultats, adaptable aux p"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $roadmap to communiquer une séquence orientée résultats, adaptable aux preuves."
+policy:
+  allow_implicit_invocation: true

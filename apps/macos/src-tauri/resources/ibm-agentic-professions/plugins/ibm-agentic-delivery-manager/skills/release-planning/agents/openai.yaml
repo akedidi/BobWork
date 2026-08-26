@@ -1,0 +1,7 @@
+interface:
+  display_name: "release-planning"
+  short_description: "Préparer une release sûre, observable et réversible."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $release-planning to préparer une release sûre, observable et réversible."
+policy:
+  allow_implicit_invocation: true

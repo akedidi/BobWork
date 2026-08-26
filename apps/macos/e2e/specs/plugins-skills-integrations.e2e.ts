@@ -108,7 +108,7 @@ describe('Bob Work — plugins, skills et intégrations MCP (cas réels)', () =>
 
     await clickSidebar('Nouveau chat')
     const menu = await openPluginPicker()
-    await menu.$('input.popover-search, input[aria-label*="Rechercher un plugin"]').setValue(LOCAL_PLUGIN)
+    await menu.$('input.popover-search, input[aria-label*="Rechercher un skill"], input[aria-label*="Rechercher un plugin"]').setValue(LOCAL_PLUGIN)
     await expect(menu.$(`//button[contains(@class, "attach-plugin-row")][contains(., "${LOCAL_PLUGIN}")]`)).not.toExist()
     await expect(menu.$('p=Aucun plugin correspondant.')).toBeDisplayed()
 

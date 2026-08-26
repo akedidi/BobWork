@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-change-manager",
+  "version": "1.0.0",
+  "description": "Planifie les impacts humains d’une transformation, traite les résistances et mesure l’adoption durable.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "change manager"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Change Manager",
+    "shortDescription": "Planifie les impacts humains d’une transformation, traite les ré",
+    "longDescription": "Planifie les impacts humains d’une transformation, traite les résistances et mesure l’adoption durable. Workflow : Transformation → impacts → stakeholders → readiness → choix framework → résistances → communication → formation → adoption → KPI.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Analyse les impacts et la readiness de ce changement.",
+      "Prépare le plan de communication et de formation.",
+      "Construis le plan d’adoption et ses KPI."
+    ]
+  }
+}

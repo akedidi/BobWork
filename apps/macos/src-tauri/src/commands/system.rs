@@ -118,6 +118,11 @@ fn macos_privacy_urls(pane: &str) -> Result<(String, String), AppError> {
                 .into(),
             "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition".into(),
         )),
+        "screen-recording" => Ok((
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+                .into(),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture".into(),
+        )),
         other => Err(AppError::ValidationFailed(format!(
             "Panneau macOS inconnu : {other}"
         ))),
@@ -143,6 +148,13 @@ pub async fn open_macos_privacy_pane(pane: String) -> Result<(), AppError> {
 pub struct VoiceDictationAvailability {
     pub available: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceDictationPermission {
+    pub microphone: String,
+    pub speech_recognition: String,
 }
 
 fn voice_dictation_availability_for_executable(executable: &Path) -> VoiceDictationAvailability {
@@ -196,6 +208,72 @@ pub async fn get_voice_dictation_availability() -> VoiceDictationAvailability {
             available: false,
             reason: Some("executable_unavailable".into()),
         },
+    }
+}
+
+/// Returns macOS's TCC state for Bob Work's microphone entitlement.
+#[tauri::command]
+pub async fn microphone_authorization_state() -> Result<String, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(crate::macos_permissions::microphone_authorization)
+            .await
+            .map_err(|error| AppError::Io(error.to_string()))?
+            .map(|state| state.key().into())
+            .map_err(AppError::Io)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("authorized".into())
+    }
+}
+
+/// Shows the native macOS microphone sheet the first time it is called.
+#[tauri::command]
+pub async fn request_microphone_permission() -> Result<String, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(crate::macos_permissions::request_microphone_access)
+            .await
+            .map_err(|error| AppError::Io(error.to_string()))?
+            .map(|state| state.key().into())
+            .map_err(AppError::Io)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("authorized".into())
+    }
+}
+
+/// Prompts for both privacy decisions required by Apple dictation. The calls
+/// intentionally happen after a user presses the dictation button, not while
+/// Bob Work starts.
+#[tauri::command]
+pub async fn request_voice_dictation_permission() -> Result<VoiceDictationPermission, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(|| {
+            let microphone = crate::macos_permissions::request_microphone_access()?;
+            let speech_recognition = if microphone.is_authorized() {
+                crate::macos_permissions::request_speech_recognition_access()?
+            } else {
+                crate::macos_permissions::speech_recognition_authorization()
+            };
+            Ok::<_, String>(VoiceDictationPermission {
+                microphone: microphone.key().into(),
+                speech_recognition: speech_recognition.key().into(),
+            })
+        })
+        .await
+        .map_err(|error| AppError::Io(error.to_string()))?
+        .map_err(AppError::Io)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(VoiceDictationPermission {
+            microphone: "authorized".into(),
+            speech_recognition: "authorized".into(),
+        })
     }
 }
 
@@ -511,6 +589,10 @@ mod privacy_url_tests {
         let (modern, legacy) = macos_privacy_urls("microphone").unwrap();
         assert!(modern.contains("Privacy_Microphone"));
         assert!(legacy.contains("Privacy_Microphone"));
+
+        let (modern, legacy) = macos_privacy_urls("screen-recording").unwrap();
+        assert!(modern.contains("Privacy_ScreenCapture"));
+        assert!(legacy.contains("Privacy_ScreenCapture"));
     }
 
     #[test]

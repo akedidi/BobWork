@@ -1,0 +1,7 @@
+interface:
+  display_name: "proposal-review"
+  short_description: "Conduire des revues progressives puis une Red Team avant sou"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $proposal-review to conduire des revues progressives puis une Red Team avant soumission."
+policy:
+  allow_implicit_invocation: true

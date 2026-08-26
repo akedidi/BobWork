@@ -1,0 +1,7 @@
+interface:
+  display_name: "proposal-writing"
+  short_description: "Rédiger une proposition claire, conforme et factuelle."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $proposal-writing to rédiger une proposition claire, conforme et factuelle."
+policy:
+  allow_implicit_invocation: true

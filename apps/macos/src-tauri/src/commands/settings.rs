@@ -4,6 +4,7 @@ use crate::models::settings::AppSettings;
 use crate::services::bob::BobService;
 use crate::services::chrome_mcp::ChromeMcpService;
 use crate::services::computer_use_mcp::ComputerUseMcpService;
+use crate::services::remote_control::RemoteControlService;
 use crate::services::settings::SettingsService;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -19,6 +20,7 @@ pub async fn update_settings(
     db: State<'_, Database>,
     app_handle: AppHandle,
     bob: State<'_, BobService>,
+    remote_control: State<'_, RemoteControlService>,
 ) -> Result<(), AppError> {
     let previous = SettingsService::new().get(&db)?;
     if previous.launch_at_login != settings.launch_at_login {
@@ -47,6 +49,13 @@ pub async fn update_settings(
         }
     }
     SettingsService::new().update_all(&db, &settings)?;
+    if previous.remote_control_enabled != settings.remote_control_enabled {
+        if settings.remote_control_enabled {
+            remote_control.start(app_handle.clone()).await?;
+        } else {
+            remote_control.stop();
+        }
+    }
     if previous.chrome_control_enabled != settings.chrome_control_enabled {
         if let Some(bob_path) = bob.get_binary_path() {
             ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;

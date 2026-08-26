@@ -245,27 +245,23 @@ export const useAppStore = create<AppState>()(
 // ── Conversation Store ────────────────────────────────────────
 
 interface ConversationState {
-  messages: Record<string, Message[]>;
+  messages: Record<string, Msg[]>;
   loadingMessages: Record<string, boolean>;
-  setMessages: (conversationId: string, messages: Message[]) => void;
-  addMessage: (conversationId: string, message: Message) => void;
+  setMessages: (conversationId: string, messages: Msg[] | ((prev: Msg[]) => Msg[])) => void;
   setLoadingMessages: (conversationId: string, loading: boolean) => void;
 }
 
 import type { Message } from '@bob-work/shared-types';
+import type { Msg } from '../lib/chatUtils';
 
 export const useConversationStore = create<ConversationState>()((set) => ({
   messages: {},
   loadingMessages: {},
   setMessages: (conversationId, messages) =>
-    set((s) => ({ messages: { ...s.messages, [conversationId]: messages } })),
-  addMessage: (conversationId, message) =>
-    set((s) => ({
-      messages: {
-        ...s.messages,
-        [conversationId]: [...(s.messages[conversationId] || []), message],
-      },
-    })),
+    set((s) => {
+      const newMessages = typeof messages === 'function' ? messages(s.messages[conversationId] || []) : messages
+      return { messages: { ...s.messages, [conversationId]: newMessages } }
+    }),
   setLoadingMessages: (conversationId, loading) =>
     set((s) => ({ loadingMessages: { ...s.loadingMessages, [conversationId]: loading } })),
 }));

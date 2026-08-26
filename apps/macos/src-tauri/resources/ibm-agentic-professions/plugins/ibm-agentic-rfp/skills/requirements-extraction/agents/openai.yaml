@@ -1,0 +1,7 @@
+interface:
+  display_name: "requirements-extraction"
+  short_description: "Extraire des exigences atomiques, testables et traçables."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $requirements-extraction to extraire des exigences atomiques, testables et traçables."
+policy:
+  allow_implicit_invocation: true

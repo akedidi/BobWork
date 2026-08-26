@@ -1,0 +1,7 @@
+interface:
+  display_name: "ADKAR"
+  short_description: "Utiliser ADKAR comme grille de diagnostic individuel et coll"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $adkar to utiliser ADKAR comme grille de diagnostic individuel et collectif."
+policy:
+  allow_implicit_invocation: true

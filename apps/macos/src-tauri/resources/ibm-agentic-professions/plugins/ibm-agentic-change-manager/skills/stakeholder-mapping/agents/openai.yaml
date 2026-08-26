@@ -1,0 +1,7 @@
+interface:
+  display_name: "stakeholder-mapping"
+  short_description: "Cartographier influence, impact, position et réseau du chang"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $stakeholder-mapping to cartographier influence, impact, position et réseau du changement."
+policy:
+  allow_implicit_invocation: true

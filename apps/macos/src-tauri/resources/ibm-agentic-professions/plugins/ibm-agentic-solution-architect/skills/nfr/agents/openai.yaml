@@ -1,0 +1,7 @@
+interface:
+  display_name: "NFR"
+  short_description: "Définir des attributs qualité mesurables et vérifiables."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $nfr to définir des attributs qualité mesurables et vérifiables."
+policy:
+  allow_implicit_invocation: true

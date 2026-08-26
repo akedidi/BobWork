@@ -6,6 +6,8 @@ describe('builtinCatalog', () => {
     expect(isBuiltinSkill({ slug: 'bob-work-computer-use' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'bob-work-microsoft-word' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'bob-work-chrome-control' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'bob-work-meeting-minutes' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'ibm-agentic-product-manager' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'my-personal-skill' })).toBe(false)
     expect(isBuiltinSkill({ slug: 'custom', builtin: true })).toBe(true)
   })
@@ -19,6 +21,7 @@ describe('builtinCatalog', () => {
 
   it('marks builtin plugins as built-in', () => {
     expect(isBuiltinPlugin({ id: 'builtin-computer-use', manifest: {} as never })).toBe(true)
+    expect(isBuiltinPlugin({ id: 'builtin-ibm-agentic-designer', manifest: {} as never })).toBe(true)
     expect(isBuiltinPlugin({
       id: 'agentic-copy',
       manifest: { builtin: true, slug: 'bob-work-computer-use' } as never,

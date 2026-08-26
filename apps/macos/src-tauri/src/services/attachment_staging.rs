@@ -161,8 +161,9 @@ pub fn attachment_paths_from_history(
         };
         for item in items {
             let candidate = item
-                .get("stagedPath")
+                .get("transcriptPath")
                 .and_then(|value| value.as_str())
+                .or_else(|| item.get("stagedPath").and_then(|value| value.as_str()))
                 .or_else(|| item.get("path").and_then(|value| value.as_str()));
             let Some(path) = candidate.filter(|value| !value.is_empty()) else {
                 continue;
@@ -468,7 +469,9 @@ mod tests {
     #[test]
     fn history_prefers_staged_paths() {
         let staged_file = std::env::temp_dir().join(format!("bob-hist-{}", uuid::Uuid::new_v4()));
+        let transcript_file = staged_file.with_extension("transcript.txt");
         std::fs::write(&staged_file, b"x").unwrap();
+        std::fs::write(&transcript_file, b"meeting transcript").unwrap();
         let message = crate::models::conversation::Message {
             id: "m1".into(),
             conversation_id: "c1".into(),
@@ -478,6 +481,7 @@ mod tests {
                 "name": "a.jpg",
                 "path": "/tmp/missing-original.jpg",
                 "stagedPath": staged_file.to_string_lossy(),
+                "transcriptPath": transcript_file.to_string_lossy(),
             }]),
             sources: serde_json::json!([]),
             citations: serde_json::json!([]),
@@ -489,7 +493,8 @@ mod tests {
             created_at: "now".into(),
         };
         let paths = attachment_paths_from_history(&[message]);
-        assert_eq!(paths, vec![staged_file.to_string_lossy().to_string()]);
+        assert_eq!(paths, vec![transcript_file.to_string_lossy().to_string()]);
         let _ = std::fs::remove_file(staged_file);
+        let _ = std::fs::remove_file(transcript_file);
     }
 }

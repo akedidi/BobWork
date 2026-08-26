@@ -1,0 +1,7 @@
+interface:
+  display_name: "proposal-strategy"
+  short_description: "Définir une stratégie de réponse différenciante et évaluable"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $proposal-strategy to définir une stratégie de réponse différenciante et évaluable."
+policy:
+  allow_implicit_invocation: true

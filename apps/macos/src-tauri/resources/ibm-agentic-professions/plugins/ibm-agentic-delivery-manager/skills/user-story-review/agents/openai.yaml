@@ -1,0 +1,7 @@
+interface:
+  display_name: "user-story-review"
+  short_description: "Contrôler qu’une story est comprise et testable avant engage"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $user-story-review to contrôler qu’une story est comprise et testable avant engagement."
+policy:
+  allow_implicit_invocation: true

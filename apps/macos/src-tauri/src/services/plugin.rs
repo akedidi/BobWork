@@ -29,6 +29,7 @@ impl PluginService {
     /// Bob Shell skills. A newer packaged built-in is activated automatically;
     /// only a failed activation falls back to an explicit staged update.
     pub fn ensure_builtin_plugins(&self, db: &Database) -> AppResult<()> {
+        self.promote_legacy_cloud_architect(db)?;
         for builtin in builtin_document_plugins() {
             let now = Utc::now().to_rfc3339();
             let Some(existing) = self.get_by_id(db, builtin.id)? else {
@@ -352,6 +353,56 @@ impl PluginService {
             }
         }
         info!("Demoted legacy {LEGACY_ID} → {TARGET_ID}");
+        Ok(())
+    }
+
+    /// Promote the former personal Senior Cloud Architect plugin to the protected
+    /// first-party Cloud Architect identity while preserving its version history.
+    fn promote_legacy_cloud_architect(&self, db: &Database) -> AppResult<()> {
+        const LEGACY_ID: &str = "agentic-senior-cloud-architect";
+        const TARGET_ID: &str = "builtin-cloud-architect";
+        let Some(legacy) = self.get_by_id(db, LEGACY_ID)? else {
+            return Ok(());
+        };
+        if self.get_by_id(db, TARGET_ID)?.is_some() {
+            let conn = db.conn.lock().unwrap();
+            let _ = conn.execute(
+                "DELETE FROM plugin_versions WHERE plugin_id=?1",
+                params![LEGACY_ID],
+            );
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
+        } else {
+            let mut manifest = legacy.manifest.clone();
+            if let Some(object) = manifest.as_object_mut() {
+                object.insert("builtin".into(), serde_json::Value::Bool(true));
+                object.insert(
+                    "name".into(),
+                    serde_json::Value::String("Cloud Architect".into()),
+                );
+                object.insert(
+                    "slug".into(),
+                    serde_json::Value::String("cloud-architect".into()),
+                );
+            }
+            let now = Utc::now().to_rfc3339();
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO plugins
+                 (id,name,version,author,description,scope,category,manifest,install_state,validation_state,signature,created_at,updated_at,last_executed_at,available_version)
+                 SELECT ?1,'Cloud Architect',version,'Bob Work',description,scope,category,?2,install_state,validation_state,signature,created_at,?3,last_executed_at,available_version
+                 FROM plugins WHERE id=?4",
+                params![TARGET_ID, manifest.to_string(), now, LEGACY_ID],
+            )?;
+            conn.execute(
+                "UPDATE plugin_versions SET plugin_id=?1 WHERE plugin_id=?2",
+                params![TARGET_ID, LEGACY_ID],
+            )?;
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
+        }
+        let deployer = PluginDeployService::new();
+        let _ = deployer.undeploy(LEGACY_ID);
+        let _ = deployer.retire_agentic_bundle(LEGACY_ID);
+        info!("Promoted legacy {LEGACY_ID} → {TARGET_ID}");
         Ok(())
     }
 
@@ -694,7 +745,7 @@ impl PluginService {
                     .get("runtime")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                if !matches!(runtime, "python3" | "bash" | "sh") {
+                if !matches!(runtime, "python3" | "bash" | "sh" | "zsh" | "node" | "binary") {
                     return Err(AppError::Plugin(format!(
                         "Unsupported plugin runtime: {}",
                         runtime
@@ -712,9 +763,14 @@ impl PluginService {
                 }
                 let entrypoint_path = bundle_dir.join(relative_path);
                 let entrypoint_metadata = std::fs::symlink_metadata(&entrypoint_path)?;
+                let max_bytes = if runtime == "binary" {
+                    80 * 1024 * 1024
+                } else {
+                    2 * 1024 * 1024
+                };
                 if !entrypoint_metadata.is_file()
                     || entrypoint_metadata.file_type().is_symlink()
-                    || entrypoint_metadata.len() > 2 * 1024 * 1024
+                    || entrypoint_metadata.len() > max_bytes
                 {
                     return Err(AppError::Plugin("Invalid plugin entrypoint file".into()));
                 }
@@ -1950,6 +2006,13 @@ fn infer_plugin_icon(slug: &str, name: &str, description: &str) -> String {
             ],
             "chrome",
         ),
+        (&["ibm-agentic-designer", "builtin-ibm-agentic-designer"], "designer"),
+        (&["ibm-agentic-consultant", "builtin-ibm-agentic-consultant"], "consultant"),
+        (&["ibm-agentic-rfp", "builtin-ibm-agentic-rfp"], "rfp"),
+        (&["ibm-agentic-product-manager", "builtin-ibm-agentic-product-manager"], "product"),
+        (&["ibm-agentic-delivery-manager", "builtin-ibm-agentic-delivery-manager"], "delivery"),
+        (&["ibm-agentic-change-manager", "builtin-ibm-agentic-change-manager"], "change"),
+        (&["ibm-agentic-solution-architect", "builtin-ibm-agentic-solution-architect"], "architecture"),
         (&["github"], "github"),
         (&["slack"], "slack"),
         (&["monday"], "monday"),
@@ -2173,6 +2236,94 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
 fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
     vec![
         BuiltinPlugin {
+            id: "builtin-cloud-architect",
+            name: "Cloud Architect",
+            version: "2.6.0",
+            description: "Conçoit, documente et révise des architectures AWS, Azure, GCP, IBM Cloud, Kubernetes, hybrides et multi-cloud avec D2/ELK, Mermaid, PlantUML, C4, rendus hors ligne, livrables source/SVG/PNG et QA bloquante, ainsi qu’un catalogue de 1 959 icônes officielles multi-cloud.",
+            category: "executable",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/cloud-architect/manifest.json"
+            ))
+            .expect("valid built-in Cloud Architect manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-designer",
+            name: "Designer",
+            version: "1.0.0",
+            description: "Transforme un besoin en expérience validée, accessible et prête pour le développement, selon une démarche compatible IBM Enterprise Design Thinking et Carbon.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-designer/manifest.json"
+            ))
+            .expect("valid built-in Designer manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-consultant",
+            name: "Consultant",
+            version: "1.0.0",
+            description: "Structure un problème métier, analyse les options et produit une recommandation exécutable soumise à une Red Team Review.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-consultant/manifest.json"
+            ))
+            .expect("valid built-in Consultant manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-rfp",
+            name: "RFP / RFQ / RFT",
+            version: "1.0.0",
+            description: "Analyse les appels d’offres, sécurise la conformité et orchestre une proposition convaincante sans inventer de réponse.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-rfp/manifest.json"
+            ))
+            .expect("valid built-in RFP manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-product-manager",
+            name: "Product Manager",
+            version: "1.0.0",
+            description: "Pilote la discovery, la stratégie, la priorisation et la mesure d’un produit à partir de résultats utilisateurs et métier.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-product-manager/manifest.json"
+            ))
+            .expect("valid built-in Product Manager manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-delivery-manager",
+            name: "Scrum & Delivery Manager",
+            version: "1.0.0",
+            description: "Sécurise le flux de delivery, les engagements de sprint, les dépendances, les risques et les releases sans masquer l’incertitude.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-delivery-manager/manifest.json"
+            ))
+            .expect("valid built-in Delivery Manager manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-change-manager",
+            name: "Change Manager",
+            version: "1.0.0",
+            description: "Planifie les impacts humains d’une transformation, traite les résistances et mesure l’adoption durable.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-change-manager/manifest.json"
+            ))
+            .expect("valid built-in Change Manager manifest"),
+        },
+        BuiltinPlugin {
+            id: "builtin-ibm-agentic-solution-architect",
+            name: "Solution Architect",
+            version: "1.0.0",
+            description: "Conçoit une architecture cible traçable depuis les exigences, avec arbitrages sécurité, intégration, résilience, cloud et coût.",
+            category: "recipe",
+            manifest: serde_json::from_str(include_str!(
+                "../../resources/ibm-agentic-professions/plugins/ibm-agentic-solution-architect/manifest.json"
+            ))
+            .expect("valid built-in Solution Architect manifest"),
+        },
+        BuiltinPlugin {
             id: "builtin-documents",
             name: "Documents",
             version: "1.1.0",
@@ -2395,13 +2546,13 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-chrome-control",
             name: "Contrôle Chrome",
-            version: "1.0.2",
+            version: "1.0.3",
             description: "Pilote Google Chrome : ouvrir des onglets, naviguer et exécuter du JavaScript dans la page.",
             category: "executable",
             manifest: serde_json::json!({
                 "name": "Contrôle Chrome",
                 "slug": "bob-work-chrome-control",
-                "version": "1.0.2",
+                "version": "1.0.3",
                 "description": "Pilote Google Chrome : ouvrir des onglets, naviguer et exécuter du JavaScript dans la page.",
                 "category": "executable",
                 "builtin": true,
@@ -2435,13 +2586,13 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "allowedTools": [
                         "chrome_open_url", "chrome_read_front_tab", "chrome_list_tabs",
                         "chrome_activate_tab", "chrome_navigate", "chrome_execute_js",
-                        "browser_snapshot", "use_mcp_tool"
+                        "web_fetch", "browser_snapshot", "use_mcp_tool"
                     ],
                     "preferredLibraries": [],
-                    "workflow": "1) Vérifier que Chrome est installé et Automatisation accordée. 2) chrome_open_url ou chrome_list_tabs. 3) chrome_navigate / chrome_execute_js selon besoin. 4) Renvoyer titre+URL confirmés. Ne simule jamais un onglet si l’outil échoue.",
+                    "workflow": "1) Recherche/API/documentation : web_fetch en arrière-plan. 2) Seulement si l’utilisateur demande explicitement Chrome : vérifier l’Automatisation, puis chrome_open_url ou chrome_list_tabs. 3) chrome_navigate / chrome_execute_js selon besoin. 4) Renvoyer titre+URL confirmés. Ne simule jamais un onglet si l’outil échoue.",
                     "sandbox": "macos-chrome-automation"
                 },
-                "instructions": "Mode Contrôle Chrome Bob Work. Le serveur MCP `bob-work-chrome-control` doit être actif (Réglages → Accès et contrôle → Contrôle de Chrome). Outils : chrome_open_url, chrome_read_front_tab, chrome_list_tabs, chrome_activate_tab, chrome_navigate, chrome_execute_js, browser_snapshot.\n\nN’utilise jamais osascript/python3 pour contrôler Chrome. Si Automatisation est refusée, explique d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation (ou Réglages Bob Work → Demander Automatisation). Reste local ; pas d’upload cloud."
+                "instructions": "Mode Contrôle Chrome Bob Work. Le serveur MCP `bob-work-chrome-control` doit être actif. Pour les recherches, API et documentations, utilise `web_fetch` ou `browser_snapshot` : ils travaillent en arrière-plan et ne doivent ouvrir aucune fenêtre. Les outils `chrome_*` sont réservés à une demande explicite d’ouverture, navigation ou interaction dans Chrome. N’utilise jamais osascript/python3. Si Automatisation est refusée après une demande explicite, explique d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation. Reste local ; pas d’upload cloud."
             }),
         },
     ]
@@ -2548,8 +2699,16 @@ mod builtin_tests {
     #[test]
     fn document_plugin_catalog_is_complete_and_native() {
         let plugins = builtin_document_plugins();
-        assert_eq!(plugins.len(), 7);
+        assert_eq!(plugins.len(), 15);
         let names = plugins.iter().map(|plugin| plugin.name).collect::<Vec<_>>();
+        assert!(names.contains(&"Cloud Architect"));
+        assert!(names.contains(&"Designer"));
+        assert!(names.contains(&"Consultant"));
+        assert!(names.contains(&"RFP / RFQ / RFT"));
+        assert!(names.contains(&"Product Manager"));
+        assert!(names.contains(&"Scrum & Delivery Manager"));
+        assert!(names.contains(&"Change Manager"));
+        assert!(names.contains(&"Solution Architect"));
         assert!(names.contains(&"Documents"));
         assert!(names.contains(&"Microsoft Word"));
         assert!(names.contains(&"Microsoft PowerPoint"));
@@ -2564,6 +2723,18 @@ mod builtin_tests {
         assert!(plugins
             .iter()
             .all(|plugin| plugin.manifest.get("slug").is_some()));
+        let profession_plugins = plugins
+            .iter()
+            .filter(|plugin| plugin.id.starts_with("builtin-ibm-agentic-"))
+            .collect::<Vec<_>>();
+        assert_eq!(profession_plugins.len(), 7);
+        assert!(profession_plugins.iter().all(|plugin| {
+            plugin
+                .manifest
+                .get("skills")
+                .and_then(|value| value.as_array())
+                .is_some_and(|skills| !skills.is_empty())
+        }));
         let work = packaged_work_plugins();
         assert_eq!(work.len(), 2);
         assert_eq!(work[0].id, "bob-work-cto-invest");

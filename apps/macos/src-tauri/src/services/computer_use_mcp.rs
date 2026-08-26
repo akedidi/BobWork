@@ -160,10 +160,7 @@ impl ComputerUseMcpService {
             };
         }
         #[allow(unreachable_code)]
-        (
-            "unavailable".into(),
-            "Non disponible.".into(),
-        )
+        ("unavailable".into(), "Non disponible.".into())
     }
 
     fn probe_in_process_accessibility() -> String {

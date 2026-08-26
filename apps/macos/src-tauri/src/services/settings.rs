@@ -95,6 +95,9 @@ impl SettingsService {
             voice_on_device: get_val("voice_on_device")
                 .map(|v| v.as_str() == "true")
                 .unwrap_or(true),
+            retain_audio_recordings: get_val("retain_audio_recordings")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(true),
             task_retention_days: get_val("task_retention_days")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
@@ -111,6 +114,9 @@ impl SettingsService {
                 .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
             cross_conversation_context: get_val("cross_conversation_context")
+                .map(|v| v.as_str() == "true")
+                .unwrap_or(false),
+            remote_control_enabled: get_val("remote_control_enabled")
                 .map(|v| v.as_str() == "true")
                 .unwrap_or(false),
         })
@@ -171,6 +177,10 @@ impl SettingsService {
             ),
             ("voice_on_device", settings.voice_on_device.to_string()),
             (
+                "retain_audio_recordings",
+                settings.retain_audio_recordings.to_string(),
+            ),
+            (
                 "task_retention_days",
                 settings.task_retention_days.to_string(),
             ),
@@ -187,6 +197,10 @@ impl SettingsService {
             (
                 "cross_conversation_context",
                 settings.cross_conversation_context.to_string(),
+            ),
+            (
+                "remote_control_enabled",
+                settings.remote_control_enabled.to_string(),
             ),
         ];
 

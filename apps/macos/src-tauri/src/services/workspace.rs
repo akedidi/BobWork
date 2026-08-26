@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+const MEETING_MINUTES_SKILL: &str = include_str!("../../resources/skills/meeting-minutes/SKILL.md");
+
 pub struct WorkspaceService;
 
 impl WorkspaceService {
@@ -103,6 +105,12 @@ impl WorkspaceService {
                     .get("disable-model-invocation")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let icon = frontmatter
+                    .get("icon")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 let skill_dir = entry.path();
                 let (created_at, updated_at) = skill_timestamps(&path);
                 skills.push(Skill {
@@ -113,6 +121,7 @@ impl WorkspaceService {
                     source_path: path.to_string_lossy().to_string(),
                     scope: scope.clone(),
                     enabled,
+                    icon,
                     builtin: skill_dir_is_builtin(&skill_dir),
                     created_at,
                     updated_at,
@@ -141,14 +150,43 @@ impl WorkspaceService {
         std::fs::create_dir_all(&skill_dir)?;
         let path = skill_dir.join("SKILL.md");
         let backup = skill_dir.join("SKILL.md.bak");
+        let previous = if path.exists() {
+            std::fs::read_to_string(&path).ok()
+        } else {
+            None
+        };
         if path.exists() {
             std::fs::copy(&path, &backup)?;
         }
+        let previous_icon = previous
+            .as_deref()
+            .and_then(|content| {
+                parse_frontmatter(content)
+                    .0
+                    .get("icon")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().to_string())
+            })
+            .filter(|value| !value.is_empty());
+        let icon = input
+            .icon
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or(previous_icon)
+            .unwrap_or_default();
         let description = input.description.replace('\n', " ").replace('"', "\\\"");
+        let icon_line = if icon.is_empty() {
+            String::new()
+        } else {
+            format!("icon: {}\n", icon)
+        };
         let markdown = format!(
-            "---\nname: {}\ndescription: \"{}\"\nuser-invocable: true\n---\n\n{}\n",
+            "---\nname: {}\ndescription: \"{}\"\n{}user-invocable: true\n---\n\n{}\n",
             input.slug,
             description,
+            icon_line,
             input.content.trim()
         );
         let temporary = skill_dir.join("SKILL.md.tmp");
@@ -168,6 +206,7 @@ impl WorkspaceService {
                 "global-bob".into()
             },
             enabled: true,
+            icon,
             builtin: skill_dir_is_builtin(&skill_dir),
             created_at,
             updated_at,
@@ -284,6 +323,7 @@ impl WorkspaceService {
             slug: slug.into(),
             description: description.into(),
             content: content.into(),
+            icon: None,
             workspace: None,
         })?;
         let skill_dir = PathBuf::from(&skill.source_path)
@@ -293,6 +333,39 @@ impl WorkspaceService {
         let _ = std::fs::write(skill_dir.join(".bob-work-builtin"), "1");
         Ok(Skill {
             builtin: true,
+            ..skill
+        })
+    }
+
+    /// Deploy first-party, instruction-only skills that are available in every
+    /// Bob Work installation without requiring a connector or a plugin.
+    pub fn install_builtin_skill(&self, skill_id: &str) -> AppResult<Skill> {
+        let (slug, description, content) = match skill_id {
+            "meeting-minutes" => (
+                "bob-work-meeting-minutes",
+                "Crée un compte rendu professionnel à partir de notes, d’une conversation ou d’un enregistrement audio joint.",
+                parse_frontmatter(MEETING_MINUTES_SKILL).1,
+            ),
+            _ => return Err(AppError::ValidationFailed("Ce skill intégré n’existe pas.".into())),
+        };
+        let skill = self.save_skill(SaveSkillInput {
+            slug: slug.into(),
+            description: description.into(),
+            content: content.clone(),
+            icon: Some("meeting".into()),
+            workspace: None,
+        })?;
+        let skill_dir = PathBuf::from(&skill.source_path)
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&skill.source_path));
+        // Keep the curated, user-facing metadata alongside the source body.
+        std::fs::write(skill_dir.join("SKILL.md"), MEETING_MINUTES_SKILL)?;
+        std::fs::write(skill_dir.join(".bob-work-builtin"), "1")?;
+        Ok(Skill {
+            builtin: true,
+            name: "Compte rendu professionnel".into(),
+            content,
             ..skill
         })
     }
@@ -864,7 +937,7 @@ mod mcp_tests {
 
 #[cfg(test)]
 mod skill_tests {
-    use super::{parse_frontmatter, WorkspaceService};
+    use super::{parse_frontmatter, WorkspaceService, MEETING_MINUTES_SKILL};
     use serde_json::Value;
 
     fn isolated_skill() -> std::path::PathBuf {
@@ -917,6 +990,7 @@ mod skill_tests {
             scope: "global-bob".into(),
             enabled: true,
             builtin: false,
+            icon: String::new(),
             created_at: "2026-08-02T10:00:00Z".into(),
             updated_at: "2026-08-10T10:00:00Z".into(),
         };
@@ -929,6 +1003,7 @@ mod skill_tests {
             scope: "global-bob".into(),
             enabled: true,
             builtin: false,
+            icon: String::new(),
             created_at: "2026-08-01T10:00:00Z".into(),
             updated_at: "2026-08-01T10:00:00Z".into(),
         };
@@ -941,6 +1016,7 @@ mod skill_tests {
             scope: "global-bob".into(),
             enabled: true,
             builtin: true,
+            icon: String::new(),
             created_at: "2026-08-11T12:00:00Z".into(),
             updated_at: "2026-08-11T12:00:00Z".into(),
         };
@@ -967,6 +1043,21 @@ mod skill_tests {
         .unwrap();
         assert!(super::skill_dir_is_builtin(skill_dir));
         std::fs::remove_dir_all(skill_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn meeting_minutes_builtin_skill_has_the_expected_professional_structure() {
+        let (metadata, body) = parse_frontmatter(MEETING_MINUTES_SKILL);
+        assert_eq!(
+            metadata.get("name").and_then(Value::as_str),
+            Some("Compte rendu professionnel")
+        );
+        assert_eq!(
+            metadata.get("icon").and_then(Value::as_str),
+            Some("meeting")
+        );
+        assert!(body.contains("## Décisions"));
+        assert!(body.contains("## Prochaines étapes"));
     }
 
     #[test]

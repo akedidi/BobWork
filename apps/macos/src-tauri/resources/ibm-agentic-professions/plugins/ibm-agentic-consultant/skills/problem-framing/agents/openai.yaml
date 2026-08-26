@@ -1,0 +1,7 @@
+interface:
+  display_name: "problem-framing"
+  short_description: "Définir le vrai problème, la décision et les limites de l’an"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $problem-framing to définir le vrai problème, la décision et les limites de l’analyse."
+policy:
+  allow_implicit_invocation: true

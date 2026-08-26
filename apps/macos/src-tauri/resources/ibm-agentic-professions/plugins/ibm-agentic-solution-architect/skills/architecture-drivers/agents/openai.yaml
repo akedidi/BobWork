@@ -1,0 +1,7 @@
+interface:
+  display_name: "architecture-drivers"
+  short_description: "Prioriser les forces qui structurent réellement l’architectu"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $architecture-drivers to prioriser les forces qui structurent réellement l’architecture."
+policy:
+  allow_implicit_invocation: true

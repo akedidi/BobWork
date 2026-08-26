@@ -1,0 +1,7 @@
+interface:
+  display_name: "training-plan"
+  short_description: "Concevoir un apprentissage basé sur les tâches et la perform"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $training-plan to concevoir un apprentissage basé sur les tâches et la performance."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "cost-analysis"
+  short_description: "Estimer et optimiser le coût complet sans compromettre les d"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $cost-analysis to estimer et optimiser le coût complet sans compromettre les drivers."
+policy:
+  allow_implicit_invocation: true

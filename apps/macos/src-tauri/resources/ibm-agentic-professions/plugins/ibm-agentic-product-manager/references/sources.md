@@ -1,0 +1,15 @@
+# Sources officielles — Product Manager
+
+Ces liens sont des points d’ancrage, pas une copie locale de leurs contenus. Quand une réponse dépend d’une version, d’un critère, d’un tarif, d’une réglementation ou d’une capacité actuelle, ouvrir la source primaire, noter la date de consultation et citer la version utilisée.
+
+- [IBM Enterprise Design Thinking framework](https://www.ibm.com/training/enterprise-design-thinking/framework) — Hills, Playbacks, Sponsor Users et principes de collaboration IBM.
+- [IBM Garage](https://www.ibm.com/garage) — Co-création, co-exécution, co-exploitation et résultats mesurables.
+- [Intercom RICE](https://www.intercom.com/blog/rice-simple-prioritization-for-product-managers/) — Source originale du cadre Reach, Impact, Confidence, Effort.
+- [Google re:Work — team effectiveness](https://rework.withgoogle.com/en/guides/understanding-team-effectiveness) — Référence publique sur objectifs, clarté et usage des OKR.
+
+## Règles de fraîcheur
+
+- Normes, lois, sécurité, produits cloud et prix : vérifier à chaque utilisation importante.
+- Cadres stables : vérifier si la version ou la terminologie influence le livrable.
+- En cas d’indisponibilité réseau : indiquer la dernière source connue et marquer toute affirmation temporelle comme non vérifiée.
+- Ne pas présenter Bob Work, ce plugin ou ses livrables comme officiellement approuvés par IBM ou par les organismes cités.

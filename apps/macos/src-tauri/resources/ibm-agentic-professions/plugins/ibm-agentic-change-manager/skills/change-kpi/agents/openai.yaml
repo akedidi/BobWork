@@ -1,0 +1,7 @@
+interface:
+  display_name: "change-kpi"
+  short_description: "Mesurer préparation, adoption, maîtrise et résultats du chan"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $change-kpi to mesurer préparation, adoption, maîtrise et résultats du changement."
+policy:
+  allow_implicit_invocation: true

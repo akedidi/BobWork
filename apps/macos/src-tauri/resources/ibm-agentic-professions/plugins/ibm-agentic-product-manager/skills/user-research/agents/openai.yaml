@@ -1,0 +1,7 @@
+interface:
+  display_name: "user-research"
+  short_description: "Comprendre besoins, comportements et contexte des utilisateu"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $user-research to comprendre besoins, comportements et contexte des utilisateurs produit."
+policy:
+  allow_implicit_invocation: true

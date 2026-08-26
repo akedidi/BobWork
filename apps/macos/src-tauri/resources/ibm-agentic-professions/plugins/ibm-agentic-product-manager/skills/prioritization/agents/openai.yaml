@@ -1,0 +1,7 @@
+interface:
+  display_name: "prioritization"
+  short_description: "Comparer des opportunités avec critères explicites et gouver"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $prioritization to comparer des opportunités avec critères explicites et gouvernance."
+policy:
+  allow_implicit_invocation: true

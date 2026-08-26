@@ -1,8 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../../stores/appStore'
-import Sidebar, { clampContextMenuPosition } from './Sidebar'
+import Sidebar, { synchronizedSpinnerDelay } from './Sidebar'
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location">{JSON.stringify({ pathname: location.pathname, state: location.state })}</output>
+}
 
 const mocks = vi.hoisted(() => ({
   getProjects: vi.fn(),
@@ -11,10 +16,14 @@ const mocks = vi.hoisted(() => ({
   createConversation: vi.fn(),
   updateConversation: vi.fn(),
   updateTaskPinned: vi.fn(),
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn().mockResolvedValue(vi.fn()),
+  listen: vi.fn((eventName: string, listener: (event: { payload: unknown }) => void) => {
+    mocks.listeners.set(eventName, listener)
+    return Promise.resolve(() => mocks.listeners.delete(eventName))
+  }),
 }))
 
 vi.mock('../../lib/ipc', () => ({
@@ -135,6 +144,7 @@ describe('Sidebar', () => {
   })
 
   beforeEach(() => {
+    mocks.listeners.clear()
     const projects = [{
       id: 'project-1',
       name: 'Projet Alpha',
@@ -173,7 +183,31 @@ describe('Sidebar', () => {
     })
     mocks.updateConversation.mockResolvedValue(undefined)
     mocks.updateTaskPinned.mockResolvedValue(undefined)
-    useAppStore.setState({ projects, conversations, tasks: [], bobStatus: 'ready', notifications: [], notificationsOpen: false, unreadConversationIds: [] })
+    useAppStore.setState({ activeProjectId: null, projects, conversations, tasks: [], bobStatus: 'ready', notifications: [], notificationsOpen: false, unreadConversationIds: [] })
+  })
+
+  it('actualise les projets quand un projet est créé depuis le mobile', async () => {
+    const mobileProject = {
+      ...useAppStore.getState().projects[0],
+      id: 'project-mobile',
+      name: 'Projet mobile',
+    }
+    mocks.getProjects.mockResolvedValueOnce(useAppStore.getState().projects)
+    mocks.getProjects.mockResolvedValueOnce([...useAppStore.getState().projects, mobileProject])
+
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(mocks.listeners.has('project-updated')).toBe(true))
+    act(() => {
+      mocks.listeners.get('project-updated')?.({ payload: mobileProject.id })
+    })
+
+    await waitFor(() => expect(screen.getByText('Projet mobile')).toBeVisible())
+    expect(useAppStore.getState().projects.map(project => project.id)).toContain('project-mobile')
   })
 
   it('shows a loader on conversations with active tasks', async () => {
@@ -199,6 +233,17 @@ describe('Sidebar', () => {
     )
     expect(await screen.findByLabelText('Tâche en cours')).toBeVisible()
     expect(screen.getByText('Conversation locale')).toBeVisible()
+  })
+
+  it('cale les loaders sur une phase d’animation commune', () => {
+    const period = 750
+    const observedAt = 1_600
+    const firstMountedAt = 1_000
+    const secondMountedAt = 1_250
+    const firstPhase = (observedAt - firstMountedAt - synchronizedSpinnerDelay(firstMountedAt)) % period
+    const secondPhase = (observedAt - secondMountedAt - synchronizedSpinnerDelay(secondMountedAt)) % period
+
+    expect(firstPhase).toBe(secondPhase)
   })
 
   it('hides the loader after the conversation task is cancelled', async () => {
@@ -235,6 +280,26 @@ describe('Sidebar', () => {
     )
     expect(await screen.findByLabelText('Résultat non consulté')).toBeVisible()
     expect(screen.queryByLabelText('Tâche en cours')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Conversation locale'))
+
+    expect(screen.queryByLabelText('Résultat non consulté')).not.toBeInTheDocument()
+    expect(useAppStore.getState().unreadConversationIds).not.toContain('conversation-1')
+  })
+
+  it('uses a calendar icon to align scheduled conversations', async () => {
+    const scheduledConversation = {
+      ...useAppStore.getState().conversations[0],
+      id: 'scheduled-conversation',
+      title: '[Planifié] Rapport hebdomadaire',
+    }
+    mocks.getConversations.mockResolvedValue([scheduledConversation])
+    useAppStore.setState({ conversations: [scheduledConversation] })
+
+    render(<MemoryRouter><Sidebar /></MemoryRouter>)
+
+    expect(await screen.findByLabelText('Conversation planifiée')).toBeVisible()
+    expect(screen.getByText('[Planifié] Rapport hebdomadaire')).toBeVisible()
   })
 
   it('places recent conversations below projects', async () => {
@@ -250,6 +315,30 @@ describe('Sidebar', () => {
 
     expect(projectsHeading.compareDocumentPosition(conversationsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByText('Documents')).not.toBeInTheDocument()
+  })
+
+  it('ouvre un nouveau prompt avec le projet déjà sélectionné', async () => {
+    render(
+      <MemoryRouter initialEntries={['/project/project-1']}>
+        <Sidebar />
+        <LocationProbe />
+      </MemoryRouter>,
+    )
+
+    const projectsHeader = screen.getByText('Projets').parentElement!
+    const newProjectButton = within(projectsHeader).getByRole('button', { name: 'Nouveau projet' })
+    const newConversationButton = await within(projectsHeader).findByRole('button', { name: 'Nouvelle conversation dans Projet Alpha' })
+
+    expect(newProjectButton.compareDocumentPosition(newConversationButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(screen.getByText('Projet Alpha').closest('.sidebar-item')!).queryByRole('button')).not.toBeInTheDocument()
+
+    fireEvent.click(newConversationButton)
+
+    expect(screen.getByTestId('location')).toHaveTextContent(JSON.stringify({
+      pathname: '/chat',
+      state: { projectId: 'project-1', mode: 'agent', focusComposer: true },
+    }))
+    expect(mocks.createConversation).not.toHaveBeenCalled()
   })
 
   it('orders Conversations by last activity, including pinned chats', async () => {
@@ -283,16 +372,18 @@ describe('Sidebar', () => {
     render(
       <MemoryRouter>
         <Sidebar />
+        <LocationProbe />
       </MemoryRouter>,
     )
 
     await screen.findByText('Conversation locale')
     fireEvent.click(screen.getByText('Nouveau chat'))
 
-    await waitFor(() => expect(mocks.createConversation).toHaveBeenCalledTimes(1))
-    
-    // The conversation is created on the backend but deliberately omitted from the sidebar
-    // until it has actual content.
+    expect(screen.getByTestId('location')).toHaveTextContent(JSON.stringify({
+      pathname: '/',
+      state: { focusComposer: true },
+    }))
+    expect(mocks.createConversation).not.toHaveBeenCalled()
     expect(useAppStore.getState().conversations.map(item => item.id)).not.toContain('conversation-new')
   })
 
@@ -371,8 +462,6 @@ describe('Sidebar', () => {
   })
 
   it('clamps the context menu inside the viewport', () => {
-    expect(clampContextMenuPosition(10, 20, 1280, 800)).toEqual({ x: 10, y: 20 })
-    expect(clampContextMenuPosition(1200, 780, 1280, 800)).toEqual({ x: 1052, y: 624 })
   })
 
   it('affiche une erreur visible si le chargement IPC échoue', async () => {

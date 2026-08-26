@@ -1,0 +1,7 @@
+interface:
+  display_name: "bid-no-bid"
+  short_description: "Recommander objectivement de poursuivre, conditionner ou aba"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $bid-no-bid to recommander objectivement de poursuivre, conditionner ou abandonner."
+policy:
+  allow_implicit_invocation: true

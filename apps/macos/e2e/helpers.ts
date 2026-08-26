@@ -276,7 +276,7 @@ export async function sendHomePrompt(text: string) {
 export async function pickBuiltinPlugin(pluginLabel: string, pluginToken: string | RegExp) {
   const composer = await openHomeChatComposer()
   const menu = await openPluginPicker()
-  const search = menu.$('input.popover-search, input[aria-label*="Rechercher un plugin"]')
+  const search = menu.$('input.popover-search, input[aria-label*="Rechercher un skill"], input[aria-label*="Rechercher un plugin"]')
   if (await search.isExisting()) await search.setValue(pluginLabel)
   const choice = menu.$(`//button[contains(@class, "attach-plugin-row")][.//strong[normalize-space()="${pluginLabel}"]]`)
   await choice.waitForDisplayed({ timeout: 8_000 })

@@ -1,0 +1,7 @@
+interface:
+  display_name: "consulting-deck"
+  short_description: "Produire un deck de conseil prêt pour une réunion exécutive."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $consulting-deck to produire un deck de conseil prêt pour une réunion exécutive."
+policy:
+  allow_implicit_invocation: true

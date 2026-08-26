@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => ({
   exportBobalytics: vi.fn(),
   getPermissionGrants: vi.fn(),
   getNotificationAuthState: vi.fn(),
+  requestMicrophonePermission: vi.fn(),
+  requestVoiceDictationPermission: vi.fn(),
+  getRemoteControlStatus: vi.fn(),
   updateSettings: vi.fn(),
 }))
 
@@ -61,12 +64,14 @@ vi.mock('../lib/ipc', () => ({
     notificationsEnabled: true,
     notifyTaskComplete: true,
     voiceOnDevice: true,
+    retainAudioRecordings: false,
     taskRetentionDays: 30,
     telemetryEnabled: false,
     computerUseEnabled: false,
     chromeControlEnabled: false,
     sandboxMode: false,
     crossConversationContext: false,
+    remoteControlEnabled: false,
   },
   getSettings: mocks.getSettings,
   peekCachedSettings: mocks.peekCachedSettings,
@@ -88,6 +93,10 @@ vi.mock('../lib/ipc', () => ({
   testMcpServer: vi.fn().mockResolvedValue({ id: 'mcp', name: 'mcp', ok: false, message: '', tools: [] }),
   isNotificationAuthGranted: vi.fn().mockReturnValue(false),
   requestNotificationAuthorization: vi.fn(),
+  requestMicrophonePermission: mocks.requestMicrophonePermission,
+  requestVoiceDictationPermission: mocks.requestVoiceDictationPermission,
+  getRemoteControlStatus: mocks.getRemoteControlStatus,
+  restartRemoteControl: vi.fn(),
   requestAccessibilityPermission: vi.fn(),
   requestChromeAutomationPermission: vi.fn(),
   installBobShell: vi.fn(),
@@ -129,12 +138,14 @@ const settings: AppSettings = {
   notificationsEnabled: true,
   notifyTaskComplete: true,
   voiceOnDevice: true,
+  retainAudioRecordings: false,
   taskRetentionDays: 30,
   telemetryEnabled: false,
   computerUseEnabled: false,
   chromeControlEnabled: false,
   sandboxMode: false,
   crossConversationContext: false,
+  remoteControlEnabled: false,
 }
 
 function renderSettings(state?: { tab?: string }) {
@@ -165,6 +176,12 @@ describe('SettingsView progressive loading', () => {
     mocks.hasSessionSecret.mockResolvedValue(false)
     mocks.getBobProfile.mockResolvedValue(null)
     mocks.getUsageStatus.mockResolvedValue({ available: false, message: 'Indisponible' })
+    mocks.getRemoteControlStatus.mockResolvedValue({
+      enabled: true,
+      state: 'ready',
+      publicUrl: 'https://bob.trycloudflare.com',
+      connectionUrl: 'https://bob.trycloudflare.com/#token=secret',
+    })
     mocks.getBobalytics.mockResolvedValue({
       generatedAt: '',
       greetingName: 'Anis',
@@ -197,7 +214,18 @@ describe('SettingsView progressive loading', () => {
     })
     mocks.getPermissionGrants.mockResolvedValue([])
     mocks.getNotificationAuthState.mockResolvedValue('granted')
+    mocks.requestMicrophonePermission.mockResolvedValue('authorized')
+    mocks.requestVoiceDictationPermission.mockResolvedValue({ microphone: 'authorized', speechRecognition: 'authorized' })
     mocks.updateSettings.mockResolvedValue(undefined)
+  })
+
+  it('shows the copyable Cloudflare link when remote control is enabled', async () => {
+    mocks.getSettings.mockResolvedValue({ ...settings, remoteControlEnabled: true })
+    renderSettings({ tab: 'remote' })
+
+    expect(await screen.findByText('Prêt pour Bob Mobile')).toBeVisible()
+    expect(screen.getByText('https://bob.trycloudflare.com/#token=secret')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Copier le lien' })).toBeVisible()
   })
 
   it('shows preference toggles immediately even before settings IPC resolves', async () => {
@@ -285,5 +313,15 @@ describe('SettingsView progressive loading', () => {
     expect(screen.getByRole('option', { name: 'Español' })).toBeInTheDocument()
     expect(screen.getByText('Automatique suit la langue du système', { exact: false })).toBeVisible()
     expect(screen.queryByText('Interface en français uniquement', { exact: false })).not.toBeInTheDocument()
+  })
+
+  it('demande explicitement les autorisations vocales depuis les permissions macOS', async () => {
+    renderSettings({ tab: 'permissions' })
+
+    const request = await screen.findByRole('button', { name: 'Autoriser microphone et dictée' })
+    fireEvent.click(request)
+
+    await waitFor(() => expect(mocks.requestVoiceDictationPermission).toHaveBeenCalledOnce())
+    expect(await screen.findByText('Le Microphone et la Reconnaissance vocale sont autorisés pour Bob Work.')).toBeVisible()
   })
 })

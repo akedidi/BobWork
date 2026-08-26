@@ -1,0 +1,7 @@
+interface:
+  display_name: "Product Manager"
+  short_description: "Pilote la discovery, la stratégie, la priorisation et la mes"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-product-manager to cadre la discovery de cette opportunité produit."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "RICE"
+  short_description: "Appliquer Reach × Impact × Confidence ÷ Effort de façon tran"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $rice to appliquer Reach × Impact × Confidence ÷ Effort de façon transparente."
+policy:
+  allow_implicit_invocation: true

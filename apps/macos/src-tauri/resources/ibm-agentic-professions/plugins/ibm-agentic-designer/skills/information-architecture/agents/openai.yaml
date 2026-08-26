@@ -1,0 +1,7 @@
+interface:
+  display_name: "information-architecture"
+  short_description: "Structurer contenus, navigation et taxonomie autour des modè"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $information-architecture to structurer contenus, navigation et taxonomie autour des modèles mentaux."
+policy:
+  allow_implicit_invocation: true

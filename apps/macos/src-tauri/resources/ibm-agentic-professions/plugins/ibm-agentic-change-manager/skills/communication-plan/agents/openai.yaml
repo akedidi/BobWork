@@ -1,0 +1,7 @@
+interface:
+  display_name: "communication-plan"
+  short_description: "Orchestrer des communications ciblées qui permettent l’actio"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $communication-plan to orchestrer des communications ciblées qui permettent l’action."
+policy:
+  allow_implicit_invocation: true

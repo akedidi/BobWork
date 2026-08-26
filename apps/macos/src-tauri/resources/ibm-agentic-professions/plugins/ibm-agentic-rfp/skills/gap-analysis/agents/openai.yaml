@@ -1,0 +1,7 @@
+interface:
+  display_name: "gap-analysis"
+  short_description: "Identifier les écarts de conformité et le chemin crédible po"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $gap-analysis to identifier les écarts de conformité et le chemin crédible pour les fermer."
+policy:
+  allow_implicit_invocation: true

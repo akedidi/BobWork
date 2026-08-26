@@ -1,0 +1,7 @@
+interface:
+  display_name: "change-readiness"
+  short_description: "Mesurer la capacité et la volonté de réussir le changement."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $change-readiness to mesurer la capacité et la volonté de réussir le changement."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "product-design"
+  short_description: "Passer du problème validé à une solution testable et mesurab"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $product-design to passer du problème validé à une solution testable et mesurable."
+policy:
+  allow_implicit_invocation: true

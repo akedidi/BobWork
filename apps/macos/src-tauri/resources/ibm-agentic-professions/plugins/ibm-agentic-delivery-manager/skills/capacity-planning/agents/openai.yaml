@@ -1,0 +1,7 @@
+interface:
+  display_name: "capacity-planning"
+  short_description: "Calculer une capacité réaliste à partir de disponibilité et "
+  brand_color: "#0F62FE"
+  default_prompt: "Use $capacity-planning to calculer une capacité réaliste à partir de disponibilité et données historiques."
+policy:
+  allow_implicit_invocation: true

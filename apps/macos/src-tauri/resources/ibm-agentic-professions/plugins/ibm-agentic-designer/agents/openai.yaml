@@ -1,0 +1,7 @@
+interface:
+  display_name: "Designer"
+  short_description: "Transforme un besoin en expérience validée, accessible et pr"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-designer to cadre ce besoin et prépare un plan de recherche UX."
+policy:
+  allow_implicit_invocation: true

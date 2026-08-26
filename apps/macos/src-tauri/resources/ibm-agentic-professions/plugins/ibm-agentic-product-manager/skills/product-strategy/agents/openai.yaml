@@ -1,0 +1,7 @@
+interface:
+  display_name: "product-strategy"
+  short_description: "Choisir où jouer et comment gagner avec des choix cohérents."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $product-strategy to choisir où jouer et comment gagner avec des choix cohérents."
+policy:
+  allow_implicit_invocation: true

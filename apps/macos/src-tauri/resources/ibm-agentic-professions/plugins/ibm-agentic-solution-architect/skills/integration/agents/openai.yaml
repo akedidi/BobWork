@@ -1,0 +1,7 @@
+interface:
+  display_name: "integration"
+  short_description: "Concevoir les échanges entre systèmes avec contrats et modes"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $integration to concevoir les échanges entre systèmes avec contrats et modes de défaillance."
+policy:
+  allow_implicit_invocation: true

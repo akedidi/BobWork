@@ -1,0 +1,7 @@
+interface:
+  display_name: "rfp-analysis"
+  short_description: "Analyser l’intégralité d’un RFP, RFQ ou RFT et son mécanisme"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $rfp-analysis to analyser l’intégralité d’un RFP, RFQ ou RFT et son mécanisme d’évaluation."
+policy:
+  allow_implicit_invocation: true

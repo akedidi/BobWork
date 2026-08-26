@@ -1,0 +1,7 @@
+interface:
+  display_name: "stakeholder-analysis"
+  short_description: "Comprendre acteurs, influence, intérêts et dynamique de déci"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $stakeholder-analysis to comprendre acteurs, influence, intérêts et dynamique de décision."
+policy:
+  allow_implicit_invocation: true

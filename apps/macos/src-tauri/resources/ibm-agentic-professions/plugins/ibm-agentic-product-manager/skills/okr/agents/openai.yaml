@@ -1,0 +1,7 @@
+interface:
+  display_name: "OKR"
+  short_description: "Transformer une intention stratégique en résultats mesurable"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $okr to transformer une intention stratégique en résultats mesurables."
+policy:
+  allow_implicit_invocation: true

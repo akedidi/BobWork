@@ -1,0 +1,7 @@
+interface:
+  display_name: "resilience"
+  short_description: "Concevoir la continuité face aux pannes réalistes."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $resilience to concevoir la continuité face aux pannes réalistes."
+policy:
+  allow_implicit_invocation: true

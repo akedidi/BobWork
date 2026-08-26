@@ -1,0 +1,7 @@
+interface:
+  display_name: "resistance-analysis"
+  short_description: "Transformer les signaux de résistance en causes traitables."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $resistance-analysis to transformer les signaux de résistance en causes traitables."
+policy:
+  allow_implicit_invocation: true

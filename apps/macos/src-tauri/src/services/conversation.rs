@@ -24,6 +24,16 @@ pub struct RewindConversationResult {
 
 pub struct ConversationService;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationContextState {
+    pub summary: String,
+    pub compacted_message_count: usize,
+    pub compacted_through_id: Option<String>,
+    pub updated_at: Option<String>,
+    pub version: u32,
+}
+
 impl ConversationService {
     pub fn new() -> Self {
         Self
@@ -43,7 +53,7 @@ impl ConversationService {
                  WHERE m.conversation_id = c.id AND m.author = 'user'
                )
              ORDER BY c.date DESC
-             LIMIT 50",
+             LIMIT 1000",
         )?;
 
         let all_convs: Vec<Conversation> = stmt
@@ -93,6 +103,45 @@ impl ConversationService {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
+    }
+
+    pub fn context_state(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+    ) -> AppResult<ConversationContextState> {
+        let conversation = self
+            .get_by_id(db, conversation_id)?
+            .ok_or_else(|| AppError::NotFound("Conversation introuvable".into()))?;
+        Ok(serde_json::from_value(conversation.bob_context_state).unwrap_or_default())
+    }
+
+    /// Persist one bounded current summary. There is deliberately no revision
+    /// table: replacing the previous value keeps SQLite growth constant.
+    pub fn save_context_summary(
+        &self,
+        db: &Database,
+        conversation_id: &str,
+        summary: &str,
+        compacted_messages: &[Message],
+        previous_version: u32,
+    ) -> AppResult<()> {
+        let summary = summary.trim().chars().take(6_000).collect::<String>();
+        let state = ConversationContextState {
+            summary: summary.clone(),
+            compacted_message_count: compacted_messages.len(),
+            compacted_through_id: compacted_messages.last().map(|message| message.id.clone()),
+            updated_at: Some(Utc::now().to_rfc3339()),
+            version: previous_version.saturating_add(1),
+        };
+        let changed = db.connection().execute(
+            "UPDATE conversations SET summary=?1,bob_context_state=?2 WHERE id=?3",
+            params![summary, serde_json::to_string(&state)?, conversation_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("Conversation introuvable".into()));
+        }
+        Ok(())
     }
 
     pub fn create(&self, db: &Database, input: CreateConversationInput) -> AppResult<Conversation> {
@@ -561,6 +610,71 @@ mod tests {
     #[test]
     fn format_block_is_none_when_empty() {
         assert!(RelatedContextSnippet::format_block(&[]).is_none());
+    }
+
+    #[test]
+    fn current_context_summary_is_bounded_and_replaces_previous_value() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let service = ConversationService::new();
+        let conversation = service
+            .create(
+                &db,
+                CreateConversationInput {
+                    project_id: None,
+                    title: "Longue conversation".into(),
+                    conversation_type: None,
+                    business_mode: None,
+                    bob_mode: None,
+                },
+            )
+            .expect("conversation");
+        let first = service
+            .add_message(
+                &db,
+                AddMessageInput {
+                    conversation_id: conversation.id.clone(),
+                    author: "user".into(),
+                    content: "Décision initiale".into(),
+                    attachments: None,
+                    sources: None,
+                },
+            )
+            .expect("message");
+        service
+            .save_context_summary(
+                &db,
+                &conversation.id,
+                &"a".repeat(7_000),
+                std::slice::from_ref(&first),
+                0,
+            )
+            .expect("first summary");
+        let first_state = service.context_state(&db, &conversation.id).expect("state");
+        assert_eq!(first_state.summary.chars().count(), 6_000);
+        assert_eq!(first_state.version, 1);
+
+        service
+            .save_context_summary(
+                &db,
+                &conversation.id,
+                "Résumé remplacé",
+                std::slice::from_ref(&first),
+                first_state.version,
+            )
+            .expect("replacement");
+        let state = service.context_state(&db, &conversation.id).expect("state");
+        assert_eq!(state.summary, "Résumé remplacé");
+        assert_eq!(state.version, 2);
+        let stored: String = db
+            .connection()
+            .query_row(
+                "SELECT summary FROM conversations WHERE id=?1",
+                params![conversation.id],
+                |row| row.get(0),
+            )
+            .expect("stored summary");
+        assert_eq!(stored, "Résumé remplacé");
     }
 
     #[test]

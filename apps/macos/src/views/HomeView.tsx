@@ -4,7 +4,7 @@
 // ============================================================
 
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../stores/appStore'
 import { getConversations, getProjects, getTasks } from '../lib/ipc'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
@@ -13,7 +13,9 @@ import { useT } from '../i18n'
 
 export default function HomeView() {
   const navigate = useNavigate()
+  const location = useLocation()
   const t = useT()
+  const routeState = location.state as { focusComposer?: boolean } | null
   const {
     setProjects,
     setConversations,
@@ -74,6 +76,11 @@ export default function HomeView() {
             placeholder={t('home.placeholder')} 
             showModePill 
             showProjectPill 
+            focusRequestKey={routeState?.focusComposer ? location.key : undefined}
+            
+            onSend={(text, mode, attachments, projectId) => {
+              navigate('/chat', { state: { initialPrompt: text, mode, attachmentPaths: attachments, projectId } })
+            }}
           />
           
           <div style={{ textAlign: 'center', marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>

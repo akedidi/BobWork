@@ -114,6 +114,10 @@ pub async fn resolve_approval(
     }
 
     let _ = AuditService::new().approval_event(&db, &approval_id, &input.decision, &risk_level);
+    let _ = app_handle.emit(
+        "approval-resolved",
+        serde_json::json!({ "id": &approval_id, "decision": &input.decision }),
+    );
 
     if input.decision == "approved" {
         if let Some(duration) = input
@@ -145,7 +149,7 @@ pub async fn resolve_approval(
                     .unwrap_or(false);
                 launch.options.trust_workspace = !sandbox;
                 bob_service.start_streaming_session(
-                    app_handle,
+                    app_handle.clone(),
                     launch.session_id,
                     launch.conversation_id,
                     launch.mode,
@@ -167,6 +171,9 @@ pub async fn resolve_approval(
                     "cancelled",
                 );
             }
+        }
+        if !task_id.is_empty() {
+            let _ = app_handle.emit("task-updated", &task_id);
         }
         return Ok(());
     }
@@ -198,6 +205,10 @@ pub async fn resolve_approval(
             let _ =
                 crate::services::task::TaskService::new().update_state(&db, &task_id, "cancelled");
         }
+    }
+
+    if !task_id.is_empty() {
+        let _ = app_handle.emit("task-updated", &task_id);
     }
 
     Ok(())

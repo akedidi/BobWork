@@ -1,0 +1,7 @@
+interface:
+  display_name: "PRD"
+  short_description: "Spécifier le pourquoi, le quoi et la mesure sans sur-concevo"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $prd to spécifier le pourquoi, le quoi et la mesure sans sur-concevoir le comment."
+policy:
+  allow_implicit_invocation: true

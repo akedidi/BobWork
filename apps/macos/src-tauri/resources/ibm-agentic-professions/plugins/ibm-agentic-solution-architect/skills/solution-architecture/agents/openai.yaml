@@ -1,0 +1,7 @@
+interface:
+  display_name: "solution-architecture"
+  short_description: "Composer la vue cible, ses responsabilités et sa roadmap."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $solution-architecture to composer la vue cible, ses responsabilités et sa roadmap."
+policy:
+  allow_implicit_invocation: true

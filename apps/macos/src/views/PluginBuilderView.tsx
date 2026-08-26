@@ -170,13 +170,20 @@ export default function PluginBuilderView() {
         {step === 'outils' && (
           <section className="plugin-builder-panel">
             <h1>Quels outils embarquer ?</h1>
-            <p>Cochez uniquement ce qui sert le workflow.</p>
+            <p>MCP, CLI, shell, binaires locaux, APIs — un plugin peut tout combiner, comme Cloud Architect et Mermaid.</p>
             {PLUGIN_TOOL_OPTIONS.map(option => (
               <label key={option.id} className="plugin-builder-choice">
                 <input
                   type="checkbox"
                   checked={draft.tools.includes(option.id)}
-                  onChange={() => setDraft(current => ({ ...current, tools: toggleList(current.tools, option.id) }))}
+                  onChange={() => setDraft(current => {
+                    const tools = toggleList(current.tools, option.id)
+                    const needsExec = tools.some(id => id === 'cli' || id === 'shell' || id === 'bundled-bin')
+                    const permissions = needsExec && !current.permissions.includes('command.execute')
+                      ? [...current.permissions, 'command.execute']
+                      : current.permissions
+                    return { ...current, tools, permissions }
+                  })}
                 />
                 <span>
                   <strong>{option.label}</strong>

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Scrum & Delivery Manager"
+  short_description: "Sécurise le flux de delivery, les engagements de sprint, les"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-delivery-manager to contrôle ce backlog et prépare le sprint planning."
+policy:
+  allow_implicit_invocation: true

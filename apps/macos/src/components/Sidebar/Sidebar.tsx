@@ -6,12 +6,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Archive, FolderTree } from 'lucide-react'
+import { useFloating, shift, flip } from '@floating-ui/react'
+import { listen } from '@tauri-apps/api/event'
+import { Archive, CalendarClock, FolderTree } from 'lucide-react'
 import { useAppStore } from '../../stores/appStore'
+import { useUsageUpdated, useBobSessionDone, useConversationUpdated, useTaskUpdated } from '../../hooks/useTauriEvents'
 import { createConversation, getProjects, getConversations, getTasks, detectBob, getBobAuthSnapshot, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus } from '../../lib/ipc'
 import { errorMessage } from '../../lib/errorMessage'
 import { useT } from '../../i18n'
-import { listen } from '@tauri-apps/api/event'
 import type { SearchResult, UsageStatus } from '@bob-work/shared-types'
 import { UsageMeter } from '../UsageMeter/UsageMeter'
 import { activeTasksByConversationId, conversationActivity } from '../../lib/activeTasks'
@@ -19,14 +21,25 @@ import { ModalOverlay, ModalPanel } from '../ModalOverlay'
 
 const CONTEXT_MENU_WIDTH = 220
 const CONTEXT_MENU_HEIGHT = 168
+const TASK_SPINNER_PERIOD_MS = 750
+
+export function synchronizedSpinnerDelay(now: number) {
+  return -(now % TASK_SPINNER_PERIOD_MS)
+}
+
+function SynchronizedTaskSpinner() {
+  const [animationDelay] = useState(() => synchronizedSpinnerDelay(performance.now()))
+
+  return (
+    <span
+      className="task-spinner"
+      aria-label="Tâche en cours"
+      style={{ animationDelay: `${animationDelay}ms` }}
+    />
+  )
+}
 
 /** Place the menu near the cursor without overflowing the viewport. */
-export function clampContextMenuPosition(x: number, y: number, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
-  return {
-    x: Math.max(8, Math.min(x, viewportWidth - CONTEXT_MENU_WIDTH - 8)),
-    y: Math.max(8, Math.min(y, viewportHeight - CONTEXT_MENU_HEIGHT - 8)),
-  }
-}
 
 export default function Sidebar() {
   const t = useT()
@@ -38,6 +51,7 @@ export default function Sidebar() {
     return translated === key ? entityType : translated
   }
   const {
+    activeProjectId, setActiveProject,
     projects, setProjects,
     conversations, setConversations,
     tasks, setTasks,
@@ -54,13 +68,37 @@ export default function Sidebar() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searchError, setSearchError] = useState<unknown>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, conversationId: string } | null>(null)
+
+  const { refs, floatingStyles } = useFloating({
+    placement: 'bottom-start',
+    middleware: [shift(), flip()],
+  })
+
+  useEffect(() => {
+    if (contextMenu) {
+      refs.setReference({
+        getBoundingClientRect: () => ({
+          x: contextMenu.x,
+          y: contextMenu.y,
+          top: contextMenu.y,
+          left: contextMenu.x,
+          right: contextMenu.x,
+          bottom: contextMenu.y,
+          width: 0,
+          height: 0,
+        })
+      })
+    }
+  }, [contextMenu, refs])
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [projectPicker, setProjectPicker] = useState<{ conversationId: string } | null>(null)
   const [usage, setUsage] = useState<UsageStatus | null>(null)
   const [sidebarLoadError, setSidebarLoadError] = useState<string | null>(null)
+  const [visibleRecentCount, setVisibleRecentCount] = useState(20)
 
   const searchTriggerRef = useRef<HTMLButtonElement>(null)
+  const observerTarget = useRef<HTMLDivElement>(null)
 
   const activeTasksByConversation = useMemo(
     () => activeTasksByConversationId(tasks),
@@ -82,19 +120,33 @@ export default function Sidebar() {
   }
 
   const startNewConversation = () => {
-    navigate('/')
+    navigate('/', { state: { focusComposer: true } })
+    setSidebarLoadError(null)
+  }
+
+  const startProjectConversation = (projectId: string, defaultMode?: string) => {
+    navigate('/chat', { state: { projectId, mode: defaultMode ?? 'agent', focusComposer: true } })
     setSidebarLoadError(null)
   }
 
   const conversationIcon = (conversationId: string, idle?: ReactNode) => {
     const activity = conversationActivity(conversationId, runningIds, unreadSet)
     if (activity === 'running') {
-      return <span className="task-spinner" aria-label="Tâche en cours" />
+      return <SynchronizedTaskSpinner />
     }
     if (activity === 'unread') {
       return <span className="conversation-unread-dot" aria-label="Résultat non consulté" />
     }
     return idle ?? null
+  }
+
+  const idleConversationIcon = (title: string, fallback?: ReactNode) => {
+    if (!title.trimStart().startsWith('[Planifié]')) return fallback
+    return (
+      <span className="scheduled-conversation-icon" aria-label="Conversation planifiée" title="Conversation planifiée">
+        <CalendarClock size={14} strokeWidth={1.9} aria-hidden="true" />
+      </span>
+    )
   }
 
   const closeSearch = () => {
@@ -138,6 +190,7 @@ export default function Sidebar() {
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | null = null
+
     listen<string>('conversation-updated', () => {
       getConversations()
         .then(next => {
@@ -152,8 +205,43 @@ export default function Sidebar() {
     }).then(fn => {
       if (disposed) fn(); else unlisten = fn
     })
+
     return () => { disposed = true; unlisten?.() }
   }, [setConversations])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | null = null
+
+    listen<string>('project-updated', () => {
+      getProjects()
+        .then(next => {
+          if (!disposed) {
+            setProjects(next)
+            setSidebarLoadError(null)
+          }
+        })
+        .catch(error => {
+          if (!disposed) setSidebarLoadError(errorMessage(error, 'Impossible d’actualiser la barre latérale.'))
+        })
+    }).then(fn => {
+      if (disposed) fn(); else unlisten = fn
+    })
+
+    return () => { disposed = true; unlisten?.() }
+  }, [setProjects])
+
+  useEffect(() => {
+    const target = observerTarget.current
+    if (!target) return
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) {
+        setVisibleRecentCount(prev => prev + 20)
+      }
+    }, { rootMargin: '100px' })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [conversations.length, visibleRecentCount])
 
   useEffect(() => {
     let disposed = false
@@ -210,7 +298,12 @@ export default function Sidebar() {
       .then(ps => {
         setProjects(ps)
         // Auto-expand first project
-        if (ps.length > 0) setExpandedProjects(new Set([ps[0].id]))
+        const selectedProject = ps.find(project => project.id === useAppStore.getState().activeProjectId && !project.archived)
+          ?? ps.find(project => !project.archived)
+        if (selectedProject) {
+          setActiveProject(selectedProject.id)
+          setExpandedProjects(new Set([selectedProject.id]))
+        }
       })
       .catch(noteFailure)
 
@@ -266,7 +359,8 @@ export default function Sidebar() {
     // Pinned chats stay visible here too; Épinglés is a shortcut, not a sort key.
     // Order by last activity (date) only — never hoist pinned to the top.
     .sort((left, right) => Date.parse(right.date) - Date.parse(left.date))
-    .slice(0, 12)
+    
+  const visibleRecentConversations = recentConversations.slice(0, visibleRecentCount)
 
   const pinnedConversations = conversations.filter(conversation => conversation.pinned)
   const pinnedTasks = tasks.filter(task => task.pinned)
@@ -302,16 +396,23 @@ export default function Sidebar() {
   }
 
   useEffect(() => {
-    const activeId = location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
-    const projectId = conversations.find(conversation => conversation.id === activeId)?.projectId
+    const routeProjectId = location.pathname.match(/^\/project\/([^/]+)/)?.[1]
+    const activeConversationId = location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+    const projectId = routeProjectId && routeProjectId !== 'new'
+      ? routeProjectId
+      : conversations.find(conversation => conversation.id === activeConversationId)?.projectId
     if (!projectId) return
+    setActiveProject(projectId)
     setExpandedProjects(previous => {
       if (previous.has(projectId)) return previous
       const next = new Set(previous)
       next.add(projectId)
       return next
     })
-  }, [conversations, location.pathname])
+  }, [conversations, location.pathname, setActiveProject])
+
+  const selectedProject = projects.find(project => project.id === activeProjectId && !project.archived)
+    ?? projects.find(project => expandedProjects.has(project.id) && !project.archived)
 
   const handleArchive = async (conversationId: string) => {
     setConversations(conversations.map(c => c.id === conversationId ? { ...c, archived: true } : c))
@@ -343,8 +444,7 @@ export default function Sidebar() {
   }
 
   const openConversationMenu = (conversationId: string, clientX: number, clientY: number) => {
-    const { x, y } = clampContextMenuPosition(clientX, clientY)
-    setContextMenu({ x, y, conversationId })
+    setContextMenu({ x: clientX, y: clientY, conversationId })
   }
 
   useEffect(() => {
@@ -495,22 +595,22 @@ export default function Sidebar() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
               {t('nav.newChat')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/schedules')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/schedules') ? 'active' : ''}`} onClick={() => navigate('/schedules')} style={{ color: isActive('/schedules') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               {t('nav.scheduled')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/tasks')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/tasks') ? 'active' : ''}`} onClick={() => navigate('/tasks')} style={{ color: isActive('/tasks') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
               {t('nav.tasks')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/artifacts')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/artifacts') ? 'active' : ''}`} onClick={() => navigate('/artifacts')} style={{ color: isActive('/artifacts') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}>
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                 <polyline points="14 2 14 8 20 8"/>
               </svg>
               {t('nav.artifacts')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/plugins')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/plugins') ? 'active' : ''}`} onClick={() => navigate('/plugins')} style={{ color: isActive('/plugins') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" opacity={0.6}>
                 <rect x="3" y="3" width="7" height="7" rx="1" />
                 <rect x="14" y="3" width="7" height="7" rx="1" />
@@ -519,10 +619,10 @@ export default function Sidebar() {
               </svg>
               {t('nav.plugins')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/skills')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/skills') ? 'active' : ''}`} onClick={() => navigate('/skills')} style={{ color: isActive('/skills') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <span style={{ width: 16, textAlign: 'center' }}>✦</span> {t('nav.skills')}
             </div>
-            <div className="sidebar-item" onClick={() => navigate('/integrations')} style={{ color: 'var(--text-secondary)' }}>
+            <div className={`sidebar-item ${isActive('/integrations') ? 'active' : ''}`} onClick={() => navigate('/integrations')} style={{ color: isActive('/integrations') ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
               <span style={{ width: 16, textAlign: 'center' }}>↗</span> {t('nav.integrations')}
             </div>
           </div>
@@ -539,7 +639,7 @@ export default function Sidebar() {
                 onClick={() => openConversation(conversation.id)}
                 title={conversation.title}
               >
-                {conversationIcon(conversation.id, <span aria-hidden="true" style={{ opacity: .55 }}>◇</span>)}
+                {conversationIcon(conversation.id, idleConversationIcon(conversation.title, <span aria-hidden="true" style={{ opacity: .55 }}>◇</span>))}
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conversation.title}</span>
                 <button className="sidebar-inline-action" onClick={event => { event.stopPropagation(); setConversationPinned(conversation.id, false) }} title="Désépingler la conversation" aria-label={`Désépingler ${conversation.title}`}><PinIcon filled /></button>
               </div>)}
@@ -553,7 +653,23 @@ export default function Sidebar() {
             {/* Projects */}
             <div className="sidebar-section-label" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'none', paddingLeft: 8, marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span>Projets</span>
-              <button className="icon-btn" title="Nouveau projet" aria-label="Nouveau projet" onClick={() => navigate('/project/new')} style={{ fontSize: 18, lineHeight: 1 }}>+</button>
+              <div className="sidebar-project-actions">
+                <button className="icon-btn" title="Nouveau projet" aria-label="Nouveau projet" onClick={() => navigate('/project/new')} style={{ fontSize: 18, lineHeight: 1 }}>+</button>
+                {selectedProject && (
+                  <button
+                    type="button"
+                    className="project-new-conversation"
+                    title={t('nav.newChatForProject', { project: selectedProject.name })}
+                    aria-label={t('nav.newChatForProject', { project: selectedProject.name })}
+                    onClick={() => startProjectConversation(selectedProject.id, selectedProject.defaultMode)}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
             {projects.length === 0 ? (
               <div style={{ padding: '8px 12px', fontSize: 13, color: 'var(--text-muted)' }}>Aucun projet</div>
@@ -566,7 +682,7 @@ export default function Sidebar() {
                   <div key={proj.id} style={{ marginBottom: 4 }}>
                     <div
                       className={`sidebar-item ${isExpanded ? 'active-project' : ''}`}
-                      onClick={() => { toggleProject(proj.id); navigate(`/project/${proj.id}`) }}
+                      onClick={() => { setActiveProject(proj.id); toggleProject(proj.id); navigate(`/project/${proj.id}`) }}
                       style={{
                         fontWeight: 500,
                         color: isExpanded ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -602,7 +718,7 @@ export default function Sidebar() {
                               />
                             ) : (
                               <>
-                                {conversationIcon(c.id)}
+                                {conversationIcon(c.id, idleConversationIcon(c.title))}
                                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</span>
                               </>
                             )}
@@ -622,9 +738,9 @@ export default function Sidebar() {
             {/* Recent local conversations outside projects */}
             <div className="sidebar-section-label" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'none', paddingLeft: 8, marginTop: 12 }}>Conversations</div>
             <div aria-label="Conversations récentes">
-              {recentConversations.length === 0 ? (
+              {visibleRecentConversations.length === 0 ? (
                 <div style={{ padding: '7px 10px 16px', color: 'var(--text-muted)', fontSize: 11.5 }}>Aucune conversation</div>
-              ) : recentConversations.map(conversation => (
+              ) : visibleRecentConversations.map(conversation => (
                 <div
                   key={conversation.id}
                   data-conversation-id={conversation.id}
@@ -648,7 +764,7 @@ export default function Sidebar() {
                      />
                   ) : (
                     <>
-                      {conversationIcon(conversation.id)}
+                      {conversationIcon(conversation.id, idleConversationIcon(conversation.title))}
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conversation.title}</span>
                     </>
                   )}
@@ -658,6 +774,11 @@ export default function Sidebar() {
                   </div>
                 </div>
               ))}
+              {visibleRecentCount < recentConversations.length && (
+                <div ref={observerTarget} style={{ height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+                  <span className="task-spinner" style={{ width: 12, height: 12 }} />
+                </div>
+              )}
             </div>
           </div>
         </>
@@ -770,10 +891,11 @@ export default function Sidebar() {
 
       {contextMenu && createPortal(
         <div
+          ref={refs.setFloating}
           className="conversation-context-menu"
           role="menu"
           aria-label={t('nav.conversationActions')}
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={floatingStyles}
           onMouseDown={e => e.stopPropagation()}
         >
           <button role="menuitem" className="conversation-context-menu__item" onClick={() => { setConversationPinned(contextMenu.conversationId, !conversations.find(c => c.id === contextMenu.conversationId)?.pinned); setContextMenu(null) }}>

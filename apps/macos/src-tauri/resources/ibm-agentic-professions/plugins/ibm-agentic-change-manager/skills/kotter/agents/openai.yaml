@@ -1,0 +1,7 @@
+interface:
+  display_name: "Kotter"
+  short_description: "Utiliser les huit étapes de Kotter comme grille de transform"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $kotter to utiliser les huit étapes de Kotter comme grille de transformation organisationnelle."
+policy:
+  allow_implicit_invocation: true

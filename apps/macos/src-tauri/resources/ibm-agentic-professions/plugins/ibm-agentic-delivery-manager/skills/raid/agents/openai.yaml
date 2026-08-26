@@ -1,0 +1,7 @@
+interface:
+  display_name: "RAID"
+  short_description: "Gérer risques, actions, issues et décisions dans un registre"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $raid to gérer risques, actions, issues et décisions dans un registre vivant."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Consultant"
+  short_description: "Structure un problème métier, analyse les options et produit"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-consultant to cadre ce problème avec un issue tree MECE."
+policy:
+  allow_implicit_invocation: true

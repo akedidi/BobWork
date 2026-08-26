@@ -12,7 +12,9 @@ const mocks = vi.hoisted(() => ({
   getIntegrationStatuses: vi.fn(),
   getMcpServers: vi.fn(),
   allowComposerAttachments: vi.fn(),
-  getVoiceDictationAvailability: vi.fn(),
+  startNativeAudioRecording: vi.fn(),
+  stopNativeAudioRecording: vi.fn(),
+  getNativeAudioRecordingLevel: vi.fn(),
   onDragDropHandler: null as null | ((event: { payload: { type: string; paths?: string[] } }) => void),
 }))
 
@@ -48,7 +50,9 @@ vi.mock('../../lib/ipc', () => ({
   getIntegrationStatuses: mocks.getIntegrationStatuses,
   getMcpServers: mocks.getMcpServers,
   allowComposerAttachments: mocks.allowComposerAttachments,
-  getVoiceDictationAvailability: mocks.getVoiceDictationAvailability,
+  startNativeAudioRecording: mocks.startNativeAudioRecording,
+  stopNativeAudioRecording: mocks.stopNativeAudioRecording,
+  getNativeAudioRecordingLevel: mocks.getNativeAudioRecordingLevel,
 }))
 
 async function renderComposer(props: Partial<ComponentProps<typeof Composer>> = {}) {
@@ -67,7 +71,38 @@ describe('Composer popovers', () => {
     mocks.getIntegrationStatuses.mockResolvedValue([])
     mocks.getMcpServers.mockResolvedValue([])
     mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
-    mocks.getVoiceDictationAvailability.mockResolvedValue({ available: true, reason: null })
+    mocks.startNativeAudioRecording.mockResolvedValue(undefined)
+    mocks.stopNativeAudioRecording.mockResolvedValue({
+      id: 'meeting-1',
+      createdAt: '2026-08-24T10:00:00Z',
+      format: 'm4a/aac',
+      recordingPath: '/tmp/meeting.m4a',
+      microphonePath: '/tmp/meeting.microphone.m4a',
+      systemAudioPath: '/tmp/meeting.system_audio.m4a',
+      manifestPath: '/tmp/meeting.recording.json',
+      transcriptPath: null,
+    })
+    mocks.getNativeAudioRecordingLevel.mockResolvedValue(0.5)
+  })
+
+  it('focuses the textarea again when a new focus request arrives', async () => {
+    const view = await renderComposer()
+    const textarea = screen.getByRole('textbox')
+    const attachButton = screen.getByTitle('Joindre un fichier ou un dossier')
+    attachButton.focus()
+    expect(attachButton).toHaveFocus()
+
+    await act(async () => {
+      view.rerender(
+        <AppDialogProvider>
+          <MemoryRouter>
+            <Composer showModePill showProjectPill focusRequestKey="new-conversation-1" />
+          </MemoryRouter>
+        </AppDialogProvider>,
+      )
+    })
+
+    expect(textarea).toHaveFocus()
   })
 
   it('renders popovers in a portal outside the clipped composer surface', async () => {
@@ -118,72 +153,23 @@ describe('Composer popovers', () => {
     expect(onStop).toHaveBeenCalledOnce()
   })
 
-  it('bloque la dictée dans un binaire sans bundle avant l’appel WebKit', async () => {
-    const recognition = vi.fn()
-    Object.defineProperty(window, 'webkitSpeechRecognition', {
-      configurable: true,
-      value: recognition,
-    })
-    mocks.getVoiceDictationAvailability.mockResolvedValue({
-      available: false,
-      reason: 'requires_app_bundle',
-    })
-    await renderComposer()
-
-    fireEvent.click(screen.getByTitle('Dictée Apple'))
-
-    await waitFor(() => expect(mocks.getVoiceDictationAvailability).toHaveBeenCalledOnce())
-    expect(recognition).not.toHaveBeenCalled()
-    expect(await screen.findByRole('alertdialog')).toHaveTextContent('véritable application Bob Work')
-  })
-
-  it('n’ouvre qu’une session de dictée, remplace l’intermédiaire et arrête proprement', async () => {
-    let constructorCalls = 0
-    class Recognition {
-      lang = ''
-      interimResults = false
-      continuous = true
-      start = vi.fn()
-      stop = vi.fn()
-      abort = vi.fn()
-      onresult: null | ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) = null
-      onend: null | (() => void) = null
-      onerror: null | (() => void) = null
-
-      constructor() {
-        constructorCalls += 1
-      }
-    }
-    let recognition: Recognition | undefined
-    class TrackedRecognition extends Recognition {
-      constructor() {
-        super()
-        recognition = this
-      }
-    }
-    Object.defineProperty(window, 'webkitSpeechRecognition', {
-      configurable: true,
-      value: TrackedRecognition,
-    })
+  it('démarre une capture native légère puis joint le M4A finalisé au STOP', async () => {
     await renderComposer()
     const input = screen.getByRole('textbox')
-    fireEvent.change(input, { target: { value: 'Bonjour' } })
+    fireEvent.change(input, { target: { value: 'Résume cette réunion' } })
 
-    const mic = screen.getByRole('button', { name: 'Dictée Apple' })
-    fireEvent.click(mic)
-    fireEvent.click(mic)
+    fireEvent.click(screen.getByRole('button', { name: 'Enregistrer le micro et l’audio système' }))
+    await waitFor(() => expect(mocks.startNativeAudioRecording).toHaveBeenCalledOnce())
+    const stop = screen.getByRole('button', { name: 'Arrêter l’enregistrement audio' })
+    expect(stop).toHaveAttribute('aria-pressed', 'true')
+    expect(input).toHaveValue('Résume cette réunion')
+    expect(screen.getByRole('button', { name: 'Envoyer le prompt' })).toBeDisabled()
 
-    await waitFor(() => expect(recognition?.start).toHaveBeenCalledOnce())
-    expect(constructorCalls).toBe(1)
-    act(() => recognition?.onresult?.({ results: [{ 0: { transcript: 'le mon' }, isFinal: false }] }))
-    expect(input).toHaveValue('Bonjour le mon')
-    act(() => recognition?.onresult?.({ results: [{ 0: { transcript: 'le monde' }, isFinal: true }] }))
-    expect(input).toHaveValue('Bonjour le monde')
-
-    fireEvent.click(mic)
-    expect(recognition?.stop).toHaveBeenCalledOnce()
-    act(() => recognition?.onend?.())
-    expect(mic).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(stop)
+    await waitFor(() => expect(mocks.stopNativeAudioRecording).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/meeting.m4a']))
+    expect(await screen.findByText('meeting.m4a')).toBeVisible()
+    expect(input).toHaveValue('Résume cette réunion')
   })
 
   it('joint plusieurs fichiers, déduplique les chemins et transmet les pièces jointes', async () => {
@@ -436,5 +422,56 @@ describe('Composer popovers', () => {
     expect(scrollBody?.textContent).toContain('Skill 0')
     expect(scrollBody?.textContent?.indexOf('Plugins & modes de travail')).toBeLessThan(scrollBody?.textContent?.indexOf('Skills (instructions)') ?? -1)
     expect(menu.querySelector('.attach-popover-header')?.textContent).toContain('Fichier')
+    expect(menu.querySelectorAll('input.popover-search')).toHaveLength(1)
+  })
+
+  it('filtre skills, plugins et intégrations avec un seul champ de recherche', async () => {
+    mocks.getSkills.mockResolvedValue([{
+      slug: 'bob-work-github',
+      name: 'GitHub',
+      description: 'Utiliser gh et GH_TOKEN localement.',
+      content: 'Instructions…',
+      sourcePath: '/tmp/.bob/skills/bob-work-github/SKILL.md',
+      scope: 'global-bob',
+      enabled: true,
+      builtin: true,
+    }])
+    mocks.getPlugins.mockResolvedValue([{
+      id: 'plugin-cloud-architect', name: 'Cloud Architect', version: '1.0.0',
+      description: 'Analyse une architecture cloud.', scope: 'personal', category: 'executable',
+      manifest: {}, installState: 'installed', validationState: 'valid',
+      createdAt: '2026-08-09T00:00:00Z', updatedAt: '2026-08-09T00:00:00Z',
+    }])
+    mocks.getIntegrationStatuses.mockResolvedValue([{
+      integrationId: 'slack',
+      connected: true,
+      authMethod: 'oauth',
+      accountLabel: 'bob',
+      expiresAt: null,
+      oauthClientConfigured: false,
+      deviceFlowAvailable: true,
+      scopeSatisfied: true,
+    }])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = screen.getByRole('menu', { name: 'Ajouter une pièce jointe' })
+    const search = screen.getByRole('textbox', { name: 'Rechercher un skill, plugin ou intégration…' })
+    expect(menu.querySelectorAll('input.popover-search')).toHaveLength(1)
+    expect(menu).toHaveTextContent('Cloud Architect')
+    expect(menu).toHaveTextContent('GitHub')
+    expect(menu).toHaveTextContent('Slack')
+
+    fireEvent.change(search, { target: { value: 'Cloud' } })
+    expect(menu).toHaveTextContent('Cloud Architect')
+    expect(menu).toHaveTextContent('Aucun skill correspondant.')
+    expect(menu).toHaveTextContent('Aucune intégration MCP correspondante.')
+    expect(screen.queryByRole('button', { name: /GitHub/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Slack/ })).not.toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: 'git' } })
+    expect(menu).toHaveTextContent('GitHub')
+    expect(menu).toHaveTextContent('Aucun plugin correspondant.')
+    expect(screen.queryByRole('button', { name: /Cloud Architect/ })).not.toBeInTheDocument()
   })
 })

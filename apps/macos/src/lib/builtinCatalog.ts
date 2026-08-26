@@ -9,6 +9,13 @@ export const BUILTIN_SKILL_SLUGS = new Set([
   'bob-work-microsoft-powerpoint',
   'bob-work-microsoft-excel',
   'bob-work-microsoft-onenote',
+  'ibm-agentic-designer',
+  'ibm-agentic-consultant',
+  'ibm-agentic-rfp',
+  'ibm-agentic-product-manager',
+  'ibm-agentic-delivery-manager',
+  'ibm-agentic-change-manager',
+  'ibm-agentic-solution-architect',
   'bob-work-github',
   'bob-work-slack',
   'bob-work-monday',
@@ -16,6 +23,7 @@ export const BUILTIN_SKILL_SLUGS = new Set([
   'bob-work-outlook-calendar',
   'bob-work-teams',
   'bob-work-onedrive',
+  'bob-work-meeting-minutes',
 ])
 
 export function isBuiltinSkill(skill: Pick<WorkspaceSkill, 'slug' | 'builtin'>): boolean {

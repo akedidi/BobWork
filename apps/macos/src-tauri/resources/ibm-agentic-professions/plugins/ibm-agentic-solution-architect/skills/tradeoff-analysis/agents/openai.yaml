@@ -1,0 +1,7 @@
+interface:
+  display_name: "tradeoff-analysis"
+  short_description: "Comparer les options avec critères, preuves et coûts de reno"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $tradeoff-analysis to comparer les options avec critères, preuves et coûts de renoncement."
+policy:
+  allow_implicit_invocation: true

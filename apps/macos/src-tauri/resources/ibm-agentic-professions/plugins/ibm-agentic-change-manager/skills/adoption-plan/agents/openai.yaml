@@ -1,0 +1,7 @@
+interface:
+  display_name: "adoption-plan"
+  short_description: "Faire passer de l’activation initiale à l’usage durable."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $adoption-plan to faire passer de l’activation initiale à l’usage durable."
+policy:
+  allow_implicit_invocation: true

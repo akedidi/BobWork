@@ -1,0 +1,7 @@
+interface:
+  display_name: "user-story"
+  short_description: "Découper la valeur en stories petites, testables et indépend"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $user-story to découper la valeur en stories petites, testables et indépendantes lorsque possible."
+policy:
+  allow_implicit_invocation: true

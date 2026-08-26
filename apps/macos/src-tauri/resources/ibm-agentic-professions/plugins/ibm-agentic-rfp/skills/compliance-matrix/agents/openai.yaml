@@ -1,0 +1,7 @@
+interface:
+  display_name: "compliance-matrix"
+  short_description: "Piloter la conformité de la réponse jusqu’à la soumission."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $compliance-matrix to piloter la conformité de la réponse jusqu’à la soumission."
+policy:
+  allow_implicit_invocation: true

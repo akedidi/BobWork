@@ -49,6 +49,11 @@ pub async fn install_builtin_integration(integration_id: String) -> Result<Skill
 }
 
 #[tauri::command]
+pub async fn install_builtin_skill(skill_id: String) -> Result<Skill, AppError> {
+    WorkspaceService::new().install_builtin_skill(&skill_id)
+}
+
+#[tauri::command]
 pub async fn get_mcp_servers(db: State<'_, Database>) -> Result<Vec<McpServer>, AppError> {
     let tests = crate::services::connection_test::ConnectionTestService::new().list(&db)?;
     Ok(WorkspaceService::new()

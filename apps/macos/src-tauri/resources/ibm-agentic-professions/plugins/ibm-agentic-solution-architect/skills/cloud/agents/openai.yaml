@@ -1,0 +1,7 @@
+interface:
+  display_name: "cloud"
+  short_description: "Choisir et structurer les services cloud selon les drivers e"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $cloud to choisir et structurer les services cloud selon les drivers et garde-fous."
+policy:
+  allow_implicit_invocation: true

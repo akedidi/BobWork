@@ -1,0 +1,7 @@
+interface:
+  display_name: "design-system"
+  short_description: "Gouverner composants, tokens et patterns comme un produit pa"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $design-system to gouverner composants, tokens et patterns comme un produit partagé."
+policy:
+  allow_implicit_invocation: true

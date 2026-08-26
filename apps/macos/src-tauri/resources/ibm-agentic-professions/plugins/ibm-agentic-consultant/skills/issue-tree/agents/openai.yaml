@@ -1,0 +1,7 @@
+interface:
+  display_name: "issue-tree"
+  short_description: "Construire un arbre de questions ou d’hypothèses pilotant le"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $issue-tree to construire un arbre de questions ou d’hypothèses pilotant le travail."
+policy:
+  allow_implicit_invocation: true

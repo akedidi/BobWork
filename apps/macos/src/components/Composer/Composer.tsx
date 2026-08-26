@@ -7,22 +7,23 @@ import {
   allowComposerAttachments,
   getBobModes,
   getSettings,
-  getVoiceDictationAvailability,
+  getNativeAudioRecordingLevel,
   getIntegrationStatuses,
   getMcpServers,
   getPlugins,
   getProjects,
   getSkills,
+  startNativeAudioRecording,
+  stopNativeAudioRecording,
   type IntegrationConnectionStatus,
 } from '../../lib/ipc'
 import type { BobMode, McpServer, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
 import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from '../../lib/builtinCatalog'
-import { PluginIcon, resolveIconFromText, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
+import { PluginIcon, resolveSkillIcon, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
 import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, removeComposerMention } from './composerAttachments'
 import { errorMessage } from '../../lib/errorMessage'
-import { useT, useI18n, localeToBcp47 } from '../../i18n'
-import { useAppDialog } from '../AppDialog'
+import { useT } from '../../i18n'
 
 /** OAuth integrations that expose a Bob skill + MCP connector when connected. */
 const INTEGRATION_PICKER = [
@@ -55,18 +56,7 @@ interface Props {
   busy?: boolean
   queueCount?: number
   initialProjectId?: string
-}
-
-interface SpeechRecognitionLike {
-  lang: string
-  interimResults: boolean
-  continuous: boolean
-  start: () => void
-  stop: () => void
-  abort?: () => void
-  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null
-  onend: (() => void) | null
-  onerror: (() => void) | null
+  focusRequestKey?: string
 }
 
 const BUILTIN_MODES: BobMode[] = [
@@ -89,13 +79,20 @@ async function registerAttachmentPaths(
   }
 }
 
+function formatRecordingDuration(totalSeconds: number) {
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
 export default function Composer({
   placeholder, showProjectPill, showModePill,
-  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId,
+  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId, focusRequestKey,
 }: Props) {
   const t = useT()
-  const dialog = useAppDialog()
-  const { locale } = useI18n()
   const resolvedPlaceholder = placeholder ?? t('composer.placeholder')
   const [text, setText] = useState('')
   const [mode, setMode] = useState('agent')
@@ -109,20 +106,22 @@ export default function Composer({
   const [mcpServers, setMcpServers] = useState<McpServer[]>([])
   const [attachments, setAttachments] = useState<string[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
-  const [pluginSearch, setPluginSearch] = useState('')
-  const [skillSearch, setSkillSearch] = useState('')
-  const [mcpSearch, setMcpSearch] = useState('')
+  const [attachSearch, setAttachSearch] = useState('')
   const [modeMenu, setModeMenu] = useState(false)
   const [modeSearch, setModeSearch] = useState('')
   const [projectMenu, setProjectMenu] = useState(false)
-  const [listening, setListening] = useState(false)
-  const [dictationStarting, setDictationStarting] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [recordingBusy, setRecordingBusy] = useState(false)
+  const [recordingLevel, setRecordingLevel] = useState(0)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [recordingError, setRecordingError] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const attachButtonRef = useRef<HTMLButtonElement>(null)
   const projectButtonRef = useRef<HTMLButtonElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
-  const dictationStartingRef = useRef(false)
+  const recordingRef = useRef(false)
+  const recordingActionRef = useRef(false)
+  const recordingStartedAtRef = useRef(0)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
   const [isDragging, setIsDragging] = useState(false)
@@ -132,19 +131,34 @@ export default function Composer({
     if (initialProjectId !== undefined) setProjectId(initialProjectId)
   }, [initialProjectId])
 
+  useEffect(() => {
+    if (!focusRequestKey || disabled) return
+    taRef.current?.focus()
+  }, [disabled, focusRequestKey])
+
   useEffect(() => () => {
-    const recognition = recognitionRef.current
-    recognitionRef.current = null
-    if (!recognition) return
-    recognition.onresult = null
-    recognition.onend = null
-    recognition.onerror = null
-    try {
-      recognition.abort?.()
-    } catch {
-      // WebKit may already have disposed the native recognition session.
-    }
+    if (!recordingRef.current) return
+    recordingRef.current = false
+    void stopNativeAudioRecording().catch(() => undefined)
   }, [])
+
+  useEffect(() => {
+    if (!recording) return
+    const updateDuration = () => {
+      setRecordingSeconds(Math.max(0, Math.floor((Date.now() - recordingStartedAtRef.current) / 1000)))
+    }
+    updateDuration()
+    const durationTimer = window.setInterval(updateDuration, 250)
+    const levelTimer = window.setInterval(() => {
+      void getNativeAudioRecordingLevel()
+        .then(level => setRecordingLevel(Math.max(0, Math.min(1, level))))
+        .catch(() => setRecordingLevel(0))
+    }, 90)
+    return () => {
+      window.clearInterval(durationTimer)
+      window.clearInterval(levelTimer)
+    }
+  }, [recording])
 
   const insertPluginMention = useCallback((pluginId: string) => {
     const mentionValue = `@plugin:${pluginId}`
@@ -290,9 +304,7 @@ export default function Composer({
 
   const closeMenus = useCallback(() => {
     setAttachMenu(false)
-    setPluginSearch('')
-    setSkillSearch('')
-    setMcpSearch('')
+    setAttachSearch('')
     setProjectMenu(false)
     setModeMenu(false)
     setModeSearch('')
@@ -322,11 +334,12 @@ export default function Composer({
     setProjectMenu(target === 'project' && shouldOpen)
     setModeMenu(target === 'mode' && shouldOpen)
     if (target !== 'mode' || !shouldOpen) setModeSearch('')
+    if (target !== 'attach' || !shouldOpen) setAttachSearch('')
     if (target === 'attach' && shouldOpen) refreshMcpIntegrations()
   }
 
   const handleSend = () => {
-    if (!text.trim() || disabled) return
+    if (!text.trim() || disabled || recording || recordingBusy) return
     if (onSend) {
       onSend(text.trim(), mode, attachments, projectId)
     } else {
@@ -351,92 +364,36 @@ export default function Composer({
     if (typeof selected === 'string') addAttachmentPaths([selected])
   }
 
-  const toggleDictation = async () => {
-    const activeRecognition = recognitionRef.current
-    if (activeRecognition) {
-      try {
-        activeRecognition.stop()
-      } catch {
-        recognitionRef.current = null
-        setListening(false)
-      }
-      return
-    }
-    if (dictationStartingRef.current) return
-    dictationStartingRef.current = true
-    setDictationStarting(true)
-    let availability
+  const toggleRecording = async () => {
+    if (recordingActionRef.current) return
+    recordingActionRef.current = true
+    setRecordingBusy(true)
+    setRecordingError(null)
     try {
-      availability = await getVoiceDictationAvailability()
+      if (recordingRef.current) {
+        const asset = await stopNativeAudioRecording()
+        recordingRef.current = false
+        setRecording(false)
+        setRecordingLevel(0)
+        await registerAttachmentPaths([asset.recordingPath], setAttachments)
+      } else {
+        await startNativeAudioRecording()
+        recordingStartedAtRef.current = Date.now()
+        recordingRef.current = true
+        setRecordingSeconds(0)
+        setRecording(true)
+      }
     } catch (error) {
-      await dialog.alert({ message: t('composer.dictationCheckFailed', { error: errorMessage(error) }) })
-      dictationStartingRef.current = false
-      setDictationStarting(false)
-      return
-    }
-    if (!availability.available) {
-      const message = availability.reason === 'requires_app_bundle'
-        ? t('composer.dictationRequiresApp')
-        : t('composer.dictationUnavailable')
-      await dialog.alert({ message })
-      dictationStartingRef.current = false
-      setDictationStarting(false)
-      return
-    }
-    // WebKit speech recognition does not reliably trigger TCC in a Tauri
-    // webview. Request and immediately release the microphone first so the
-    // signed application gets the macOS prompt and refusals are explicit.
-    if (navigator.mediaDevices?.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        stream.getTracks().forEach(track => track.stop())
-      } catch (error) {
-        await dialog.alert({ message: t('composer.dictationPermissionDenied', { error: errorMessage(error) }) })
-        dictationStartingRef.current = false
-        setDictationStarting(false)
-        return
+      const message = errorMessage(error)
+      setRecordingError(t(recordingRef.current ? 'composer.recordingSaveFailed' : 'composer.recordingStartFailed', { error: message }))
+      if (recordingRef.current) {
+        recordingRef.current = false
+        setRecording(false)
+        setRecordingLevel(0)
       }
-    }
-    const SpeechRecognition = (window as unknown as {
-      SpeechRecognition?: new () => SpeechRecognitionLike
-      webkitSpeechRecognition?: new () => SpeechRecognitionLike
-    }).SpeechRecognition ?? (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike }).webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      await dialog.alert({ message: t('composer.dictationWebkitUnavailable') })
-      dictationStartingRef.current = false
-      setDictationStarting(false)
-      return
-    }
-    try {
-      const recognition = new SpeechRecognition()
-      recognition.lang = localeToBcp47(locale)
-      recognition.interimResults = true
-      recognition.continuous = false
-      const baseText = text
-      recognition.onresult = event => {
-        let transcript = ''
-        for (let index = 0; index < event.results.length; index += 1) {
-          transcript += event.results[index][0].transcript
-        }
-        const separator = baseText && !baseText.endsWith(' ') && transcript ? ' ' : ''
-        setText(`${baseText}${separator}${transcript}`)
-      }
-      const finish = () => {
-        if (recognitionRef.current === recognition) recognitionRef.current = null
-        setListening(false)
-      }
-      recognition.onend = finish
-      recognition.onerror = finish
-      recognitionRef.current = recognition
-      setListening(true)
-      recognition.start()
-    } catch (error) {
-      recognitionRef.current = null
-      setListening(false)
-      await dialog.alert({ message: t('composer.dictationStartFailed', { error: errorMessage(error) }) })
     } finally {
-      dictationStartingRef.current = false
-      setDictationStarting(false)
+      recordingActionRef.current = false
+      setRecordingBusy(false)
     }
   }
 
@@ -502,50 +459,43 @@ export default function Composer({
   const selectPlugin = (plugin: Plugin) => {
     insertPluginMention(plugin.id)
     setAttachMenu(false)
-    setPluginSearch('')
-    setSkillSearch('')
-    setMcpSearch('')
+    setAttachSearch('')
   }
 
   const selectSkill = (skill: WorkspaceSkill) => {
     insertSkillMention(skill.slug)
     setAttachMenu(false)
-    setPluginSearch('')
-    setSkillSearch('')
-    setMcpSearch('')
+    setAttachSearch('')
   }
 
   const selectMcpItem = (item: McpPickerItem) => {
     insertMcpMention(item.insert)
     setAttachMenu(false)
-    setPluginSearch('')
-    setSkillSearch('')
-    setMcpSearch('')
+    setAttachSearch('')
   }
 
+  const attachQuery = attachSearch.trim().toLocaleLowerCase()
+
   const visibleSkills = useMemo(() => {
-    const query = skillSearch.trim().toLocaleLowerCase()
-    const filtered = query
+    const filtered = attachQuery
       ? allowedSkills.filter(skill =>
-          `${skill.name} ${skill.description ?? ''} ${skill.slug}`.toLocaleLowerCase().includes(query),
+          `${skill.name} ${skill.description ?? ''} ${skill.slug}`.toLocaleLowerCase().includes(attachQuery),
         )
       : allowedSkills
     return sortSkillsForDisplay(filtered)
-  }, [allowedSkills, skillSearch])
+  }, [allowedSkills, attachQuery])
 
   const visiblePlugins = useMemo(() => {
-    const query = pluginSearch.trim().toLocaleLowerCase()
-    if (!query) return allowedPlugins
-    return allowedPlugins.filter(plugin => `${plugin.name} ${plugin.description ?? ''}`.toLocaleLowerCase().includes(query))
-  }, [allowedPlugins, pluginSearch])
+    if (!attachQuery) return allowedPlugins
+    return allowedPlugins.filter(plugin => `${plugin.name} ${plugin.description ?? ''}`.toLocaleLowerCase().includes(attachQuery))
+  }, [allowedPlugins, attachQuery])
 
   const visibleMcpItems = useMemo(() => {
-    const query = mcpSearch.trim().toLocaleLowerCase()
-    if (!query) return mcpPickerItems
+    if (!attachQuery) return mcpPickerItems
     return mcpPickerItems.filter(item =>
-      `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(query),
+      `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(attachQuery),
     )
-  }, [mcpPickerItems, mcpSearch])
+  }, [mcpPickerItems, attachQuery])
 
   const filteredModes = useMemo(() => {
     const query = modeSearch.trim().toLowerCase()
@@ -600,7 +550,7 @@ export default function Composer({
           id: skill.slug,
           name: skill.name,
           subtitle: 'Instructions',
-          icon: resolveIconFromText(skill.slug, skill.name, skill.description),
+          icon: resolveSkillIcon(skill),
         })
         continue
       }
@@ -698,6 +648,7 @@ export default function Composer({
             ))}
           </div>
         )}
+        {recordingError && <p className="composer-recording-error" role="alert">{recordingError}</p>}
 
         <textarea
           ref={taRef}
@@ -736,20 +687,21 @@ export default function Composer({
                     </span>
                     <span className="attach-plugin-copy"><strong>{t('composer.folder')}</strong></span>
                   </button>
+                  <input
+                    autoFocus
+                    value={attachSearch}
+                    onChange={event => setAttachSearch(event.target.value)}
+                    placeholder={t('composer.searchCatalog')}
+                    aria-label={t('composer.searchCatalog')}
+                    className="popover-search"
+                  />
                 </div>
                 <div className="attach-popover-scroll">
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.pluginsAndModes')}</div>
                   {catalogError && allowedPlugins.length === 0 ? (
                     <p className="composer-popover-empty">{catalogError}</p>
-                  ) : allowedPlugins.length > 0 ? <>
-                    <input
-                      value={pluginSearch}
-                      onChange={event => setPluginSearch(event.target.value)}
-                      placeholder={t('composer.searchPlugin')}
-                      aria-label={t('composer.searchPlugin')}
-                      className="popover-search"
-                    />
+                  ) : allowedPlugins.length > 0 ? (
                     <div className="attach-plugin-list">
                       {visiblePlugins.length > 0 ? visiblePlugins.map(plugin => {
                         const isWorkMode = plugin.manifest && typeof plugin.manifest === 'object' && 'specializedMode' in (plugin.manifest as object)
@@ -770,25 +722,18 @@ export default function Composer({
                         )
                       }) : <p className="composer-popover-empty">{t('composer.noPluginMatch')}</p>}
                     </div>
-                  </> : <p className="composer-popover-empty">{t('composer.noPlugins')}</p>}
+                  ) : <p className="composer-popover-empty">{t('composer.noPlugins')}</p>}
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/plugins') }}>{t('composer.managePlugins')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.skillsInstructions')}</div>
                   {catalogError && allowedSkills.length === 0 ? (
                     <p className="composer-popover-empty">{catalogError}</p>
-                  ) : allowedSkills.length > 0 ? <>
-                    <input
-                      value={skillSearch}
-                      onChange={event => setSkillSearch(event.target.value)}
-                      placeholder={t('composer.searchSkill')}
-                      aria-label={t('composer.searchSkill')}
-                      className="popover-search"
-                    />
+                  ) : allowedSkills.length > 0 ? (
                     <div className="attach-plugin-list">
                       {visibleSkills.length > 0 ? visibleSkills.map(skill => (
                         <button type="button" className="composer-popover-row attach-plugin-row" key={`${skill.scope}:${skill.slug}`} onClick={() => selectSkill(skill)}>
                           <span className="attach-row-icon">
-                            <PluginIcon icon={resolveIconFromText(skill.slug, skill.name, skill.description)} size="sm" className="attach-plugin-icon" />
+                            <PluginIcon icon={resolveSkillIcon(skill)} size="sm" className="attach-plugin-icon" />
                           </span>
                           <span className="attach-plugin-copy">
                             <span className="attach-plugin-title">
@@ -801,18 +746,11 @@ export default function Composer({
                         </button>
                       )) : <p className="composer-popover-empty">{t('composer.noSkillMatch')}</p>}
                     </div>
-                  </> : <p className="composer-popover-empty">{t('composer.noSkills')}</p>}
+                  ) : <p className="composer-popover-empty">{t('composer.noSkills')}</p>}
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>{t('composer.manageSkills')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.mcpIntegrations')}</div>
-                  {mcpPickerItems.length > 0 ? <>
-                    <input
-                      value={mcpSearch}
-                      onChange={event => setMcpSearch(event.target.value)}
-                      placeholder={t('composer.searchMcp')}
-                      aria-label={t('composer.searchMcp')}
-                      className="popover-search"
-                    />
+                  {mcpPickerItems.length > 0 ? (
                     <div className="attach-plugin-list">
                       {visibleMcpItems.length > 0 ? visibleMcpItems.map(item => (
                         <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
@@ -829,7 +767,7 @@ export default function Composer({
                         </button>
                       )) : <p className="composer-popover-empty">{t('composer.noMcpMatch')}</p>}
                     </div>
-                  </> : <p className="composer-popover-empty">Aucune intégration MCP connectée{selectedProject ? ' pour ce projet' : ''}.</p>}
+                  ) : <p className="composer-popover-empty">Aucune intégration MCP connectée{selectedProject ? ' pour ce projet' : ''}.</p>}
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>{t('composer.manageIntegrations')}</button>
                 </div>
               </ComposerPopover>
@@ -838,15 +776,29 @@ export default function Composer({
 
           <button
             type="button"
-            className={`icon-btn ${listening ? 'recording' : ''}`}
-            title={t('composer.dictationLabel')}
-            aria-label={t('composer.dictationLabel')}
-            aria-pressed={listening}
-            disabled={dictationStarting}
-            onClick={toggleDictation}
+            className={`icon-btn ${recording ? 'recording' : ''}`}
+            title={recording ? `${t('composer.recordingStopLabel')} · ${formatRecordingDuration(recordingSeconds)}` : t('composer.recordingStartLabel')}
+            aria-label={recording ? t('composer.recordingStopLabel') : t('composer.recordingStartLabel')}
+            aria-pressed={recording}
+            disabled={recordingBusy}
+            onClick={toggleRecording}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+            {recording ? (
+              <span className="live-audio-meter" aria-hidden="true">
+                {[0.45, 0.75, 1, 0.62].map((weight, index) => (
+                  <span
+                    className="live-audio-meter__bar"
+                    key={index}
+                    style={{ height: `${3 + Math.round(recordingLevel * weight * 11)}px` }}
+                  />
+                ))}
+                <span className="live-audio-meter__stop" />
+              </span>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+            )}
           </button>
+          {recording && <span className="composer-recording-duration" aria-live="off">{formatRecordingDuration(recordingSeconds)}</span>}
 
           {showProjectPill && (
             <div>
@@ -890,7 +842,7 @@ export default function Composer({
           )}
           <button
             className={`send-btn ${busy ? 'queue-send-btn' : ''}`}
-            disabled={!text.trim() || !!disabled}
+            disabled={!text.trim() || !!disabled || recording || recordingBusy}
             onClick={handleSend}
             title={busy ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}` : 'Envoyer'}
             aria-label={busy ? 'Ajouter le prompt à la file' : t('composer.send')}

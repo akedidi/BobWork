@@ -1,0 +1,7 @@
+interface:
+  display_name: "ADR"
+  short_description: "Consigner une décision d’architecture et ses conséquences."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $adr to consigner une décision d’architecture et ses conséquences."
+policy:
+  allow_implicit_invocation: true

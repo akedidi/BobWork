@@ -81,6 +81,13 @@ static DELEGATE: OnceLock<Retained<BobWorkNotificationDelegate>> = OnceLock::new
 
 /// `true` when the process runs inside a `.app` (required by UN).
 pub fn is_available() -> bool {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if !exe_path.to_string_lossy().contains(".app/Contents/MacOS/") {
+            return false;
+        }
+    } else {
+        return false;
+    }
     let bundle = NSBundle::mainBundle();
     bundle.bundleIdentifier().is_some()
 }

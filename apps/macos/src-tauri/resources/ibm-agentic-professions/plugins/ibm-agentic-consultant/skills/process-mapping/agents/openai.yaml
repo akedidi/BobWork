@@ -1,0 +1,7 @@
+interface:
+  display_name: "process-mapping"
+  short_description: "Visualiser un processus as-is pour localiser délais, risques"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $process-mapping to visualiser un processus as-is pour localiser délais, risques et valeur."
+policy:
+  allow_implicit_invocation: true

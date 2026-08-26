@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "builtin": true,
+  "name": "Cloud Architect",
+  "slug": "cloud-architect",
+  "version": "2.6.0",
+  "author": "Amin Borghei (borghei), Codex v2 adaptation — imported locally for Bob Work",
+  "description": "Conçoit, documente et révise des architectures AWS, Azure, GCP, IBM Cloud, Kubernetes, hybrides et multi-cloud. D2/ELK couvre les topologies cloud, réseau et Kubernetes avec icônes officielles ; Mermaid 11.17.1 couvre flowcharts, workflows, séquences, états et journeys ; PlantUML 1.2026.4 couvre UML class, component, deployment, activity, use-case, sequence et state ; C4-PlantUML 2.13.0 couvre context, container, component, dynamic et deployment, avec frontières imbriquées, tags/styles et icônes officielles embarquées. Chaque génération produit la source éditable, le SVG, le PNG et un rapport de livraison. Une QA bloquante contrôle ratio, labels manquants, erreurs de rendu, emojis, ressources externes, icônes manquantes et SVG invalides. Le fonctionnement est local, hors ligne et sans CDN, avec 1 959 icônes officielles AWS, Azure, GCP et IBM Cloud.",
+  "category": "executable",
+  "permissions": [
+    { "type": "command.execute" },
+    { "type": "network.request" }
+  ],
+  "runtime": {
+    "cli": true,
+    "python": ">=3.9"
+  },
+  "entrypoints": [
+    { "name": "validate-architecture", "path": "skills/senior-cloud-architect/scripts/validate_architecture.py", "runtime": "python3" },
+    { "name": "provider-guidance", "path": "skills/senior-cloud-architect/scripts/provider_guidance.py", "runtime": "python3" },
+    { "name": "generate-d2", "path": "skills/cloud-architecture-diagrams/scripts/generate_d2.py", "runtime": "python3" },
+    { "name": "generate-professional-d2", "path": "scripts/generate_professional_d2.py", "runtime": "python3" },
+    { "name": "render-professional-svg", "path": "scripts/render_professional_svg.py", "runtime": "python3" },
+    { "name": "d2-runtime", "path": "scripts/d2_runtime.py", "runtime": "python3" },
+    { "name": "validate-diagram-model", "path": "scripts/validate_diagram_model.py", "runtime": "python3" },
+    { "name": "generate-diagram-source", "path": "scripts/generate_diagram_source.py", "runtime": "python3" },
+    { "name": "render-diagram", "path": "scripts/render_diagram.py", "runtime": "python3" },
+    { "name": "mermaid-runtime", "path": "scripts/mermaid_runtime.py", "runtime": "python3" },
+    { "name": "plantuml-runtime", "path": "scripts/plantuml_runtime.py", "runtime": "python3" },
+    { "name": "qa-diagram", "path": "scripts/qa_diagram.py", "runtime": "python3" },
+    { "name": "smoke-test-diagram-engines", "path": "scripts/smoke_test_diagram_engines.py", "runtime": "python3" },
+    { "name": "render-graphviz", "path": "skills/cloud-architecture-diagrams/scripts/render_graphviz.py", "runtime": "python3" },
+    { "name": "qa-svg", "path": "skills/cloud-architecture-diagrams/scripts/qa_svg.py", "runtime": "python3" },
+    { "name": "qa-professional-svg", "path": "scripts/qa_professional_svg.py", "runtime": "python3" }
+    ,{ "name": "search-icon-catalog", "path": "scripts/search_icon_catalog.py", "runtime": "python3" }
+    ,{ "name": "validate-icon-catalog", "path": "scripts/validate_icon_catalog.py", "runtime": "python3" }
+  ],
+  "resources": [
+    { "kind": "stdio-cli", "label": "Validation de modèle", "notes": "validate_architecture.py", "optional": false },
+    { "kind": "stdio-cli", "label": "Guidance fournisseurs", "notes": "provider_guidance.py", "optional": false },
+    { "kind": "stdio-cli", "label": "D2 v0.7.1 avec ELK", "notes": "Binaire macOS arm64 épinglé, vérifié par SHA-256 et exécuté via scripts/d2_runtime.py", "optional": false },
+    { "kind": "stdio-cli", "label": "Mermaid 11.17.1 hors ligne", "notes": "Flowcharts, workflows, séquences, états et journeys ; bundle local sans CDN", "optional": false },
+    { "kind": "stdio-cli", "label": "PlantUML 1.2026.4 et C4 2.13.0", "notes": "UML formel et C4 context/container/component/dynamic/deployment ; frontières imbriquées, tags/styles et icônes officielles embarquées ; JAR local vérifié par SHA-256", "optional": false },
+    { "kind": "stdio-cli", "label": "Catalogue d’icônes cloud", "notes": "1 959 SVG officiels : 935 AWS, 714 Azure, 45 Google Cloud et 265 IBM Cloud, plus 22 symboles techniques génériques ; tous locaux, indexés, vérifiés par SHA-256 et embarqués", "optional": false },
+    { "kind": "stdio-cli", "label": "Fallback Graphviz", "notes": "Utilisé uniquement après un échec explicite du rendu D2", "optional": true },
+    { "kind": "web-search", "label": "Sources officielles cloud", "notes": "Vérification des capacités, prix, limites et cadres Well-Architected", "optional": true },
+    { "kind": "bob-llm", "label": "LLM Bob", "notes": "Conception, arbitrages et synthèse des livrables", "optional": false }
+  ],
+  "connectorStrategy": {
+    "targetLevel": "chatgpt-work",
+    "designNotes": "Bundle intégré Bob Work fidèle au plugin Senior Cloud Architect, renforcé par D2 v0.7.1/ELK, Mermaid 11.17.1, PlantUML 1.2026.4 avec C4 2.13.0, un catalogue local indexé de 1 959 SVG officiels multi-cloud et des contrôles visuels bloquants.",
+    "explored": ["bundled-d2-v0.7.1", "bundled-mermaid-v11.17.1", "bundled-plantuml-v1.2026.4", "bundled-c4-stdlib-v2.13.0", "aws-architecture-icons-2026-q3", "azure-official-icons-v24", "google-cloud-product-icons-2025", "ibm-cloud-architecture-icons-v2.0.0", "neutral-generic-icons", "semantic-icon-search", "fixed-layout-svg", "bundled-python", "bob-llm", "web-search"],
+    "tiers": [
+      { "id": "T1", "kind": "local-cli", "provider": "d2-v0.7.1-macos-arm64", "required": true },
+      { "id": "T2", "kind": "local-cli", "provider": "bundled-python", "required": true },
+      { "id": "T3", "kind": "bob-llm", "provider": "bob", "required": true },
+      { "id": "T4", "kind": "web-search", "provider": "official-provider-docs", "required": false }
+    ],
+    "fallback": "Si la recherche web n’est pas disponible, livrer les hypothèses explicitement signalées et ne pas affirmer de capacités, tarifs ou limites récents."
+  },
+  "specializedMode": {
+    "label": "Cloud Architect",
+    "description": "Architecture cloud de production et revue Well-Architected avec D2/ELK pour les topologies cloud/réseau/Kubernetes, Mermaid 11.17.1 pour flow/workflow/sequence/state/journey, PlantUML 1.2026.4 pour UML et C4-PlantUML 2.13.0 pour context/container/component/dynamic/deployment, frontières imbriquées et icônes officielles. Produit source éditable, SVG, PNG et rapport avec QA bloquante, hors ligne, sans CDN, et 1 959 icônes officielles AWS, Azure, GCP et IBM Cloud.",
+    "workflow": "1) Établir et valider le modèle. 2) Choisir D2, Mermaid ou PlantUML/C4 selon diagram-engine-matrix.md. 3) Résoudre les icônes officielles pour les topologies. 4) Router avec render_diagram.py. 5) Produire source éditable, SVG, PNG et delivery record. 6) Exécuter la QA et inspecter visuellement.",
+    "deliveryProtocol": "Chaque schéma cloud doit utiliser des icônes SVG gérées, locales, embarquées et sémantiquement adaptées. Les emojis, visages, mascottes et avatars d’assistant sont interdits. Un type générique ne doit jamais être assimilé implicitement à un produit cloud. Livrer un master lisible à l’écran et des vues techniques séparées quand la densité l’exige. Une résolution ambiguë, un ratio accidentel supérieur à 3:1, une icône manquante, un hotlink, un chevauchement ou un texte illisible bloque la livraison. La réponse finale doit enregistrer tous les chemins absolus et intégrer visiblement le PNG inspecté en Markdown ; une simple liste de chemins n’est pas une livraison complète.",
+    "allowedTools": ["execute_command"],
+    "inputExtensions": ["json", "yaml", "yml", "md", "pdf", "docx", "pptx"],
+    "outputFormats": ["md", "json", "svg", "png", "d2", "dot", "mmd", "puml", "docx", "pdf", "pptx"],
+    "preferredLibraries": ["D2 v0.7.1 (bundled)", "ELK", "Mermaid 11.17.1 (bundled)", "PlantUML 1.2026.4 (bundled)", "C4-PlantUML 2.13.0 standard library", "AWS Architecture Icons 2026 Q3", "Azure Architecture Icons V24", "Google Cloud Product Icons 2025", "IBM Cloud Architecture Icons v2.0.0", "Bob Work semantic technical SVG icons v2", "deterministic SVG", "Graphviz fallback", "Python 3"],
+    "sandbox": "architecture-design"
+  },
+  "icon": "cloud",
+  "releaseNotes": "2.6.0 — Ajoute C4 Dynamic et Deployment, frontières imbriquées cloud/région/réseau/Kubernetes, tags/styles, icônes officielles visibles dans SVG et PNG, Mermaid sans smileys avec PNG fidèle, et une matrice de régression D2/Mermaid/UML/C4."
+}

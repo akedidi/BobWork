@@ -4,8 +4,32 @@ import { extractChromeSnapshot, isChromeSnapshotTool, upsertChromeSnapshot } fro
 describe('chromeSnapshot', () => {
   it('recognizes namespaced Chrome MCP snapshot tools', () => {
     expect(isChromeSnapshotTool('mcp__bob-work-chrome-control_6001__browser_snapshot')).toBe(true)
+    expect(isChromeSnapshotTool('mcp__bob-work-chrome-control_6001__web_fetch')).toBe(true)
     expect(isChromeSnapshotTool('chrome_read_front_tab')).toBe(true)
     expect(isChromeSnapshotTool('read_file')).toBe(false)
+  })
+
+  it('builds a compact source card for a background web fetch', () => {
+    const snap = extractChromeSnapshot({
+      eventType: 'tool_finished',
+      toolName: 'web_fetch',
+      content: JSON.stringify({
+        title: 'Open-Meteo API',
+        url: 'https://open-meteo.com/en/docs',
+        headings: ['Weather Forecast API'],
+        text: 'API documentation',
+        fetch_mode: 'background',
+        opened: false,
+      }),
+      payload: {},
+    })
+    expect(snap).toMatchObject({
+      title: 'Open-Meteo API',
+      url: 'https://open-meteo.com/en/docs',
+      pending: false,
+      imagePath: undefined,
+      background: true,
+    })
   })
 
   it('builds a pending card from tool_started url', () => {
@@ -31,6 +55,7 @@ describe('chromeSnapshot', () => {
         url: 'https://example.com/',
         headings: ['Example Domain'],
         text: 'This domain is for use in illustrative examples.',
+        screenshot_path: '/tmp/chrome-example.jpg',
         snapshot: true,
       }),
       payload: {},
@@ -39,6 +64,7 @@ describe('chromeSnapshot', () => {
       title: 'Example Domain',
       url: 'https://example.com/',
       headings: ['Example Domain'],
+      imagePath: '/tmp/chrome-example.jpg',
       pending: false,
     })
     expect(snap?.text).toContain('illustrative')
@@ -67,10 +93,10 @@ describe('chromeSnapshot', () => {
     const finished = extractChromeSnapshot({
       eventType: 'tool_finished',
       toolName: 'browser_snapshot',
-      payload: { title: 'Example Domain', url: 'https://example.com', headings: ['Example Domain'] },
+      payload: { title: 'Example Domain', url: 'https://example.com', headings: ['Example Domain'], screenshot_path: '/tmp/example.jpg' },
     })!
     const merged = upsertChromeSnapshot([pending], finished)
     expect(merged).toHaveLength(1)
-    expect(merged[0]).toMatchObject({ title: 'Example Domain', pending: false })
+    expect(merged[0]).toMatchObject({ title: 'Example Domain', imagePath: '/tmp/example.jpg', pending: false })
   })
 })

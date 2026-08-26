@@ -1,0 +1,7 @@
+interface:
+  display_name: "backlog-management"
+  short_description: "Maintenir un backlog ordonné, transparent et orienté valeur."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $backlog-management to maintenir un backlog ordonné, transparent et orienté valeur."
+policy:
+  allow_implicit_invocation: true

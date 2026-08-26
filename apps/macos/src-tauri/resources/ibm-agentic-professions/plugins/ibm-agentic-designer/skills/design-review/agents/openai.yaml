@@ -1,0 +1,7 @@
+interface:
+  display_name: "design-review"
+  short_description: "Conduire une revue de conception factuelle avant constructio"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $design-review to conduire une revue de conception factuelle avant construction ou release."
+policy:
+  allow_implicit_invocation: true

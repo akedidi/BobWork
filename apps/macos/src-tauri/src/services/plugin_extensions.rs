@@ -629,9 +629,14 @@ impl PluginExtensionService {
                         ("needs_setup".into(), "MCP à configurer.".into(), None)
                     }
                 }
-                "stdio-cli" => (
+                "stdio-cli" | "bundled-bin" | "shell" | "node-cli" => (
                     "ready".into(),
-                    "CLI locale du plugin (disponible à l’activation).".into(),
+                    match kind.as_str() {
+                        "bundled-bin" => "Binaire embarqué dans le plugin (disponible à l’activation).".into(),
+                        "shell" => "Script shell du plugin (disponible à l’activation).".into(),
+                        "node-cli" => "CLI Node du plugin (disponible à l’activation).".into(),
+                        _ => "CLI locale du plugin (disponible à l’activation).".into(),
+                    },
                     None,
                 ),
                 "bob-llm" => {
@@ -746,7 +751,7 @@ impl PluginExtensionService {
                 .get("runtime")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if !matches!(runtime, "python3" | "bash" | "sh") {
+            if !matches!(runtime, "python3" | "bash" | "sh" | "zsh" | "node" | "binary") {
                 return Err(AppError::Plugin("Unsupported hook runtime".into()));
             }
             let relative = entrypoint

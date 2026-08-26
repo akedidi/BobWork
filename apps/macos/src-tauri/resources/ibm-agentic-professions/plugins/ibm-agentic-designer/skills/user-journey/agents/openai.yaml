@@ -1,0 +1,7 @@
+interface:
+  display_name: "user-journey"
+  short_description: "Cartographier l’expérience de bout en bout et ses moments cr"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $user-journey to cartographier l’expérience de bout en bout et ses moments critiques."
+policy:
+  allow_implicit_invocation: true

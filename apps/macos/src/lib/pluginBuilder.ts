@@ -9,7 +9,16 @@ export const PLUGIN_BUILDER_STEPS = [
 export type PluginBuilderStep = (typeof PLUGIN_BUILDER_STEPS)[number]
 
 export type PluginTrigger = 'manual' | 'schedule' | 'event'
-export type PluginToolId = 'mcp' | 'cli' | 'api' | 'oauth' | 'computer-use' | 'chrome' | 'web'
+export type PluginToolId =
+  | 'mcp'
+  | 'cli'
+  | 'shell'
+  | 'bundled-bin'
+  | 'api'
+  | 'oauth'
+  | 'computer-use'
+  | 'chrome'
+  | 'web'
 export type PluginPermissionId =
   | 'file.read'
   | 'file.write'
@@ -44,7 +53,9 @@ export const EMPTY_PLUGIN_DRAFT: PluginBuilderDraft = {
 
 export const PLUGIN_TOOL_OPTIONS: Array<{ id: PluginToolId; label: string; hint: string }> = [
   { id: 'mcp', label: 'Serveur MCP local', hint: 'Outils stdio dans le bundle' },
-  { id: 'cli', label: 'CLI Python', hint: 'Script exécutable local' },
+  { id: 'cli', label: 'CLI locale', hint: 'Python, Node, wrappers type Mermaid' },
+  { id: 'shell', label: 'Script shell', hint: 'bash, zsh ou sh dans le bundle' },
+  { id: 'bundled-bin', label: 'Binaire embarqué', hint: 'mermaid, d2, ffmpeg, pandoc… version épinglée' },
   { id: 'api', label: 'API publique ou clé', hint: 'HTTP, secrets via coffre' },
   { id: 'oauth', label: 'OAuth / intégration', hint: 'GitHub, Slack, Microsoft…' },
   { id: 'web', label: 'Recherche web Bob', hint: 'Si l’accès web est activé' },
@@ -105,9 +116,9 @@ export function pluginBuilderPreview(draft: PluginBuilderDraft): {
 /** Seed for a free-form chat: Bob interviews, then generates. */
 export const PLUGIN_CONVERSATION_PROMPT = [
   'Je veux créer un plugin agentique Bob Work, dans cette conversation (sans formulaire).',
-  'Pose-moi les questions utiles : objectif / bénéfice utilisateur, déclencheur, outils (MCP, CLI, API, OAuth, web, Computer Use, Chrome), autorisations.',
+  'Pose-moi les questions utiles : objectif / bénéfice utilisateur, déclencheur, outils (MCP, CLI, shell, binaires embarqués type Mermaid, API, OAuth, web, Computer Use, Chrome), autorisations, icône (favicon web selon le métier).',
   'Quand le cahier des charges est clair, génère le bundle local, déploie-le, et confirme qu’il apparaît dans Plugins.',
-  'Livrables : `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic), code MCP/CLI si besoin, permissions honnêtes, aucun secret en clair.',
+  'Livrables : `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic), code MCP/CLI/shell/binaires si besoin, permissions honnêtes, aucun secret en clair.',
   'La description doit rester fonctionnelle (1–2 phrases, bénéfice utilisateur, pas de jargon MCP/CLI).',
 ].join('\n')
 
@@ -129,8 +140,8 @@ export function buildPluginGenerationPrompt(draft: PluginBuilderDraft): string {
     '',
     'Livrables obligatoires :',
     '- `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic, specializedMode, resources, connectorStrategy)',
-    '- code MCP/CLI Python si des outils ont été cochés',
+    '- code MCP / CLI / shell / binaires embarqués si des outils ont été cochés (modèle Cloud Architect : wrapper + binaire épinglé, permission command.execute)',
     '- permissions honnêtes ; aucun secret en clair',
-    '- après écriture : le plugin doit être détectable par Bob Work (sync agentique)',
+    '- `icon` dans `.bob-work-plugin.json` : favicon HTTPS (google s2) aligné sur le métier / la description, ou clé locale Bob',
   ].filter(Boolean).join('\n')
 }

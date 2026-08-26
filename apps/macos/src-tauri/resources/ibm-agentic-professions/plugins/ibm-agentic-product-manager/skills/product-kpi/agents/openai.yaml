@@ -1,0 +1,7 @@
+interface:
+  display_name: "product-kpi"
+  short_description: "Définir un système de métriques actionnable et résistant aux"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $product-kpi to définir un système de métriques actionnable et résistant aux effets pervers."
+policy:
+  allow_implicit_invocation: true

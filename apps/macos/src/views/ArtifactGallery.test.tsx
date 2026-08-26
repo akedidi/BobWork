@@ -172,6 +172,53 @@ describe('ArtifactGallery', () => {
     expect(screen.getByTitle('Afficher dans le Finder')).toBeVisible()
   })
 
+  it('agrandit et réduit réellement une image avec les contrôles de zoom', async () => {
+    mocks.getArtifacts.mockResolvedValue([{
+      id: 'a1',
+      artifactType: 'png',
+      title: 'Image test',
+      filePath: '/tmp/image.png',
+      version: 1,
+      sources: [],
+      validationStatus: 'valid',
+      exported: false,
+      createdAt: new Date().toISOString(),
+      size: 1200,
+    }])
+    mocks.prepareFilePreview.mockResolvedValue({
+      path: '/tmp/image.png',
+      name: 'image.png',
+      kind: 'image',
+      mimeType: 'image/png',
+      size: 1200,
+      modifiedAt: null,
+      previewPath: '/tmp/image.png',
+      previewPaths: ['/tmp/image.png'],
+      content: null,
+      entries: [],
+      quickLook: false,
+    })
+
+    const { container } = render(<ArtifactGallery />)
+    fireEvent.click(await screen.findByText('Image test'))
+
+    const zoomIn = await screen.findByRole('button', { name: 'Zoomer' })
+    const zoomOut = screen.getByRole('button', { name: 'Dézoomer' })
+    const surface = container.querySelector<HTMLElement>('.preview-zoom-surface')
+    expect(surface).not.toBeNull()
+    expect(screen.getByRole('button', { name: /Zoom 100 %/ })).toBeVisible()
+    expect(surface?.style.getPropertyValue('--preview-image-max-width')).toBe('100%')
+
+    fireEvent.click(zoomIn)
+    expect(screen.getByRole('button', { name: /Zoom 110 %/ })).toBeVisible()
+    expect(surface?.style.getPropertyValue('--preview-image-max-width')).toBe('110%')
+
+    fireEvent.click(zoomOut)
+    fireEvent.click(zoomOut)
+    expect(screen.getByRole('button', { name: /Zoom 90 %/ })).toBeVisible()
+    expect(surface?.style.getPropertyValue('--preview-image-max-width')).toBe('90%')
+  })
+
   it('demande confirmation avant de supprimer un artefact', async () => {
     mocks.getArtifacts.mockResolvedValue([{
       id: 'a1',

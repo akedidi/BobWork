@@ -25,6 +25,7 @@ pub struct AppSettings {
     pub notifications_enabled: bool,
     pub notify_task_complete: bool,
     pub voice_on_device: bool,
+    pub retain_audio_recordings: bool,
     pub task_retention_days: i64,
     pub telemetry_enabled: bool,
     pub computer_use_enabled: bool,
@@ -34,6 +35,9 @@ pub struct AppSettings {
     /// When true, Bob Work may retrieve short excerpts from other conversations
     /// (same project when applicable) to enrich the prompt — ChatGPT-style.
     pub cross_conversation_context: bool,
+    /// Expose the authenticated mobile-control API through a Cloudflare Quick Tunnel.
+    #[serde(default)]
+    pub remote_control_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -61,12 +65,14 @@ impl Default for AppSettings {
             notifications_enabled: true,
             notify_task_complete: true,
             voice_on_device: true,
+            retain_audio_recordings: true,
             task_retention_days: 30,
             telemetry_enabled: false,
             computer_use_enabled: false,
             chrome_control_enabled: false,
             sandbox_mode: false,
             cross_conversation_context: false,
+            remote_control_enabled: false,
         }
     }
 }

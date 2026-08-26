@@ -19,6 +19,40 @@ use tracing::{debug, error, info};
 use which::which;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "macos")]
+fn isolate_bob_process_group(command: &mut TokioCommand) {
+    // Bob Shell can launch several sub-agent processes. Giving the root process
+    // its own group lets Stop terminate the complete task tree in one action.
+    command.process_group(0);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn isolate_bob_process_group(_command: &mut TokioCommand) {}
+
+async fn terminate_bob_process_group(child: &mut Child) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(pid) = child.id() {
+            // Negative pid addresses every process in the root Bob process group.
+            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+            let root_exited = matches!(
+                timeout(Duration::from_millis(750), child.wait()).await,
+                Ok(Ok(_))
+            );
+            // The root can exit before a stubborn sub-agent. A final group-wide
+            // SIGKILL guarantees that no descendant remains after Stop returns.
+            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if root_exited {
+                return;
+            }
+        }
+    }
+
+    // Fallback for other targets and for a child that changed its process group.
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 pub const SECRET_IBM_API: &str = "ibm_api_key";
 pub const SECRET_GITHUB: &str = "integration_github";
 pub const SECRET_SLACK: &str = "integration_slack";
@@ -113,6 +147,9 @@ pub struct BobRunOptions {
     /// When true, pass `--trust` to Bob Shell for this workspace run.
     #[serde(default)]
     pub trust_workspace: bool,
+    /// Permit tools that can open, focus or inspect the user's visible Chrome UI.
+    #[serde(default)]
+    pub allow_visible_chrome: bool,
 }
 
 impl Default for BobRunOptions {
@@ -129,8 +166,53 @@ impl Default for BobRunOptions {
             plugin_hooks: vec![],
             resume_task_id: None,
             trust_workspace: false,
+            allow_visible_chrome: false,
         }
     }
+}
+
+/// Visible browser control is opt-in per prompt. A URL, research request, or
+/// mention of a website alone must never steal focus by opening Chrome.
+pub fn explicitly_requests_visible_chrome(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    let instruction_text = normalized
+        .split_whitespace()
+        .filter(|part| !part.starts_with("http://") && !part.starts_with("https://"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let words = instruction_text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let has_action_word = words.iter().any(|word| {
+        matches!(
+            *word,
+            "ouvre"
+                | "ouvrir"
+                | "affiche"
+                | "afficher"
+                | "lance"
+                | "lancer"
+                | "navigue"
+                | "naviguer"
+                | "interagis"
+                | "contrôle"
+                | "control"
+                | "open"
+                | "navigate"
+                | "browse"
+        )
+    }) || instruction_text.contains("va sur ")
+        || instruction_text.contains("rends-toi ")
+        || instruction_text.contains("go to ");
+    let has_browser_target = words.iter().any(|word| {
+        matches!(
+            *word,
+            "chrome" | "navigateur" | "browser" | "onglet" | "tab" | "site" | "page"
+        )
+    }) || normalized.contains("http://")
+        || normalized.contains("https://");
+    has_action_word && has_browser_target
 }
 
 /// Deferred `bob run` waiting on a preflight approval decision.
@@ -171,6 +253,14 @@ pub struct BobSessionDoneEvent {
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub shell_task_id: Option<String>,
+    /// Canonical workspace used for the run. It lets Bob Work safely resolve
+    /// relative deliverables such as `architecture.svg` announced by a plugin.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    /// Canonical local files produced during the run. Sending these with the
+    /// completion event lets the frontend preview a relative SVG immediately.
+    #[serde(default)]
+    pub deliverable_paths: Vec<String>,
     /// True when the user stopped the run — no failure notification.
     #[serde(default)]
     pub cancelled: bool,
@@ -910,6 +1000,7 @@ impl BobService {
         let bob_mode = Self::map_to_bob_mode_static(&mode);
         let task_id = options.task_id.clone();
         let run_id = options.run_id.clone();
+        let workspace_path = project_path.clone();
         let api_key = self.api_key();
         let integration_environment =
             self.integration_process_environment(&options.integration_ids);
@@ -940,6 +1031,8 @@ impl BobService {
                         task_id: task_id.clone(),
                         run_id: run_id.clone(),
                         shell_task_id: None,
+                        workspace_path: workspace_path.clone(),
+                        deliverable_paths: vec![],
                         cancelled: false,
                     },
                 );
@@ -961,6 +1054,14 @@ impl BobService {
             for (variable, secret) in &integration_environment {
                 cmd.env(variable, secret.as_str());
             }
+            cmd.env(
+                "BOB_WORK_ALLOW_VISIBLE_CHROME",
+                if options.allow_visible_chrome {
+                    "1"
+                } else {
+                    "0"
+                },
+            );
             // Plugin API keys saved via Intégrations → APIs live in mcp.json env maps.
             // Inject them so placeholders like ${FINNHUB_API_KEY} on plugin MCP resolve.
             for (variable, value) in
@@ -1005,7 +1106,10 @@ impl BobService {
 
             // Pass prompt as positional argument to ensure it doesn't wait on stdin EOF
             let mut final_prompt = prompt.clone();
-            if final_prompt.to_lowercase().contains("tableau") || final_prompt.to_lowercase().contains("comparatif") || final_prompt.to_lowercase().contains("comparer") {
+            if final_prompt.to_lowercase().contains("tableau")
+                || final_prompt.to_lowercase().contains("comparatif")
+                || final_prompt.to_lowercase().contains("comparer")
+            {
                 final_prompt.push_str("\n\nNote de formatage : Utilise des tableaux Markdown standards (GFM) avec des sauts de ligne réels entre chaque ligne du tableau.");
             }
             cmd.arg(&final_prompt);
@@ -1014,6 +1118,7 @@ impl BobService {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            isolate_bob_process_group(&mut cmd);
 
             let mut child: Child = match cmd.spawn() {
                 Ok(c) => c,
@@ -1040,6 +1145,8 @@ impl BobService {
                             task_id: task_id.clone(),
                             run_id: run_id.clone(),
                             shell_task_id: None,
+                            workspace_path: workspace_path.clone(),
+                            deliverable_paths: vec![],
                             cancelled: false,
                         },
                     );
@@ -1074,7 +1181,7 @@ impl BobService {
                     // Cancellation
                     _ = &mut cancel_rx => {
                         info!("Session {} cancelled", sid);
-                        let _ = child.kill().await;
+                        terminate_bob_process_group(&mut child).await;
                         let _ = run_plugin_hooks(
                             &app_handle,
                             &options.plugin_hooks,
@@ -1095,6 +1202,8 @@ impl BobService {
                             task_id: task_id.clone(),
                             run_id: run_id.clone(),
                             shell_task_id: None,
+                            workspace_path: workspace_path.clone(),
+                            deliverable_paths: vec![],
                             cancelled: true,
                         });
                         return;
@@ -1263,16 +1372,28 @@ impl BobService {
                                         // Handle tool_call
                                         if let Some(tool) = step.get("tool_call") {
                                             if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
-                                                let badge = format!("\n\n> ⚙️ _Exécution de l'outil {}..._\n\n", name);
-                                                full_output.push_str(&badge);
-                                                let _ = app_handle.emit("bob-token", BobTokenEvent {
+                                                let parameters = tool
+                                                    .get("parameters")
+                                                    .or_else(|| tool.get("input"))
+                                                    .cloned()
+                                                    .unwrap_or(serde_json::Value::Null);
+                                                let activity = BobActivityEvent {
                                                     session_id: sid.clone(),
                                                     conversation_id: cid.clone(),
-                                                    chunk: badge,
-                                                    is_final: false,
-                                                    event_type: "tool_use".to_string(),
                                                     task_id: task_id.clone(),
-                                                });
+                                                    event_type: "tool_started".to_string(),
+                                                    title: Some(tool_activity_title(name, &parameters, "started")),
+                                                    content: (!parameters.is_null()).then(|| compact_json(&parameters)),
+                                                    tool_name: Some(name.to_string()),
+                                                    payload: tool.clone(),
+                                                };
+                                                let _ = app_handle.emit("bob-activity", &activity);
+                                                record_task_activity(
+                                                    &app_handle,
+                                                    task_id.as_deref(),
+                                                    run_id.as_deref(),
+                                                    &activity,
+                                                );
                                             }
                                         }
 
@@ -1428,6 +1549,10 @@ impl BobService {
             }
 
             info!("Bob session {} done, success={}", sid, success);
+            let deliverable_paths = collect_deliverable_file_paths_in_workspace(
+                &full_output,
+                workspace_path.as_deref().map(Path::new),
+            );
 
             let _ = app_handle.emit(
                 "bob-session-done",
@@ -1444,6 +1569,8 @@ impl BobService {
                     task_id: task_id.clone(),
                     run_id: run_id.clone(),
                     shell_task_id: shell_task_id.clone(),
+                    workspace_path: workspace_path.clone(),
+                    deliverable_paths,
                     cancelled: false,
                 },
             );
@@ -1457,6 +1584,90 @@ impl BobService {
 
     /// Generates a short conversation title through a separate, silent Bob
     /// invocation. It emits no Tauri event and registers no Bob Work task.
+    pub async fn generate_context_summary(&self, source: &str) -> AppResult<String> {
+        let bob_path = self
+            .bob_path
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| AppError::BobNotFound("Bob non détecté".into()))?;
+        let api_key = self.api_key();
+        let request = format!(
+            "Résume le contexte de travail ci-dessous en français, de façon factuelle et compacte. Conserve impérativement les décisions, contraintes, préférences utilisateur, noms de fichiers/projets, résultats, erreurs non résolues et prochaines étapes. N'invente rien. Retourne uniquement le résumé, sans titre ni markdown. Maximum 900 mots.\n\n{}",
+            source.chars().take(24_000).collect::<String>()
+        );
+        let mut cmd = TokioCommand::new(bob_path);
+        Self::apply_runtime_path_tokio(&mut cmd);
+        if let Some(api_key) = api_key.as_deref() {
+            cmd.env("BOB_API_KEY", api_key);
+            cmd.env("BOBSHELL_API_KEY", api_key);
+        }
+        cmd.arg("run")
+            .arg("--format")
+            .arg("stream-json")
+            .arg("--mode=ask")
+            .arg("--max-turns")
+            .arg("1")
+            .arg("--disable-mcp")
+            .arg("--disable-subagents")
+            .arg("--accept-license")
+            .arg("--trust")
+            .arg(request)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().map_err(|error| {
+            AppError::BobExecutionFailed(format!("Résumé du contexte impossible : {}", error))
+        })?;
+        drop(cmd);
+        drop(api_key);
+        let output = timeout(Duration::from_secs(45), child.wait_with_output())
+            .await
+            .map_err(|_| AppError::BobExecutionFailed("Résumé du contexte expiré.".into()))?
+            .map_err(|error| {
+                AppError::BobExecutionFailed(format!("Résumé du contexte interrompu : {}", error))
+            })?;
+        if !output.status.success() {
+            return Err(AppError::BobExecutionFailed(
+                "Bob n’a pas pu résumer le contexte.".into(),
+            ));
+        }
+        let mut generated = String::new();
+        let mut last_text_snapshot = String::new();
+        for raw in String::from_utf8_lossy(&output.stdout).lines() {
+            let clean = strip_ansi(raw);
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&clean) {
+                if let Some(event) = interpret_protocol_event(&value) {
+                    if let Some(delta) = event.text_delta {
+                        let is_snapshot =
+                            event.payload.get("type").and_then(|value| value.as_str())
+                                == Some("message");
+                        generated.push_str(&normalize_stream_text(
+                            &mut last_text_snapshot,
+                            &delta,
+                            is_snapshot,
+                        ));
+                    }
+                }
+            }
+        }
+        let summary = generated
+            .trim()
+            .trim_matches('`')
+            .trim()
+            .chars()
+            .take(6_000)
+            .collect::<String>();
+        if summary.is_empty() {
+            Err(AppError::BobExecutionFailed(
+                "Bob a retourné un résumé vide.".into(),
+            ))
+        } else {
+            Ok(summary)
+        }
+    }
+
     pub async fn generate_conversation_title(&self, first_prompt: &str) -> AppResult<String> {
         let bob_path = self
             .bob_path
@@ -1514,9 +1725,9 @@ impl BobService {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&clean) {
                 if let Some(event) = interpret_protocol_event(&value) {
                     if let Some(delta) = event.text_delta {
-                        let is_snapshot = event.payload
-                            .get("type")
-                            .and_then(|value| value.as_str()) == Some("message");
+                        let is_snapshot =
+                            event.payload.get("type").and_then(|value| value.as_str())
+                                == Some("message");
                         generated.push_str(&normalize_stream_text(
                             &mut last_text_snapshot,
                             &delta,
@@ -1757,18 +1968,26 @@ async fn run_plugin_hooks<R: tauri::Runtime>(
         let _ = app_handle.emit("bob-activity", &started);
         record_task_activity(app_handle, task_id, run_id, &started);
 
-        let mut command = TokioCommand::new(&hook.runtime);
+        let fallback_path =
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin".to_string();
+        let inherited_path = std::env::var("PATH").unwrap_or(fallback_path);
+        let local_path = format!(
+            "{}:{}:{inherited_path}",
+            hook.bundle_dir.join("bin").display(),
+            hook.bundle_dir.display()
+        );
+        let mut command = if hook.runtime == "binary" {
+            TokioCommand::new(&hook.path)
+        } else {
+            let mut command = TokioCommand::new(&hook.runtime);
+            command.arg(&hook.path);
+            command
+        };
         command
-            .arg(&hook.path)
             .args(&hook.args)
             .current_dir(&hook.bundle_dir)
             .env_clear()
-            .env(
-                "PATH",
-                std::env::var("PATH").unwrap_or_else(|_| {
-                    "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin".into()
-                }),
-            )
+            .env("PATH", local_path)
             .env("BOB_WORK_EVENT", event)
             .env("BOB_WORK_SESSION_ID", session_id)
             .env("BOB_WORK_CONVERSATION_ID", conversation_id)
@@ -2129,13 +2348,23 @@ fn tool_short_name(name: &str) -> &str {
 
 fn tool_activity_title(name: &str, parameters: &serde_json::Value, phase: &str) -> String {
     let short = tool_short_name(name);
+    if matches!(short, "web_fetch" | "browser_snapshot") {
+        let url =
+            find_json_string(parameters, &["url", "requested_url", "href"]).unwrap_or_default();
+        let label = if url.trim().is_empty() {
+            "source"
+        } else {
+            url.trim()
+        };
+        return match phase {
+            "finished" => format!("Source web consultée : {label}"),
+            "failed" => format!("Lecture web impossible : {label}"),
+            _ => format!("Lecture web : {label}"),
+        };
+    }
     if matches!(
         short,
-        "browser_snapshot"
-            | "chrome_read_front_tab"
-            | "chrome_open_url"
-            | "chrome_navigate"
-            | "chrome_list_tabs"
+        "chrome_read_front_tab" | "chrome_open_url" | "chrome_navigate" | "chrome_list_tabs"
     ) {
         let url =
             find_json_string(parameters, &["url", "requested_url", "href"]).unwrap_or_default();
@@ -2350,9 +2579,24 @@ fn collect_existing_paths(value: &serde_json::Value) -> Vec<String> {
 
 /// Absolute (or ~/…) deliverable paths mentioned in Bob text / tool payloads.
 pub(crate) fn collect_deliverable_file_paths(text: &str) -> Vec<String> {
-    let Ok(pattern) = regex::Regex::new(
-        r#"(?i)(?:^|[\s«»"'`(=:\[])((?:/|~/|file://)[^\s"'`()\]<>]+\.(?:pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|png|jpe?g|gif|webp|zip|key|pages|numbers))\b"#,
-    ) else {
+    collect_deliverable_file_paths_in_workspace(text, None)
+}
+
+/// Existing deliverables in Bob output. When a workspace is known, accept safe
+/// relative paths too: Bob Shell naturally writes and reports `folder/file.svg`
+/// inside its `--workspace` rather than repeating an absolute local path.
+pub(crate) fn collect_deliverable_file_paths_in_workspace(
+    text: &str,
+    workspace_root: Option<&Path>,
+) -> Vec<String> {
+    const DELIVERABLE_EXTENSIONS: &str =
+        "pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers";
+    // macOS application workspaces live below `Library/Application Support`.
+    // Accept spaces and stop at the first recognised deliverable extension.
+    let Ok(pattern) = regex::Regex::new(&format!(
+        r#"(?i)(?:^|[\s«»"'`(=:\[])((?:/|~/|file://)[^\r\n"'`()\]<>]+?\.(?:{}))\b"#,
+        DELIVERABLE_EXTENSIONS,
+    )) else {
         return vec![];
     };
     let home = std::env::var("HOME").ok();
@@ -2384,6 +2628,39 @@ pub(crate) fn collect_deliverable_file_paths(text: &str) -> Vec<String> {
             }
         }
     }
+    if let Some(root) = workspace_root.and_then(|root| root.canonicalize().ok()) {
+        let relative_pattern = regex::Regex::new(&format!(
+            r#"(?i)(?:^|[\s«»"'`(=:\[])((?:\./)?[A-Za-z0-9][A-Za-z0-9_./-]*\.(?:{}))\b"#,
+            DELIVERABLE_EXTENSIONS,
+        ));
+        if let Ok(relative_pattern) = relative_pattern {
+            for caps in relative_pattern.captures_iter(text) {
+                let Some(raw) = caps.get(1).map(|value| value.as_str()) else {
+                    continue;
+                };
+                let candidate = raw.trim().trim_end_matches([')', ',', ';', ':', '.', ']']);
+                let relative = Path::new(candidate);
+                if relative.is_absolute()
+                    || relative.components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    continue;
+                }
+                let Ok(resolved) = root.join(relative).canonicalize() else {
+                    continue;
+                };
+                if resolved.is_file() && resolved.starts_with(&root) {
+                    output.push(resolved.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
     output.sort();
     output.dedup();
     output
@@ -2391,7 +2668,7 @@ pub(crate) fn collect_deliverable_file_paths(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod deliverable_path_tests {
-    use super::collect_deliverable_file_paths;
+    use super::{collect_deliverable_file_paths, collect_deliverable_file_paths_in_workspace};
     use std::io::Write;
 
     #[test]
@@ -2411,6 +2688,50 @@ mod deliverable_path_tests {
         assert_eq!(found.len(), 1);
         assert!(found[0].ends_with("IBM_AXA_Brief_Mission.pptx"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extracts_existing_paths_containing_spaces() {
+        let test_root =
+            std::env::temp_dir().join(format!("bob-deliverable-spaces-{}", uuid::Uuid::new_v4()));
+        let dir = test_root.join("Application Support").join("workspace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("architecture.png");
+        std::fs::write(&image, b"png").unwrap();
+
+        let text = format!("architecture.png\t{}", image.display());
+        let found = collect_deliverable_file_paths(&text);
+
+        assert_eq!(
+            found,
+            vec![image.canonicalize().unwrap().to_string_lossy().to_string()]
+        );
+        let _ = std::fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn extracts_relative_svg_paths_only_within_the_workspace() {
+        let root = std::env::temp_dir().join(format!("bob-diagram-{}", uuid::Uuid::new_v4()));
+        let output_dir = root.join("azure-agentic-ai");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let diagram = output_dir.join("architecture.svg");
+        std::fs::write(&diagram, "<svg/>").unwrap();
+
+        let found = collect_deliverable_file_paths_in_workspace(
+            "Diagramme généré : azure-agentic-ai/architecture.svg",
+            Some(&root),
+        );
+
+        assert_eq!(
+            found,
+            vec![diagram
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
+        assert!(collect_deliverable_file_paths("azure-agentic-ai/architecture.svg").is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -2752,21 +3073,48 @@ mod tests {
     }
 
     #[test]
-    fn chrome_snapshot_tool_titles_use_the_url() {
+    fn background_web_and_chrome_titles_distinguish_visible_navigation() {
         let started = tool_activity_title(
             "mcp__bob-work-chrome-control_6001__browser_snapshot",
             &json!({ "url": "https://example.com" }),
             "started",
         );
-        assert_eq!(started, "Aperçu Chrome : https://example.com");
+        assert_eq!(started, "Lecture web : https://example.com");
         let finished = tool_activity_title("browser_snapshot", &json!({}), "finished");
-        assert_eq!(finished, "Aperçu Chrome : onglet actif");
+        assert_eq!(finished, "Source web consultée : source");
+        let chrome = tool_activity_title(
+            "chrome_open_url",
+            &json!({ "url": "https://example.com" }),
+            "started",
+        );
+        assert_eq!(chrome, "Aperçu Chrome : https://example.com");
+    }
+
+    #[test]
+    fn visible_chrome_requires_an_explicit_open_or_control_request() {
+        assert!(!explicitly_requests_visible_chrome(
+            "Compare trois API météo gratuites et consulte leurs documentations officielles"
+        ));
+        assert!(!explicitly_requests_visible_chrome(
+            "Cherche sur le web les quotas de https://open-meteo.com"
+        ));
+        assert!(explicitly_requests_visible_chrome(
+            "Ouvre https://open-meteo.com dans Chrome"
+        ));
+        assert!(explicitly_requests_visible_chrome(
+            "Va sur la page WeatherAPI dans le navigateur"
+        ));
     }
 
     #[test]
     fn cumulative_shell_messages_become_real_deltas() {
         let mut snapshot = String::new();
-        let chunks = ["Je", "Je vais o", "Je vais ouvrir", "Je vais ouvrir Spotify"];
+        let chunks = [
+            "Je",
+            "Je vais o",
+            "Je vais ouvrir",
+            "Je vais ouvrir Spotify",
+        ];
         let rendered = chunks
             .iter()
             .map(|chunk| normalize_stream_text(&mut snapshot, chunk, true))
@@ -2777,7 +3125,11 @@ mod tests {
     #[test]
     fn cumulative_messages_are_detected_even_when_protocol_marker_is_wrong() {
         let mut snapshot = String::new();
-        let chunks = ["L'access", "L'accessibilité est", "L'accessibilité est accordée."];
+        let chunks = [
+            "L'access",
+            "L'accessibilité est",
+            "L'accessibilité est accordée.",
+        ];
         let rendered = chunks
             .iter()
             .map(|chunk| normalize_stream_text(&mut snapshot, chunk, false))
@@ -2799,8 +3151,14 @@ mod tests {
     #[test]
     fn snapshot_state_can_be_reset_between_tool_calls() {
         let mut snapshot = String::new();
-        assert_eq!(normalize_stream_text(&mut snapshot, "J’ouvre Spotify.", true), "J’ouvre Spotify.");
+        assert_eq!(
+            normalize_stream_text(&mut snapshot, "J’ouvre Spotify.", true),
+            "J’ouvre Spotify."
+        );
         snapshot.clear();
-        assert_eq!(normalize_stream_text(&mut snapshot, "Accessibilité OK.", true), "Accessibilité OK.");
+        assert_eq!(
+            normalize_stream_text(&mut snapshot, "Accessibilité OK.", true),
+            "Accessibilité OK."
+        );
     }
 }

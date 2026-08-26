@@ -1,0 +1,7 @@
+interface:
+  display_name: "red-team-review"
+  short_description: "Challenger une recommandation avant exposition au client ou "
+  brand_color: "#0F62FE"
+  default_prompt: "Use $red-team-review to challenger une recommandation avant exposition au client ou décideur."
+policy:
+  allow_implicit_invocation: true

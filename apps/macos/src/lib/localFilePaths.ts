@@ -1,9 +1,13 @@
 /** Document / deliverable extensions Bob Work can preview or open. */
-const DELIVERABLE_EXT = 'pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|png|jpe?g|gif|webp|zip|key|pages|numbers'
+const DELIVERABLE_EXT = 'pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers'
 
-/** Matches absolute or ~/ paths ending with a deliverable extension. */
+/**
+ * Matches absolute or ~/ paths ending with a deliverable extension.
+ * macOS workspace paths commonly contain spaces (notably
+ * `Library/Application Support`), so whitespace cannot terminate a path.
+ */
 const ABSOLUTE_PATH_RE = new RegExp(
-  `(^|[\\s«»"'\\\`(=:\\[])((?:\\/|~\\/)[^\\s"'\\\`()\\]<>]+\\.(?:${DELIVERABLE_EXT}))\\b`,
+  `(^|[\\s«»"'\\\`(=:\\[])((?:\\/|~\\/)[^\\r\\n"'\\\`()\\]<>]+?\\.(?:${DELIVERABLE_EXT}))\\b`,
   'gi',
 )
 
@@ -12,6 +16,11 @@ function cleanCandidate(raw: string): string {
     .replace(/^file:\/\//i, '')
     .replace(/[),.;:]+$/g, '')
     .trim()
+}
+
+function followsWebUrlScheme(text: string, pathStart: number): boolean {
+  const before = text.slice(Math.max(0, pathStart - 12), pathStart)
+  return /(?:https?|ftp):$/i.test(before)
 }
 
 /**
@@ -39,6 +48,8 @@ export function extractLocalFilePaths(text: string): string[] {
   if (!text) return []
   const byKey = new Map<string, string>()
   for (const match of text.matchAll(ABSOLUTE_PATH_RE)) {
+    const pathStart = (match.index ?? 0) + (match[1]?.length ?? 0)
+    if (followsWebUrlScheme(text, pathStart)) continue
     const path = cleanCandidate(match[2] ?? '')
     if (!path) continue
     const key = normalizeLocalFilePathKey(path)
@@ -68,6 +79,7 @@ export function linkifyLocalFilePaths(markdown: string): string {
   )
   return markdown.replace(ABSOLUTE_PATH_RE, (full, prefix: string, path: string, offset: number) => {
     const start = offset + (prefix?.length ?? 0)
+    if (followsWebUrlScheme(markdown, start)) return full
     const before = markdown.slice(Math.max(0, start - 3), start)
     if (before.includes('](')) return full
     const cleaned = cleanCandidate(path)
@@ -75,6 +87,7 @@ export function linkifyLocalFilePaths(markdown: string): string {
     // Avoid a second link for `~/Desktop/foo.pptx` when `/Users/…/Desktop/foo.pptx` is present.
     if (cleaned.startsWith('~/') && absoluteKeys.has(key)) return full
     const name = fileNameFromPath(cleaned)
-    return `${prefix}[${name}](${cleaned})`
+    const destination = /\s/.test(cleaned) ? `<${cleaned}>` : cleaned
+    return `${prefix}[${name}](${destination})`
   })
 }

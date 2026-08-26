@@ -1,0 +1,7 @@
+interface:
+  display_name: "executive-storytelling"
+  short_description: "Construire une narration décisionnelle courte et fondée sur "
+  brand_color: "#0F62FE"
+  default_prompt: "Use $executive-storytelling to construire une narration décisionnelle courte et fondée sur les preuves."
+policy:
+  allow_implicit_invocation: true

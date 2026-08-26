@@ -11,6 +11,7 @@ describe('pluginBuilder', () => {
   it('fournit un prompt conversationnel sans verrouiller l’entretien', () => {
     expect(PLUGIN_CONVERSATION_PROMPT).toContain('sans formulaire')
     expect(PLUGIN_CONVERSATION_PROMPT).toContain('Pose-moi les questions utiles')
+    expect(PLUGIN_CONVERSATION_PROMPT).toContain('favicon web selon le métier')
     expect(PLUGIN_CONVERSATION_PROMPT).not.toContain('Ne relance pas l’entretien')
   })
 
@@ -35,6 +36,8 @@ describe('pluginBuilder', () => {
     expect(prompt).toContain('Ne relance pas l’entretien')
     expect(prompt).toContain('Brief AXA')
     expect(prompt).toContain('Recherche web Bob')
+    expect(prompt).toContain('binaires embarqués')
+    expect(prompt).toContain('favicon')
     expect(prompt).toContain('Créer / modifier des fichiers')
     const preview = pluginBuilderPreview({
       ...EMPTY_PLUGIN_DRAFT,

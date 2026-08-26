@@ -147,6 +147,11 @@ pub fn run() {
             if let Err(error) = plugin_service.ensure_builtin_plugins(&app_handle.state::<db::Database>()) {
                 tracing::warn!("Unable to refresh built-in document plugins: {:?}", error);
             }
+            if let Err(error) = services::workspace::WorkspaceService::new()
+                .install_builtin_skill("meeting-minutes")
+            {
+                tracing::warn!("Unable to install built-in meeting-minutes skill: {:?}", error);
+            }
             if let Some(bob_path) = app_handle.state::<services::bob::BobService>().get_binary_path() {
                 if let Err(error) = plugin_service.sync_installed_office_mcps(
                     &app_handle.state::<db::Database>(),
@@ -263,6 +268,9 @@ pub fn run() {
             let artifact_service = services::artifact::ArtifactService::new();
             app_handle.manage(artifact_service);
 
+            // Mobile remote control stays local until explicitly enabled in Settings.
+            app_handle.manage(services::remote_control::RemoteControlService::new(&data_dir));
+
             // ── Background Scheduler Daemon ────────────────────────────
             {
                 let ah_sched = app_handle.clone();
@@ -316,9 +324,15 @@ pub fn run() {
                                 task_service.get_by_id(&db, task_id).ok().flatten()
                             }).is_some_and(|task| task.state == "cancelled");
 
-                        // Capture deliverables Bob wrote (Desktop PPTX, etc.) → task IO + gallery.
-                        let deliverable_paths =
-                            services::bob::collect_deliverable_file_paths(&content);
+                        // Capture deliverables Bob wrote (including diagrams in its workspace) → task IO + gallery.
+                        let deliverable_paths = if done.deliverable_paths.is_empty() {
+                            services::bob::collect_deliverable_file_paths_in_workspace(
+                                &content,
+                                done.workspace_path.as_deref().map(std::path::Path::new),
+                            )
+                        } else {
+                            done.deliverable_paths.clone()
+                        };
                         let mut source_items = Vec::new();
                         let mut associated_artifact_ids = Vec::new();
                         for path in &deliverable_paths {
@@ -480,6 +494,20 @@ pub fn run() {
                 });
             }
 
+            // Install the completion listener before accepting a first mobile prompt.
+            if services::settings::SettingsService::new()
+                .get(&app_handle.state::<db::Database>())
+                .is_ok_and(|settings| settings.remote_control_enabled)
+            {
+                let remote_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let service = remote_app.state::<services::remote_control::RemoteControlService>();
+                    if let Err(error) = service.start(remote_app.clone()).await {
+                        tracing::warn!("Unable to start remote control: {error}");
+                    }
+                });
+            }
+
             commands::updater::start_updater_smoke_if_requested(app_handle.clone());
             info!("Bob Work initialized successfully");
             Ok(())
@@ -567,6 +595,8 @@ pub fn run() {
             // Settings commands
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::remote_control::get_remote_control_status,
+            commands::remote_control::restart_remote_control,
             // Search, skills, MCP, permissions and usage
             commands::workspace::search_workspace,
             commands::workspace::get_skills,
@@ -574,6 +604,7 @@ pub fn run() {
             commands::workspace::set_skill_enabled,
             commands::workspace::delete_skill,
             commands::workspace::install_builtin_integration,
+            commands::workspace::install_builtin_skill,
             commands::integration::get_integration_statuses,
             commands::integration::get_oauth_client_config,
             commands::integration::set_oauth_client_config,
@@ -604,6 +635,12 @@ pub fn run() {
             commands::system::purge_app_cache,
             commands::system::open_macos_privacy_pane,
             commands::system::get_voice_dictation_availability,
+            commands::system::microphone_authorization_state,
+            commands::system::request_microphone_permission,
+            commands::system::request_voice_dictation_permission,
+            commands::native_audio_recording::start_native_audio_recording,
+            commands::native_audio_recording::stop_native_audio_recording,
+            commands::native_audio_recording::native_audio_recording_level,
             commands::system::notification_authorization_state,
             commands::system::request_notification_authorization,
             commands::system::list_app_notifications,

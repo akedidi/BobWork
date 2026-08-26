@@ -1,0 +1,7 @@
+interface:
+  display_name: "estimation"
+  short_description: "Estimer collectivement l’incertitude et la taille relative."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $estimation to estimer collectivement l’incertitude et la taille relative."
+policy:
+  allow_implicit_invocation: true

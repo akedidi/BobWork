@@ -1,0 +1,7 @@
+interface:
+  display_name: "JTBD"
+  short_description: "Formuler les progrès recherchés dans un contexte donné."
+  brand_color: "#0F62FE"
+  default_prompt: "Use $jtbd to formuler les progrès recherchés dans un contexte donné."
+policy:
+  allow_implicit_invocation: true

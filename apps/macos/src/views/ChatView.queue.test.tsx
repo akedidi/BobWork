@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatView, { conversationTitleForMode, isPlaceholderConversationTitle } from './ChatView'
 import { useAppStore } from '../stores/appStore'
@@ -13,6 +13,11 @@ const mocks = vi.hoisted(() => ({
   getMessages: vi.fn(),
   getTasks: vi.fn(),
 }))
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output aria-label="Route active">{location.pathname}</output>
+}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: Record<string, unknown> }) => unknown) => {
@@ -165,6 +170,48 @@ describe('Chat prompt queue', () => {
     await act(async () => { resolveHistory([]) })
 
     expect(screen.getByText('Mon tout premier prompt')).toBeVisible()
+  })
+
+  it('keeps the launched conversation focused after a routed prompt starts its task', async () => {
+    mocks.createConversation.mockResolvedValue({
+      id: 'conv-focused', title: 'Nouvelle conversation', pinned: false,
+    })
+
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: '/chat',
+        state: { initialPrompt: 'Construis une architecture Azure', mode: 'agent' },
+      }]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/chat/:id?" element={<ChatView />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conv-focused',
+        message: 'Construis une architecture Azure',
+      }),
+    ))
+
+    expect(screen.getByLabelText('Route active')).toHaveTextContent('/chat/conv-focused')
+    expect(screen.getByText('Construis une architecture Azure')).toBeVisible()
+
+    const onToken = mocks.listeners.get('bob-token')
+    await act(async () => {
+      await onToken?.({ payload: {
+        sessionId: 'session-1',
+        conversationId: 'conv-focused',
+        chunk: 'Analyse en cours',
+        isFinal: false,
+        eventType: 'text',
+      } })
+    })
+
+    expect(screen.getByLabelText('Route active')).toHaveTextContent('/chat/conv-focused')
+    expect(screen.getByText('Analyse en cours')).toBeVisible()
   })
 })
 

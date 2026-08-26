@@ -1,0 +1,7 @@
+interface:
+  display_name: "sprint-review"
+  short_description: "Inspecter l’incrément avec les parties prenantes et adapter "
+  brand_color: "#0F62FE"
+  default_prompt: "Use $sprint-review to inspecter l’incrément avec les parties prenantes et adapter le backlog."
+policy:
+  allow_implicit_invocation: true

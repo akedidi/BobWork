@@ -1,0 +1,7 @@
+interface:
+  display_name: "MECE"
+  short_description: "Décomposer une question sans chevauchement matériel ni angle"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $mece to décomposer une question sans chevauchement matériel ni angle mort important."
+policy:
+  allow_implicit_invocation: true

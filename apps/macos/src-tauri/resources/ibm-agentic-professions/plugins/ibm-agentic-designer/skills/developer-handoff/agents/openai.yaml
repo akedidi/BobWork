@@ -1,0 +1,7 @@
+interface:
+  display_name: "developer-handoff"
+  short_description: "Transmettre une conception sans ambiguïté et accompagner son"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $developer-handoff to transmettre une conception sans ambiguïté et accompagner son implémentation."
+policy:
+  allow_implicit_invocation: true

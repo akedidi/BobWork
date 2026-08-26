@@ -1,0 +1,7 @@
+interface:
+  display_name: "gap-analysis"
+  short_description: "Comparer état actuel et état cible sans masquer les dépendan"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $gap-analysis to comparer état actuel et état cible sans masquer les dépendances."
+policy:
+  allow_implicit_invocation: true
