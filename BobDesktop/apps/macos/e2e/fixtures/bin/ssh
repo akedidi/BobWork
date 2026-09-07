@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+
+remote = pathlib.Path(os.environ["BOB_WORK_E2E_DATA_DIR"]) / "ssh-remote"
+remote.mkdir(parents=True, exist_ok=True)
+command = sys.argv[-1] if sys.argv else ""
+
+if command.endswith("@127.0.0.1"):
+    print("bob-e2e@remote:$ ", end="", flush=True)
+    for line in sys.stdin:
+        print(f"terminal:{line.rstrip()}\r")
+        print("bob-e2e@remote:$ ", end="", flush=True)
+elif "BOB_SSH_OK" in command:
+    print("BOB_SSH_OK", end="")
+elif "cat >" in command:
+    (remote / "conversation.txt").write_bytes(sys.stdin.buffer.read())
+elif "head -c" in command:
+    sys.stdout.buffer.write((remote / "conversation.txt").read_bytes())
+elif "for f in" in command:
+    print("f\t21\tconversation.txt")
+    print("d\t0\tsrc")
+else:
+    print(f"ssh-exec:{command}")

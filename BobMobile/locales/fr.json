@@ -1,0 +1,7 @@
+{
+  "CFBundleDisplayName": "Bob Mobile",
+  "NSCameraUsageDescription": "Autorisez Bob Mobile à prendre les photos que vous choisissez de joindre à un prompt.",
+  "NSFaceIDUsageDescription": "Autorisez Bob Mobile à utiliser Face ID pour protéger votre jeton de connexion.",
+  "NSMicrophoneUsageDescription": "Autorisez Bob Mobile à enregistrer les prompts vocaux que vous choisissez d’envoyer à Bob Work.",
+  "NSPhotoLibraryUsageDescription": "Autorisez Bob Mobile à sélectionner les images que vous choisissez de joindre à un prompt."
+}

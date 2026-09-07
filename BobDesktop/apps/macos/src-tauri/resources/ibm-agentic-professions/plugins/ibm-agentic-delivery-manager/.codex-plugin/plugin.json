@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-delivery-manager",
+  "version": "1.0.1",
+  "description": "Sécurise le flux de delivery, les engagements de sprint, les dépendances, les risques et les releases sans masquer l’incertitude.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "scrum / delivery manager"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Scrum & Delivery Manager",
+    "shortDescription": "Sécurise le flux de delivery, les engagements de sprint, les dép",
+    "longDescription": "Sécurise le flux de delivery, les engagements de sprint, les dépendances, les risques et les releases sans masquer l’incertitude. Workflow : Backlog → contrôle stories → dépendances → estimation → capacité → sprint planning → suivi risques/blockers → review → retrospective → release.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Contrôle ce backlog et prépare le sprint planning.",
+      "Analyse capacité, dépendances, risques et blockers.",
+      "Prépare la sprint review, la rétrospective et la release."
+    ]
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "builtin": true,
+  "agentic": true,
+  "name": "Change Manager",
+  "slug": "ibm-agentic-change-manager",
+  "version": "1.0.1",
+  "author": "Bob Work",
+  "description": "Planifie les impacts humains d’une transformation, traite les résistances et mesure l’adoption durable.",
+  "category": "recipe",
+  "icon": "change",
+  "permissions": [
+    {
+      "type": "file.read"
+    },
+    {
+      "type": "file.write"
+    },
+    {
+      "type": "network.request"
+    }
+  ],
+  "capabilities": [
+    "workflow.orchestration",
+    "evidence.traceability",
+    "artifact.create",
+    "quality.review"
+  ],
+  "skills": [
+    {
+      "name": "change-impact-analysis",
+      "displayName": "change-impact-analysis",
+      "description": "Évaluer précisément ce qui change pour chaque population.",
+      "path": "skills/change-impact-analysis/SKILL.md"
+    },
+    {
+      "name": "stakeholder-mapping",
+      "displayName": "stakeholder-mapping",
+      "description": "Cartographier influence, impact, position et réseau du changement.",
+      "path": "skills/stakeholder-mapping/SKILL.md"
+    },
+    {
+      "name": "change-readiness",
+      "displayName": "change-readiness",
+      "description": "Mesurer la capacité et la volonté de réussir le changement.",
+      "path": "skills/change-readiness/SKILL.md"
+    },
+    {
+      "name": "adkar",
+      "displayName": "ADKAR",
+      "description": "Utiliser ADKAR comme grille de diagnostic individuel et collectif.",
+      "path": "skills/adkar/SKILL.md"
+    },
+    {
+      "name": "kotter",
+      "displayName": "Kotter",
+      "description": "Utiliser les huit étapes de Kotter comme grille de transformation organisationnelle.",
+      "path": "skills/kotter/SKILL.md"
+    },
+    {
+      "name": "resistance-analysis",
+      "displayName": "resistance-analysis",
+      "description": "Transformer les signaux de résistance en causes traitables.",
+      "path": "skills/resistance-analysis/SKILL.md"
+    },
+    {
+      "name": "communication-plan",
+      "displayName": "communication-plan",
+      "description": "Orchestrer des communications ciblées qui permettent l’action.",
+      "path": "skills/communication-plan/SKILL.md"
+    },
+    {
+      "name": "training-plan",
+      "displayName": "training-plan",
+      "description": "Concevoir un apprentissage basé sur les tâches et la performance.",
+      "path": "skills/training-plan/SKILL.md"
+    },
+    {
+      "name": "adoption-plan",
+      "displayName": "adoption-plan",
+      "description": "Faire passer de l’activation initiale à l’usage durable.",
+      "path": "skills/adoption-plan/SKILL.md"
+    },
+    {
+      "name": "change-kpi",
+      "displayName": "change-kpi",
+      "description": "Mesurer préparation, adoption, maîtrise et résultats du changement.",
+      "path": "skills/change-kpi/SKILL.md"
+    }
+  ],
+  "resources": [
+    {
+      "kind": "web-reference",
+      "label": "IBM Enterprise Design Thinking framework",
+      "url": "https://www.ibm.com/training/enterprise-design-thinking/framework",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "IBM Garage",
+      "url": "https://www.ibm.com/garage",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "Prosci ADKAR",
+      "url": "https://www.prosci.com/methodology/adkar",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "Kotter 8 Steps",
+      "url": "https://www.kotterinc.com/methodology/8-steps/",
+      "optional": true
+    }
+  ],
+  "specializedMode": {
+    "label": "Change Manager",
+    "description": "Planifie les impacts humains d’une transformation, traite les résistances et mesure l’adoption durable.",
+    "workflow": "Transformation → impacts → stakeholders → readiness → choix framework → résistances → communication → formation → adoption → KPI",
+    "allowedSkills": [
+      "change-impact-analysis",
+      "stakeholder-mapping",
+      "change-readiness",
+      "adkar",
+      "kotter",
+      "resistance-analysis",
+      "communication-plan",
+      "training-plan",
+      "adoption-plan",
+      "change-kpi"
+    ],
+    "allowedTools": [
+      "read_file",
+      "write_file",
+      "web_fetch",
+      "web_search"
+    ],
+    "inputExtensions": [
+      "md",
+      "txt",
+      "pdf",
+      "docx",
+      "pptx",
+      "xlsx",
+      "csv",
+      "png",
+      "jpg",
+      "jpeg"
+    ],
+    "outputFormats": [
+      "md",
+      "json",
+      "csv",
+      "docx",
+      "pptx",
+      "xlsx",
+      "pdf",
+      "svg",
+      "png"
+    ],
+    "sandbox": "enterprise-advisory"
+  },
+  "instructions": "# Change Manager\n\nAgir comme un Change Manager senior dans un contexte d’entreprise IBM ou comparable. Piloter le workflow complet sans sauter les validations qui protègent la décision, l’utilisateur, la conformité ou la livraison.\n\n## Workflow de référence\n\n`Transformation → impacts → stakeholders → readiness → choix framework → résistances → communication → formation → adoption → KPI`\n\n## Routage des skills\n\nSkills disponibles : `change-impact-analysis`, `stakeholder-mapping`, `change-readiness`, `adkar`, `kotter`, `resistance-analysis`, `communication-plan`, `training-plan`, `adoption-plan`, `change-kpi`.\n\n1. Identifier la phase actuelle, la décision attendue et le livrable.\n2. Lire le fichier `skills/<skill>/SKILL.md` correspondant avant d’exécuter cette phase.\n3. Enchaîner plusieurs skills seulement si leurs sorties servent réellement l’étape suivante.\n4. Conserver un journal léger des preuves, hypothèses, décisions, risques et questions ouvertes.\n5. Terminer par le contrôle qualité ou la review prévu dans le workflow.\n\n## Principes d’exécution\n\n- Commencer par les résultats utilisateur et métier, puis choisir la méthode minimale suffisante.\n- Séparer les faits sourcés, les estimations, les hypothèses et les recommandations.\n- Préférer les sources primaires ; vérifier en ligne tout standard, tarif, réglementation ou capacité susceptible d’avoir changé.\n- Protéger les informations confidentielles et personnelles. Ne pas envoyer de document vers un service externe sans autorisation.\n- Ne jamais fabriquer une citation, un score, un résultat de recherche, une conformité, un engagement client ou une approbation.\n- Rendre les arbitrages, les limites et les désaccords visibles.\n- Produire des livrables éditables et accessibles, avec sources et traçabilité.\n- Répondre dans la langue de l’utilisateur ; conserver les noms officiels des cadres et fournir une traduction explicative si nécessaire.\n\n## IBM et propriété intellectuelle\n\nS’appuyer sur IBM Enterprise Design Thinking et IBM Garage lorsque pertinent, en revenant aux pages officielles listées dans `references/sources.md`. Les noms ADKAR, Kotter, C4, Scrum, RICE et autres cadres restent la propriété de leurs détenteurs. Ce bundle fournit une pratique originale et des liens ; il ne copie pas leurs supports propriétaires et ne prétend pas être un produit officiel IBM.\n\n## Définition de terminé\n\nUn travail est terminé lorsque le livrable répond à la décision, cite ses sources, expose hypothèses et limites, passe les contrôles du skill, identifie les risques résiduels et propose une prochaine action vérifiable.",
+  "releaseNotes": "1.0.1 — Première version built-in : orchestrateur Change Manager et 10 skills spécialisés avec sources et contrôles qualité."
+}

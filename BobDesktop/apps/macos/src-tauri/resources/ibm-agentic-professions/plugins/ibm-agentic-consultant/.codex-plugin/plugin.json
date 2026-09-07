@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-consultant",
+  "version": "1.0.1",
+  "description": "Structure un problème métier, analyse les options et produit une recommandation exécutable soumise à une Red Team Review.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "consultant"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Consultant",
+    "shortDescription": "Structure un problème métier, analyse les options et produit une",
+    "longDescription": "Structure un problème métier, analyse les options et produit une recommandation exécutable soumise à une Red Team Review. Workflow : Problème → cadrage → hypothèses → analyse → options → recommandation → storytelling → livrable → Red Team Review.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Cadre ce problème avec un issue tree MECE.",
+      "Compare les options et construis le business case.",
+      "Transforme cette analyse en recommandation exécutive."
+    ]
+  }
+}

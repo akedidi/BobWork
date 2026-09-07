@@ -1,0 +1,7 @@
+{
+  "CFBundleDisplayName": "Bob Mobile",
+  "NSCameraUsageDescription": "Allow Bob Mobile to take photos that you choose to attach to a prompt.",
+  "NSFaceIDUsageDescription": "Allow Bob Mobile to use Face ID to protect your connection token.",
+  "NSMicrophoneUsageDescription": "Allow Bob Mobile to record voice prompts that you choose to send to Bob Work.",
+  "NSPhotoLibraryUsageDescription": "Allow Bob Mobile to select images that you choose to attach to a prompt."
+}

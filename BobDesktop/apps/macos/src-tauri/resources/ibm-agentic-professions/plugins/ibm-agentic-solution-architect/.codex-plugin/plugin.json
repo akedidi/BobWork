@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-solution-architect",
+  "version": "1.0.1",
+  "description": "Conçoit une architecture cible traçable depuis les exigences, avec arbitrages sécurité, intégration, résilience, cloud et coût.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "solution architect"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Solution Architect",
+    "shortDescription": "Conçoit une architecture cible traçable depuis les exigences, av",
+    "longDescription": "Conçoit une architecture cible traçable depuis les exigences, avec arbitrages sécurité, intégration, résilience, cloud et coût. Workflow : Besoins → FR/NFR → contraintes → drivers → options → trade-offs → architecture cible → sécurité/résilience/coût → review → roadmap.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Extrais FR, NFR, contraintes et drivers d’architecture.",
+      "Compare les options et dessine l’architecture cible C4.",
+      "Réalise la review sécurité, résilience et coût."
+    ]
+  }
+}

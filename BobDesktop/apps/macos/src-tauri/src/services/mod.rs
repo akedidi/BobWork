@@ -1,0 +1,54 @@
+// ============================================================
+// Bob Work - Services Module
+// ============================================================
+
+pub mod artifact;
+pub mod artifact_generator;
+pub mod artifact_runtime;
+pub mod attachment_staging;
+pub mod audit;
+pub mod bob;
+pub mod bob_analytics;
+pub mod bob_context;
+pub mod bob_slash_commands;
+pub mod bob_usage;
+pub mod chrome_mcp;
+pub mod codegraph_mcp;
+pub mod computer_use_mcp;
+pub mod connection_test;
+pub mod conversation;
+pub mod data_analytics;
+pub mod db_connection;
+pub mod db_prompt;
+pub mod designer;
+pub mod integration_catalog;
+pub mod integration_mcp;
+pub mod integration_oauth;
+pub mod keychain;
+pub mod local_audio_transcription;
+pub mod map_mcp;
+pub mod mcp_gateway;
+pub mod meeting_recording;
+pub mod memory;
+pub mod mode;
+pub mod notify;
+pub mod office_plugin_bundle;
+pub mod permission_governance;
+pub mod plugin;
+pub mod plugin_archive;
+pub mod plugin_bundle_layout;
+pub mod plugin_deploy;
+pub mod plugin_extensions;
+pub mod plugin_local_runtime;
+pub mod plugin_mcp;
+pub mod plugin_user_resources;
+pub mod pptx_preview;
+pub mod project;
+pub mod qiskit;
+pub mod remote_control;
+pub mod runtime_manager;
+pub mod scheduler;
+pub mod settings;
+pub mod ssh;
+pub mod task;
+pub mod workspace;

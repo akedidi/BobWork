@@ -1,0 +1,7 @@
+interface:
+  display_name: "Designer"
+  short_description: "Conception UX/UI structurée, aperçu responsive et exports ouverts"
+  brand_color: "#0F62FE"
+  default_prompt: "Use $ibm-agentic-designer to create a structured Design IR, render an interactive preview, and iterate with targeted patches."
+policy:
+  allow_implicit_invocation: true

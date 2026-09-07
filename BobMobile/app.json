@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "Bob Mobile",
+    "slug": "bob-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "bobmobile",
+    "locales": {
+      "fr": "./locales/fr.json",
+      "en": "./locales/en.json",
+      "es": "./locales/es.json"
+    },
+    "ios": {
+      "icon": "./assets/icon.png",
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bobwork.mobile",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Bob Mobile uses your photo library only when you attach an image to a prompt.",
+        "NSLocationWhenInUseUsageDescription": "Bob Mobile uses your location only when you enable it for nearby searches or route planning."
+      }
+    },
+    "android": {
+      "package": "com.bobwork.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#FFFFFF"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Bob Mobile to select images that you choose to attach to a prompt."
+        }
+      ],
+      "expo-font",
+      "expo-sharing",
+      "expo-notifications",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Bob Mobile to use your location for nearby searches and route planning."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Bob Mobile to record voice prompts that you choose to send to Bob Work."
+        }
+      ],
+      "expo-asset"
+    ]
+  }
+}

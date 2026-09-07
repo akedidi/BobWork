@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "builtin": true,
+  "agentic": true,
+  "name": "Solution Architect",
+  "slug": "ibm-agentic-solution-architect",
+  "version": "1.0.1",
+  "author": "Bob Work",
+  "description": "Conçoit une architecture cible traçable depuis les exigences, avec arbitrages sécurité, intégration, résilience, cloud et coût.",
+  "category": "recipe",
+  "icon": "architecture",
+  "permissions": [
+    {
+      "type": "file.read"
+    },
+    {
+      "type": "file.write"
+    },
+    {
+      "type": "network.request"
+    }
+  ],
+  "capabilities": [
+    "workflow.orchestration",
+    "evidence.traceability",
+    "artifact.create",
+    "quality.review"
+  ],
+  "skills": [
+    {
+      "name": "requirements-analysis",
+      "displayName": "requirements-analysis",
+      "description": "Transformer les besoins en exigences fonctionnelles traçables.",
+      "path": "skills/requirements-analysis/SKILL.md"
+    },
+    {
+      "name": "nfr",
+      "displayName": "NFR",
+      "description": "Définir des attributs qualité mesurables et vérifiables.",
+      "path": "skills/nfr/SKILL.md"
+    },
+    {
+      "name": "architecture-drivers",
+      "displayName": "architecture-drivers",
+      "description": "Prioriser les forces qui structurent réellement l’architecture.",
+      "path": "skills/architecture-drivers/SKILL.md"
+    },
+    {
+      "name": "tradeoff-analysis",
+      "displayName": "tradeoff-analysis",
+      "description": "Comparer les options avec critères, preuves et coûts de renoncement.",
+      "path": "skills/tradeoff-analysis/SKILL.md"
+    },
+    {
+      "name": "solution-architecture",
+      "displayName": "solution-architecture",
+      "description": "Composer la vue cible, ses responsabilités et sa roadmap.",
+      "path": "skills/solution-architecture/SKILL.md"
+    },
+    {
+      "name": "integration",
+      "displayName": "integration",
+      "description": "Concevoir les échanges entre systèmes avec contrats et modes de défaillance.",
+      "path": "skills/integration/SKILL.md"
+    },
+    {
+      "name": "api",
+      "displayName": "API",
+      "description": "Concevoir une API cohérente, sécurisée et évolutive.",
+      "path": "skills/api/SKILL.md"
+    },
+    {
+      "name": "security",
+      "displayName": "security",
+      "description": "Intégrer la sécurité par menace, contrôle et preuve.",
+      "path": "skills/security/SKILL.md"
+    },
+    {
+      "name": "cloud",
+      "displayName": "cloud",
+      "description": "Choisir et structurer les services cloud selon les drivers et garde-fous.",
+      "path": "skills/cloud/SKILL.md"
+    },
+    {
+      "name": "resilience",
+      "displayName": "resilience",
+      "description": "Concevoir la continuité face aux pannes réalistes.",
+      "path": "skills/resilience/SKILL.md"
+    },
+    {
+      "name": "cost-analysis",
+      "displayName": "cost-analysis",
+      "description": "Estimer et optimiser le coût complet sans compromettre les drivers.",
+      "path": "skills/cost-analysis/SKILL.md"
+    },
+    {
+      "name": "adr",
+      "displayName": "ADR",
+      "description": "Consigner une décision d’architecture et ses conséquences.",
+      "path": "skills/adr/SKILL.md"
+    },
+    {
+      "name": "c4",
+      "displayName": "C4",
+      "description": "Communiquer l’architecture aux bons niveaux avec le modèle C4.",
+      "path": "skills/c4/SKILL.md"
+    },
+    {
+      "name": "architecture-review",
+      "displayName": "architecture-review",
+      "description": "Évaluer une architecture contre exigences, drivers et risques.",
+      "path": "skills/architecture-review/SKILL.md"
+    }
+  ],
+  "resources": [
+    {
+      "kind": "web-reference",
+      "label": "IBM Enterprise Design Thinking framework",
+      "url": "https://www.ibm.com/training/enterprise-design-thinking/framework",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "IBM Garage",
+      "url": "https://www.ibm.com/garage",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "C4 model",
+      "url": "https://c4model.com/",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "OpenAPI Specification",
+      "url": "https://spec.openapis.org/oas/latest.html",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "NIST Cybersecurity Framework 2.0",
+      "url": "https://www.nist.gov/publications/nist-cybersecurity-framework-csf-20",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "OWASP ASVS",
+      "url": "https://owasp.org/www-project-application-security-verification-standard/",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "Architecture Decision Records",
+      "url": "https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "FinOps Framework",
+      "url": "https://www.finops.org/framework/",
+      "optional": true
+    }
+  ],
+  "specializedMode": {
+    "label": "Solution Architect",
+    "description": "Conçoit une architecture cible traçable depuis les exigences, avec arbitrages sécurité, intégration, résilience, cloud et coût.",
+    "workflow": "Besoins → FR/NFR → contraintes → drivers → options → trade-offs → architecture cible → sécurité/résilience/coût → review → roadmap",
+    "allowedSkills": [
+      "requirements-analysis",
+      "nfr",
+      "architecture-drivers",
+      "tradeoff-analysis",
+      "solution-architecture",
+      "integration",
+      "api",
+      "security",
+      "cloud",
+      "resilience",
+      "cost-analysis",
+      "adr",
+      "c4",
+      "architecture-review"
+    ],
+    "allowedTools": [
+      "read_file",
+      "write_file",
+      "web_fetch",
+      "web_search"
+    ],
+    "inputExtensions": [
+      "md",
+      "txt",
+      "pdf",
+      "docx",
+      "pptx",
+      "xlsx",
+      "csv",
+      "png",
+      "jpg",
+      "jpeg"
+    ],
+    "outputFormats": [
+      "md",
+      "json",
+      "csv",
+      "docx",
+      "pptx",
+      "xlsx",
+      "pdf",
+      "svg",
+      "png"
+    ],
+    "sandbox": "enterprise-advisory"
+  },
+  "instructions": "# Solution Architect\n\nAgir comme un Solution Architect senior dans un contexte d’entreprise IBM ou comparable. Piloter le workflow complet sans sauter les validations qui protègent la décision, l’utilisateur, la conformité ou la livraison.\n\n## Workflow de référence\n\n`Besoins → FR/NFR → contraintes → drivers → options → trade-offs → architecture cible → sécurité/résilience/coût → review → roadmap`\n\n## Routage des skills\n\nSkills disponibles : `requirements-analysis`, `nfr`, `architecture-drivers`, `tradeoff-analysis`, `solution-architecture`, `integration`, `api`, `security`, `cloud`, `resilience`, `cost-analysis`, `adr`, `c4`, `architecture-review`.\n\n1. Identifier la phase actuelle, la décision attendue et le livrable.\n2. Lire le fichier `skills/<skill>/SKILL.md` correspondant avant d’exécuter cette phase.\n3. Enchaîner plusieurs skills seulement si leurs sorties servent réellement l’étape suivante.\n4. Conserver un journal léger des preuves, hypothèses, décisions, risques et questions ouvertes.\n5. Terminer par le contrôle qualité ou la review prévu dans le workflow.\n\n## Principes d’exécution\n\n- Commencer par les résultats utilisateur et métier, puis choisir la méthode minimale suffisante.\n- Séparer les faits sourcés, les estimations, les hypothèses et les recommandations.\n- Préférer les sources primaires ; vérifier en ligne tout standard, tarif, réglementation ou capacité susceptible d’avoir changé.\n- Protéger les informations confidentielles et personnelles. Ne pas envoyer de document vers un service externe sans autorisation.\n- Ne jamais fabriquer une citation, un score, un résultat de recherche, une conformité, un engagement client ou une approbation.\n- Rendre les arbitrages, les limites et les désaccords visibles.\n- Produire des livrables éditables et accessibles, avec sources et traçabilité.\n- Répondre dans la langue de l’utilisateur ; conserver les noms officiels des cadres et fournir une traduction explicative si nécessaire.\n\n## IBM et propriété intellectuelle\n\nS’appuyer sur IBM Enterprise Design Thinking et IBM Garage lorsque pertinent, en revenant aux pages officielles listées dans `references/sources.md`. Les noms ADKAR, Kotter, C4, Scrum, RICE et autres cadres restent la propriété de leurs détenteurs. Ce bundle fournit une pratique originale et des liens ; il ne copie pas leurs supports propriétaires et ne prétend pas être un produit officiel IBM.\n\n## Définition de terminé\n\nUn travail est terminé lorsque le livrable répond à la décision, cite ses sources, expose hypothèses et limites, passe les contrôles du skill, identifie les risques résiduels et propose une prochaine action vérifiable.",
+  "releaseNotes": "1.0.1 — Première version built-in : orchestrateur Solution Architect et 14 skills spécialisés avec sources et contrôles qualité."
+}

@@ -1,0 +1,1143 @@
+// ============================================================
+// Bob Work - Database Layer
+// ============================================================
+
+use crate::error::{AppError, AppResult};
+use chrono::Utc;
+use rusqlite::{backup::Backup, params, Connection};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+use tracing::info;
+
+pub struct Database {
+    pub conn: Mutex<Connection>,
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseBackup {
+    pub name: String,
+    pub path: String,
+    pub created_at: String,
+    pub size_bytes: u64,
+}
+
+impl Database {
+    /// Acquire the shared SQLite connection without turning a panic in one
+    /// worker into a permanent crash loop for every later task. SQLite writes
+    /// are atomic and rusqlite transactions roll back while unwinding, so the
+    /// connection can safely be reused after recording the poisoned state.
+    pub fn connection(&self) -> MutexGuard<'_, Connection> {
+        match self.conn.lock() {
+            Ok(connection) => connection,
+            Err(poisoned) => {
+                tracing::error!(
+                    "SQLite mutex was poisoned by a panicking worker; recovering the connection"
+                );
+                self.conn.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    pub fn new(path: &Path) -> AppResult<Self> {
+        let conn = Connection::open(path).map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Enable WAL mode for better performance
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Create an in-memory database (for tests only)
+    #[cfg(test)]
+    pub fn new_in_memory() -> AppResult<Self> {
+        let conn = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            path: None,
+        })
+    }
+
+    pub fn create_backup(&self, backup_dir: &Path, automatic: bool) -> AppResult<DatabaseBackup> {
+        std::fs::create_dir_all(backup_dir)?;
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let prefix = if automatic { "automatic" } else { "manual" };
+        let name = format!("bob-work-{prefix}-{timestamp}.sqlite");
+        let final_path = backup_dir.join(&name);
+        let temporary_path = backup_dir.join(format!(".{name}.partial"));
+
+        let source = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Database("Database lock poisoned".into()))?;
+        let mut destination = Connection::open(&temporary_path)?;
+        {
+            let backup = Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        }
+        ensure_integrity(&destination)?;
+        drop(destination);
+        std::fs::rename(&temporary_path, &final_path)?;
+        set_private_permissions(&final_path)?;
+
+        backup_metadata(&final_path)
+    }
+
+    pub fn restore_backup(&self, backup_path: &Path) -> AppResult<()> {
+        if self.path.is_none() {
+            return Err(AppError::ValidationFailed(
+                "An in-memory database cannot be restored".into(),
+            ));
+        }
+        // FTS5's integrity hook may use a temporary write transaction, so the
+        // validation connection cannot be opened SQLITE_OPEN_READ_ONLY.
+        let source = Connection::open(backup_path)?;
+        ensure_integrity(&source)?;
+
+        let mut destination = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Database("Database lock poisoned".into()))?;
+        {
+            let backup = Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        }
+        ensure_integrity(&destination)?;
+        destination.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+        )?;
+        Ok(())
+    }
+
+    pub fn list_backups(backup_dir: &Path) -> AppResult<Vec<DatabaseBackup>> {
+        if !backup_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut backups = std::fs::read_dir(backup_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().and_then(|value| value.to_str()) == Some("sqlite")
+                    && path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|name| name.starts_with("bob-work-"))
+            })
+            .filter_map(|path| backup_metadata(&path).ok())
+            .collect::<Vec<_>>();
+        backups.sort_by(|left, right| right.name.cmp(&left.name));
+        Ok(backups)
+    }
+
+    pub fn prune_backups(backup_dir: &Path, keep_automatic: usize) -> AppResult<()> {
+        let automatic = Self::list_backups(backup_dir)?
+            .into_iter()
+            .filter(|backup| backup.name.starts_with("bob-work-automatic-"))
+            .collect::<Vec<_>>();
+        for expired in automatic.into_iter().skip(keep_automatic) {
+            std::fs::remove_file(expired.path)?;
+        }
+        Ok(())
+    }
+
+    pub fn run_migrations(&self) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Create migrations table
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Run migrations in order
+        let migrations: &[(&str, &str)] = &[
+            ("001", MIGRATION_001_INITIAL_SCHEMA),
+            ("002", MIGRATION_002_EVENTS),
+            ("003", MIGRATION_003_SETTINGS),
+            ("004", MIGRATION_004_WORKSPACE_RUNTIME),
+            ("005", MIGRATION_005_PINNED_TASKS),
+            ("006", MIGRATION_006_PLUGIN_VERSIONS),
+            ("007", MIGRATION_007_REMOVE_LEGACY_KEYCHAIN_COLUMN),
+            ("008", MIGRATION_008_ARCHIVED_CONVERSATIONS),
+            ("009", MIGRATION_009_SANDBOX_MODE),
+            ("010", MIGRATION_010_CROSS_CONVERSATION_CONTEXT),
+            ("011", MIGRATION_011_SESSION_START_DEFAULT_ALLOW),
+            ("012", MIGRATION_012_SCHEDULE_RUN_AT),
+            ("013", MIGRATION_013_DB_CONNECTIONS),
+            ("014", MIGRATION_014_CONVERSATION_LAST_MODIFIED),
+            ("015", MIGRATION_015_CANONICAL_AGENT_MODE),
+            ("016", MIGRATION_016_MESSAGE_FILE_CHANGES),
+            ("017", MIGRATION_017_RUNTIME_ARCHITECTURE_V2),
+            ("018", MIGRATION_018_ARTIFACT_RUNTIME_METADATA),
+            ("019", MIGRATION_019_PLUGIN_PRIVATE_RUNTIME_CLEANUP),
+            ("020", MIGRATION_020_RUNTIME_INSTALLED_VERSION),
+            ("021", MIGRATION_021_PERSISTENT_MEMORY),
+            ("022", MIGRATION_022_PERSISTENT_MEMORY_SETTINGS),
+        ];
+
+        for (version, sql) in migrations {
+            let version_num: i64 = version.parse().unwrap();
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    params![version_num],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .unwrap_or(false);
+
+            if !exists {
+                info!("Running migration {}", version);
+                conn.execute_batch(sql).map_err(|e| {
+                    AppError::Database(format!("Migration {} failed: {}", version, e))
+                })?;
+                conn.execute(
+                    "INSERT INTO schema_migrations (version) VALUES (?1)",
+                    params![version_num],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+                info!("Migration {} complete", version);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_integrity(connection: &Connection) -> AppResult<()> {
+    let result: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(AppError::Database(format!(
+            "SQLite integrity check failed: {result}"
+        )))
+    }
+}
+
+fn backup_metadata(path: &Path) -> AppResult<DatabaseBackup> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::ValidationFailed("Invalid backup filename".into()))?
+        .to_string();
+    let created_at = name
+        .strip_prefix("bob-work-automatic-")
+        .or_else(|| name.strip_prefix("bob-work-manual-"))
+        .and_then(|value| value.strip_suffix(".sqlite"))
+        .unwrap_or_default()
+        .to_string();
+    Ok(DatabaseBackup {
+        name,
+        path: path.to_string_lossy().into_owned(),
+        created_at,
+        size_bytes: std::fs::metadata(path)?.len(),
+    })
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> AppResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn poisoned_connection_lock_is_recovered_for_later_tasks() {
+        let database = Arc::new(Database::new_in_memory().expect("database"));
+        let worker_database = Arc::clone(&database);
+        let panicked = std::thread::spawn(move || {
+            let _connection = worker_database.conn.lock().expect("initial lock");
+            panic!("simulated worker panic");
+        })
+        .join();
+
+        assert!(panicked.is_err());
+        assert!(database.conn.is_poisoned());
+        database
+            .connection()
+            .execute("CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY)", [])
+            .expect("connection remains usable");
+        assert!(!database.conn.is_poisoned());
+    }
+
+    #[test]
+    fn backup_restore_round_trip_and_migrations() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database_path = temporary.path().join("database.sqlite");
+        let backup_dir = temporary.path().join("backups");
+        let database = Database::new(&database_path).expect("database");
+        database.run_migrations().expect("migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('before', 'Before', 'now', 'now')",
+                    [],
+                )
+                .expect("insert initial row");
+        }
+
+        let backup = database.create_backup(&backup_dir, false).expect("backup");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute("DELETE FROM projects WHERE id = 'before'", [])
+                .expect("delete row");
+        }
+
+        database
+            .restore_backup(Path::new(&backup.path))
+            .expect("restore");
+        database.run_migrations().expect("migrations after restore");
+        let count: i64 = database
+            .conn
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = 'before'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("restored row");
+        assert_eq!(count, 1);
+        assert_eq!(Database::list_backups(&backup_dir).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn corrupted_backup_is_rejected_without_changing_live_data() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = Database::new(&temporary.path().join("database.sqlite")).expect("database");
+        database.run_migrations().expect("migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('safe', 'Safe', 'now', 'now')",
+                    [],
+                )
+                .expect("insert");
+        }
+        let corrupt = temporary.path().join("corrupt.sqlite");
+        std::fs::write(&corrupt, b"not a sqlite database").expect("corrupt file");
+
+        assert!(database.restore_backup(&corrupt).is_err());
+        let count: i64 = database
+            .conn
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = 'safe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("live row");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn legacy_general_work_values_migrate_to_agent() {
+        let database = Database::new_in_memory().expect("database");
+        database.run_migrations().expect("initial migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "UPDATE settings SET value='\"general_work\"' WHERE key='default_mode'",
+                    [],
+                )
+                .expect("legacy setting");
+            connection
+                .execute(
+                    "INSERT INTO projects (id,name,default_mode,created_at,updated_at) VALUES ('legacy','Legacy','general_work','now','now')",
+                    [],
+                )
+                .expect("legacy project");
+            connection
+                .execute("DELETE FROM schema_migrations WHERE version=15", [])
+                .expect("replay migration");
+        }
+        database.run_migrations().expect("canonical migration");
+        let connection = database.conn.lock().expect("database lock");
+        let setting: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='default_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("default mode");
+        let project: String = connection
+            .query_row(
+                "SELECT default_mode FROM projects WHERE id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("project mode");
+        assert_eq!(setting, "\"agent\"");
+        assert_eq!(project, "agent");
+    }
+}
+
+const MIGRATION_001_INITIAL_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    objective TEXT,
+    color TEXT DEFAULT '#6366f1',
+    image_url TEXT,
+    local_path TEXT,
+    custom_instructions TEXT,
+    language TEXT DEFAULT 'fr',
+    memory_enabled INTEGER DEFAULT 1,
+    allowed_files TEXT DEFAULT '[]',
+    allowed_plugins TEXT DEFAULT '[]',
+    allowed_integrations TEXT DEFAULT '[]',
+    default_mode TEXT DEFAULT 'agent',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    title TEXT NOT NULL,
+    type TEXT CHECK(type IN ('chat', 'work')) DEFAULT 'chat',
+    business_mode TEXT DEFAULT 'quick_chat',
+    bob_mode TEXT,
+    date TEXT NOT NULL,
+    pinned INTEGER DEFAULT 0,
+    local_only INTEGER DEFAULT 1,
+    summary TEXT,
+    bob_context_state TEXT DEFAULT '{}',
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_date ON conversations(date DESC);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    author TEXT CHECK(author IN ('user', 'assistant', 'system')) NOT NULL,
+    content TEXT NOT NULL,
+    attachments TEXT DEFAULT '[]',
+    sources TEXT DEFAULT '[]',
+    citations TEXT DEFAULT '[]',
+    tools_used TEXT DEFAULT '[]',
+    send_state TEXT DEFAULT 'sent',
+    errors TEXT DEFAULT '[]',
+    associated_artifacts TEXT DEFAULT '[]',
+    associated_approvals TEXT DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    objective TEXT NOT NULL,
+    project_id TEXT,
+    conversation_id TEXT,
+    mode TEXT,
+    permission_policy TEXT DEFAULT 'always_ask',
+    budget REAL,
+    max_time INTEGER,
+    bob_process_id TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    summary TEXT,
+    progress REAL DEFAULT 0,
+    errors TEXT DEFAULT '[]',
+    resumable INTEGER DEFAULT 0,
+    state TEXT CHECK(state IN (
+        'draft','queued','starting','running',
+        'awaiting_info','awaiting_approval','paused',
+        'completed','failed','cancelled','expired'
+    )) DEFAULT 'draft',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+
+CREATE TABLE IF NOT EXISTS task_steps (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT DEFAULT 'pending',
+    dependencies TEXT DEFAULT '[]',
+    responsible_agent TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    tools TEXT DEFAULT '[]',
+    inputs TEXT DEFAULT '{}',
+    outputs TEXT DEFAULT '{}',
+    retry_count INTEGER DEFAULT 0,
+    error TEXT,
+    validation_required INTEGER DEFAULT 0,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    human_description TEXT NOT NULL,
+    command_or_change TEXT,
+    data_accessed TEXT DEFAULT '[]',
+    files_affected TEXT DEFAULT '[]',
+    network_destination TEXT,
+    risk_level TEXT CHECK(risk_level IN ('low','medium','high','critical')) DEFAULT 'medium',
+    decision TEXT CHECK(decision IN ('pending','approved','denied','modified')) DEFAULT 'pending',
+    permission_duration TEXT,
+    decided_by TEXT,
+    decided_at TEXT,
+    undo_possible INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals(task_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_decision ON approvals(decision);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
+    preview_path TEXT,
+    origin TEXT,
+    sources TEXT DEFAULT '[]',
+    validation_status TEXT DEFAULT 'pending',
+    validation_notes TEXT,
+    exported INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    size INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS plugins (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    author TEXT,
+    description TEXT,
+    scope TEXT CHECK(scope IN ('project','personal','team')) DEFAULT 'personal',
+    category TEXT CHECK(category IN ('recipe','integration','executable')) DEFAULT 'recipe',
+    manifest TEXT NOT NULL DEFAULT '{}',
+    install_state TEXT DEFAULT 'installed',
+    validation_state TEXT DEFAULT 'pending',
+    signature TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_executed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS integrations (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    account TEXT,
+    auth_type TEXT,
+    scopes TEXT DEFAULT '[]',
+    available_tools TEXT DEFAULT '[]',
+    approval_permission TEXT DEFAULT 'always_ask',
+    health_state TEXT DEFAULT 'healthy',
+    last_sync TEXT,
+    keychain_secret_ref TEXT,
+    allowed_projects TEXT DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    project_id TEXT,
+    plugin_or_mode TEXT,
+    cron_or_event TEXT NOT NULL,
+    timezone TEXT DEFAULT 'UTC',
+    next_run TEXT,
+    last_run TEXT,
+    offline_behavior TEXT DEFAULT 'skip',
+    overlap_policy TEXT DEFAULT 'queue',
+    retry_policy TEXT DEFAULT '{}',
+    notifications TEXT DEFAULT '[]',
+    state TEXT CHECK(state IN ('active','paused','completed')) DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+"#;
+
+const MIGRATION_002_EVENTS: &str = r#"
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    data TEXT DEFAULT '{}',
+    user_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
+"#;
+
+const MIGRATION_003_SETTINGS: &str = r#"
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Default settings
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('theme', '"system"', datetime('now')),
+    ('language', '"auto"', datetime('now')),
+    ('default_mode', '"agent"', datetime('now')),
+    ('sidebar_width', '260', datetime('now')),
+    ('inspector_width', '340', datetime('now')),
+    ('sidebar_visible', 'true', datetime('now')),
+    ('inspector_visible', 'true', datetime('now')),
+    ('font_size', '15', datetime('now')),
+    ('reduced_motion', 'false', datetime('now')),
+    ('permission_policy', '"always_ask"', datetime('now')),
+    ('launch_at_login', 'false', datetime('now')),
+    ('menu_bar_enabled', 'true', datetime('now'));
+"#;
+
+const MIGRATION_004_WORKSPACE_RUNTIME: &str = r#"
+ALTER TABLE tasks ADD COLUMN schedule_id TEXT;
+ALTER TABLE tasks ADD COLUMN shell_task_id TEXT;
+ALTER TABLE tasks ADD COLUMN last_event_at TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_conversation ON tasks(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks(schedule_id);
+
+CREATE TABLE IF NOT EXISTS task_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'queued',
+    shell_session_id TEXT,
+    shell_task_id TEXT,
+    process_id INTEGER,
+    started_at TEXT,
+    ended_at TEXT,
+    summary TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, attempt DESC);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    title TEXT,
+    content TEXT,
+    tool_name TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_sequence ON task_events(task_id, sequence);
+
+CREATE TABLE IF NOT EXISTS task_io (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    direction TEXT CHECK(direction IN ('input','output')) NOT NULL,
+    io_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path_or_url TEXT,
+    mime_type TEXT,
+    size INTEGER,
+    sha256 TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_io_task ON task_io(task_id, direction);
+
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    task_id TEXT,
+    scheduled_for TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    started_at TEXT,
+    ended_at TEXT,
+    summary TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs(schedule_id, scheduled_for DESC);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    project_id TEXT,
+    task_id TEXT,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT CHECK(kind IN ('file','directory')) NOT NULL,
+    mime_type TEXT,
+    size INTEGER,
+    sha256 TEXT,
+    access_mode TEXT NOT NULL DEFAULT 'reference',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id);
+
+CREATE TABLE IF NOT EXISTS permission_grants (
+    id TEXT PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    scope TEXT CHECK(scope IN ('once','task','conversation','project','always')) NOT NULL,
+    scope_id TEXT,
+    decision TEXT CHECK(decision IN ('allow','deny')) NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_grants_lookup ON permission_grants(action_type, resource, revoked_at);
+
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT,
+    content TEXT NOT NULL,
+    source_path TEXT,
+    origin TEXT NOT NULL DEFAULT 'local',
+    version TEXT NOT NULL DEFAULT '1.0.0',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    transport TEXT NOT NULL,
+    command_or_url TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '[]',
+    env_secret_refs TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    tools TEXT NOT NULL DEFAULT '[]',
+    last_checked_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_snapshots (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    used_amount REAL,
+    remaining_amount REAL,
+    unit TEXT,
+    raw TEXT NOT NULL DEFAULT '{}',
+    captured_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    entity_type UNINDEXED,
+    entity_id UNINDEXED,
+    project_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS search_project_insert AFTER INSERT ON projects BEGIN
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('project', new.id, new.id, new.name, coalesce(new.description,'') || ' ' || coalesce(new.objective,'') || ' ' || coalesce(new.custom_instructions,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_project_update AFTER UPDATE ON projects BEGIN
+  DELETE FROM search_index WHERE entity_type='project' AND entity_id=old.id;
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('project', new.id, new.id, new.name, coalesce(new.description,'') || ' ' || coalesce(new.objective,'') || ' ' || coalesce(new.custom_instructions,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_project_delete AFTER DELETE ON projects BEGIN
+  DELETE FROM search_index WHERE entity_type='project' AND entity_id=old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_conversation_insert AFTER INSERT ON conversations BEGIN
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('conversation', new.id, new.project_id, new.title, coalesce(new.summary,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_conversation_update AFTER UPDATE ON conversations BEGIN
+  DELETE FROM search_index WHERE entity_type='conversation' AND entity_id=old.id;
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('conversation', new.id, new.project_id, new.title, coalesce(new.summary,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_conversation_delete AFTER DELETE ON conversations BEGIN
+  DELETE FROM search_index WHERE entity_type='conversation' AND entity_id=old.id;
+  DELETE FROM search_index WHERE entity_type='message' AND entity_id=old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_message_insert AFTER INSERT ON messages BEGIN
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  SELECT 'message', new.conversation_id, c.project_id, c.title, new.content
+  FROM conversations c WHERE c.id = new.conversation_id;
+END;
+CREATE TRIGGER IF NOT EXISTS search_message_delete AFTER DELETE ON messages BEGIN
+  DELETE FROM search_index WHERE rowid IN (
+    SELECT rowid FROM search_index WHERE entity_type='message' AND entity_id=old.conversation_id AND body=old.content LIMIT 1
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_task_insert AFTER INSERT ON tasks BEGIN
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('task', new.id, new.project_id, new.objective, coalesce(new.summary,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_task_update AFTER UPDATE ON tasks BEGIN
+  DELETE FROM search_index WHERE entity_type='task' AND entity_id=old.id;
+  INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+  VALUES ('task', new.id, new.project_id, new.objective, coalesce(new.summary,''));
+END;
+CREATE TRIGGER IF NOT EXISTS search_task_delete AFTER DELETE ON tasks BEGIN
+  DELETE FROM search_index WHERE entity_type='task' AND entity_id=old.id;
+END;
+
+INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+SELECT 'project', id, id, name, coalesce(description,'') || ' ' || coalesce(objective,'') || ' ' || coalesce(custom_instructions,'') FROM projects;
+INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+SELECT 'conversation', id, project_id, title, coalesce(summary,'') FROM conversations;
+INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+SELECT 'message', m.conversation_id, c.project_id, c.title, m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id;
+INSERT INTO search_index(entity_type, entity_id, project_id, title, body)
+SELECT 'task', id, project_id, objective, coalesce(summary,'') FROM tasks;
+
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('global_instructions', '""', datetime('now')),
+    ('max_cost', '0', datetime('now')),
+    ('mcp_enabled', 'true', datetime('now')),
+    ('subagents_enabled', 'true', datetime('now')),
+    ('web_enabled', 'true', datetime('now')),
+    ('notifications_enabled', 'true', datetime('now')),
+    ('notify_task_complete', 'true', datetime('now')),
+    ('voice_on_device', 'true', datetime('now')),
+    ('task_retention_days', '30', datetime('now')),
+    ('telemetry_enabled', 'false', datetime('now')),
+    ('computer_use_enabled', 'false', datetime('now')),
+    ('chrome_control_enabled', 'false', datetime('now'));
+"#;
+
+const MIGRATION_005_PINNED_TASKS: &str = r#"
+ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned, updated_at DESC);
+"#;
+
+const MIGRATION_006_PLUGIN_VERSIONS: &str = r#"
+ALTER TABLE plugins ADD COLUMN available_version TEXT;
+
+CREATE TABLE IF NOT EXISTS plugin_versions (
+    plugin_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    name TEXT NOT NULL,
+    author TEXT,
+    description TEXT,
+    scope TEXT NOT NULL DEFAULT 'personal',
+    category TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    validation_state TEXT NOT NULL DEFAULT 'pending',
+    signature TEXT,
+    release_notes TEXT,
+    bundle_snapshot_path TEXT,
+    created_at TEXT NOT NULL,
+    installed_at TEXT,
+    PRIMARY KEY (plugin_id, version),
+    FOREIGN KEY (plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin
+ON plugin_versions(plugin_id, created_at DESC);
+
+-- Existing installations become the first immutable version in their history.
+INSERT OR IGNORE INTO plugin_versions (
+    plugin_id, version, name, author, description, scope, category, manifest,
+    validation_state, signature, created_at, installed_at
+)
+SELECT id, version, name, author, description, scope, category, manifest,
+       validation_state, signature, created_at, updated_at
+FROM plugins;
+"#;
+
+// The obsolete column never contained credentials in the current runtime.
+// Drop it so upgraded databases no longer retain a Keychain-shaped schema.
+const MIGRATION_007_REMOVE_LEGACY_KEYCHAIN_COLUMN: &str = r#"
+ALTER TABLE integrations DROP COLUMN keychain_secret_ref;
+"#;
+
+const MIGRATION_008_ARCHIVED_CONVERSATIONS: &str = r#"
+ALTER TABLE conversations ADD COLUMN archived INTEGER DEFAULT 0;
+"#;
+
+const MIGRATION_009_SANDBOX_MODE: &str = r#"
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('sandbox_mode', 'false', datetime('now'));
+"#;
+
+const MIGRATION_010_CROSS_CONVERSATION_CONTEXT: &str = r#"
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
+    ('cross_conversation_context', 'false', datetime('now'));
+"#;
+
+/// Starting `bob run` is default-allow: persist a workspace-wide grant so
+/// existing installs stop prompting, and move the factory policy off
+/// `always_ask` (which used to require a session-start popup).
+const MIGRATION_011_SESSION_START_DEFAULT_ALLOW: &str = r#"
+INSERT OR IGNORE INTO permission_grants (
+    id, action_type, resource, scope, scope_id, decision, expires_at, revoked_at, created_at
+) VALUES (
+    'grant_bob_session_start_default',
+    'bob.session_start',
+    '*',
+    'always',
+    NULL,
+    'allow',
+    NULL,
+    NULL,
+    datetime('now')
+);
+
+UPDATE settings
+SET value = '"ask_for_important"', updated_at = datetime('now')
+WHERE key = 'permission_policy' AND value = '"always_ask"';
+"#;
+
+const MIGRATION_012_SCHEDULE_RUN_AT: &str = r#"
+ALTER TABLE schedules ADD COLUMN run_at TEXT;
+"#;
+
+const MIGRATION_013_DB_CONNECTIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS db_connections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    engine TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#;
+
+// `conversations.date` is kept for API compatibility, but represents the
+// latest visible conversation activity rather than only its creation time.
+const MIGRATION_014_CONVERSATION_LAST_MODIFIED: &str = r#"
+UPDATE conversations
+SET date = (
+    SELECT MAX(messages.created_at)
+    FROM messages
+    WHERE messages.conversation_id = conversations.id
+)
+WHERE EXISTS (
+    SELECT 1
+    FROM messages
+    WHERE messages.conversation_id = conversations.id
+);
+"#;
+
+// `general_work` was the original Bob Work business-mode identifier. Bob Shell
+// and Bob Mobile expose the same behavior as the canonical `agent` mode, so
+// keeping both values visible produced a duplicate and a confusing default.
+const MIGRATION_015_CANONICAL_AGENT_MODE: &str = r#"
+UPDATE settings
+SET value = '"agent"', updated_at = datetime('now')
+WHERE key = 'default_mode' AND value = '"general_work"';
+
+UPDATE projects SET default_mode = 'agent' WHERE default_mode = 'general_work';
+UPDATE conversations SET bob_mode = 'agent' WHERE bob_mode = 'general_work';
+UPDATE tasks SET mode = 'agent' WHERE mode = 'general_work';
+UPDATE schedules SET plugin_or_mode = 'agent' WHERE plugin_or_mode = 'general_work';
+"#;
+
+// Structured file mutations are stored with Bob's reply so the desktop and
+// remote clients can render the same persistent change summary.
+const MIGRATION_016_MESSAGE_FILE_CHANGES: &str = r#"
+ALTER TABLE messages ADD COLUMN file_changes TEXT NOT NULL DEFAULT '[]';
+"#;
+
+const MIGRATION_017_RUNTIME_ARCHITECTURE_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS runtime_registry (
+    runtime_id TEXT PRIMARY KEY,
+    runtime_type TEXT CHECK(runtime_type IN ('shared','external_managed','plugin_private')) NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    manifest TEXT NOT NULL DEFAULT '{}',
+    source TEXT,
+    install_path TEXT,
+    platform TEXT NOT NULL,
+    architecture TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    status TEXT CHECK(status IN ('not_installed','installing','installed','updating','broken','removing')) NOT NULL DEFAULT 'not_installed',
+    installed_at TEXT,
+    updated_at TEXT NOT NULL,
+    last_used_at TEXT,
+    integrity TEXT,
+    dependencies TEXT NOT NULL DEFAULT '[]',
+    python_mode TEXT CHECK(python_mode IN ('none','shared','isolated')) NOT NULL DEFAULT 'none',
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    removable INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_registry_type_status
+ON runtime_registry(runtime_type, status);
+
+CREATE TABLE IF NOT EXISTS runtime_consumers (
+    runtime_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    requirement TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    PRIMARY KEY (runtime_id, plugin_id),
+    FOREIGN KEY (runtime_id) REFERENCES runtime_registry(runtime_id) ON DELETE CASCADE,
+    FOREIGN KEY (plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_consumers_plugin
+ON runtime_consumers(plugin_id);
+
+CREATE TABLE IF NOT EXISTS runtime_operations (
+    id TEXT PRIMARY KEY,
+    runtime_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    state TEXT NOT NULL,
+    candidate_path TEXT,
+    previous_path TEXT,
+    details TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY (runtime_id) REFERENCES runtime_registry(runtime_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_operations_runtime
+ON runtime_operations(runtime_id, started_at DESC);
+"#;
+
+const MIGRATION_018_ARTIFACT_RUNTIME_METADATA: &str = r#"
+CREATE TABLE IF NOT EXISTS artifact_runtime_metadata (
+    artifact_id TEXT PRIMARY KEY,
+    artifact_kind TEXT NOT NULL,
+    owner_plugin_id TEXT,
+    producer_runtime_id TEXT,
+    project_id TEXT,
+    conversation_id TEXT,
+    workspace_reference TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    preview_state TEXT NOT NULL DEFAULT 'pending',
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_plugin_id) REFERENCES plugins(id) ON DELETE SET NULL,
+    FOREIGN KEY (producer_runtime_id) REFERENCES runtime_registry(runtime_id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_runtime_conversation
+ON artifact_runtime_metadata(conversation_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_runtime_owner
+ON artifact_runtime_metadata(owner_plugin_id, updated_at DESC);
+"#;
+
+const MIGRATION_019_PLUGIN_PRIVATE_RUNTIME_CLEANUP: &str = r#"
+CREATE TRIGGER IF NOT EXISTS cleanup_plugin_private_runtimes
+AFTER DELETE ON plugins
+BEGIN
+    DELETE FROM runtime_registry
+    WHERE runtime_type='plugin_private'
+      AND substr(runtime_id, 1, length('plugin.' || OLD.id || '.')) = 'plugin.' || OLD.id || '.';
+END;
+"#;
+
+const MIGRATION_020_RUNTIME_INSTALLED_VERSION: &str = r#"
+ALTER TABLE runtime_registry ADD COLUMN installed_version TEXT;
+UPDATE runtime_registry
+SET installed_version=version
+WHERE status='installed' AND installed_version IS NULL;
+"#;
+
+const MIGRATION_021_PERSISTENT_MEMORY: &str = r#"
+CREATE TABLE IF NOT EXISTS persistent_memories (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL CHECK(scope IN ('user','project')),
+    project_id TEXT,
+    content TEXT NOT NULL,
+    source_conversation_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+    CHECK ((scope = 'user' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_persistent_memories_scope
+ON persistent_memories(scope, project_id, updated_at DESC);
+
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_enabled', 'false', datetime('now'));
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_engine', '"local"', datetime('now'));
+"#;
+
+// Repair databases that applied the first form of migration 021, where the
+// NOT NULL updated_at column caused INSERT OR IGNORE to skip the defaults.
+const MIGRATION_022_PERSISTENT_MEMORY_SETTINGS: &str = r#"
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_enabled', 'false', datetime('now'));
+INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_engine', '"local"', datetime('now'));
+"#;

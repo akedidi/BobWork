@@ -31,6 +31,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: BobDesktop/pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -38,10 +39,10 @@ jobs:
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: apps/macos/src-tauri -> target
+          workspaces: BobDesktop/apps/macos/src-tauri -> target
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm --dir BobDesktop install --frozen-lockfile
 
       - name: Verify release inputs
         env:
@@ -88,13 +89,16 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Create signed updater configuration
-        working-directory: apps/macos
+        working-directory: BobDesktop/apps/macos
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         run: node scripts/create-release-config.mjs
 
       - name: Verify application before packaging
-        run: pnpm --filter macos run verify
+        run: pnpm --dir BobDesktop --filter macos run verify
+
+      - name: Invalidate stale Rust and Release outputs
+        run: pnpm --dir BobDesktop --filter macos run release:prepare
 
       - name: Build, sign, notarize and publish
         uses: tauri-apps/tauri-action@v1
@@ -108,7 +112,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: ${{ vars.BOBWORK_OAUTH_MICROSOFT_CLIENT_ID }}
         with:
-          projectPath: apps/macos
+          projectPath: BobDesktop/apps/macos
           args: --config src-tauri/tauri.release.conf.json
           tagName: v__VERSION__
           releaseName: Bob Work v__VERSION__
@@ -117,12 +121,15 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
 
+      - name: Certify freshly packaged application
+        run: pnpm --dir BobDesktop --filter macos run release:verify
+
       - name: Download published release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          VERSION="$(node -p "require('./apps/macos/package.json').version")"
+          VERSION="$(node -p "require('./BobDesktop/apps/macos/package.json').version")"
           TAG="v${VERSION}"
           mkdir -p release-evidence/assets
           gh release download "$TAG" --dir release-evidence/assets

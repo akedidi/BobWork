@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-designer",
+  "version": "2.0.0",
+  "description": "Conçoit des interfaces structurées avec Design IR, aperçu interactif responsive et exports ouverts.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "designer"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Designer",
+    "shortDescription": "Crée une UX/UI structurée avec aperçu et exports ouverts.",
+    "longDescription": "Designer agentique Bob Work : brief, parcours, wireframe, système de design, UI, Design IR versionné, aperçu interactif responsive desktop/mobile, revue et exports ouverts.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Design IR",
+      "Live Preview",
+      "Responsive",
+      "Export"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Conçois un dashboard SaaS et affiche son aperçu interactif.",
+      "Crée un wireframe mobile puis rends-le responsive pour desktop.",
+      "Révise cette interface et applique les corrections ciblées."
+    ]
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "builtin": true,
+  "agentic": true,
+  "name": "Designer",
+  "slug": "ibm-agentic-designer",
+  "version": "2.0.0",
+  "author": "Bob Work",
+  "description": "Crée des expériences UX/UI structurées avec Design IR, aperçu interactif desktop/mobile, itérations conversationnelles et exports ouverts.",
+  "category": "recipe",
+  "icon": "designer",
+  "permissions": [
+    {
+      "type": "file.read"
+    },
+    {
+      "type": "file.write"
+    },
+    {
+      "type": "network.request"
+    }
+  ],
+  "capabilities": [
+    "workflow.orchestration",
+    "evidence.traceability",
+    "artifact.create",
+    "quality.review",
+    "design.ir",
+    "design.preview",
+    "design.export",
+    "responsive.design",
+    "visualization.shared"
+  ],
+  "skills": [
+    {
+      "name": "ux-research",
+      "displayName": "ux-research",
+      "description": "Planifier et synthétiser une recherche UX traçable.",
+      "path": "skills/ux-research/SKILL.md"
+    },
+    {
+      "name": "user-journey",
+      "displayName": "user-journey",
+      "description": "Cartographier l’expérience de bout en bout et ses moments critiques.",
+      "path": "skills/user-journey/SKILL.md"
+    },
+    {
+      "name": "information-architecture",
+      "displayName": "information-architecture",
+      "description": "Structurer contenus, navigation et taxonomie autour des modèles mentaux.",
+      "path": "skills/information-architecture/SKILL.md"
+    },
+    {
+      "name": "product-design",
+      "displayName": "product-design",
+      "description": "Passer du problème validé à une solution testable et mesurable.",
+      "path": "skills/product-design/SKILL.md"
+    },
+    {
+      "name": "ui-design",
+      "displayName": "ui-design",
+      "description": "Produire une interface cohérente, responsive et prête à construire.",
+      "path": "skills/ui-design/SKILL.md"
+    },
+    {
+      "name": "design-system",
+      "displayName": "design-system",
+      "description": "Gouverner composants, tokens et patterns comme un produit partagé.",
+      "path": "skills/design-system/SKILL.md"
+    },
+    {
+      "name": "design-review",
+      "displayName": "design-review",
+      "description": "Conduire une revue de conception factuelle avant construction ou release.",
+      "path": "skills/design-review/SKILL.md"
+    },
+    {
+      "name": "ux-heuristics",
+      "displayName": "ux-heuristics",
+      "description": "Évaluer rapidement une interface avec des heuristiques explicites.",
+      "path": "skills/ux-heuristics/SKILL.md"
+    },
+    {
+      "name": "accessibility-audit",
+      "displayName": "accessibility-audit",
+      "description": "Auditer l’accessibilité contre WCAG 2.2 et les critères IBM/Carbon applicables.",
+      "path": "skills/accessibility-audit/SKILL.md"
+    },
+    {
+      "name": "developer-handoff",
+      "displayName": "developer-handoff",
+      "description": "Transmettre une conception sans ambiguïté et accompagner son implémentation.",
+      "path": "skills/developer-handoff/SKILL.md"
+    },
+    {
+      "name": "design-brief",
+      "displayName": "design-brief",
+      "description": "Transforme une demande en brief de conception structuré et actionnable.",
+      "path": "skills/design-brief/SKILL.md"
+    },
+    {
+      "name": "wireframe",
+      "displayName": "wireframe",
+      "description": "Crée des wireframes évolutifs directement dans le Design IR.",
+      "path": "skills/wireframe/SKILL.md"
+    },
+    {
+      "name": "responsive-design",
+      "displayName": "responsive-design",
+      "description": "Définit les adaptations desktop, tablette et mobile sans simple mise à l’échelle.",
+      "path": "skills/responsive-design/SKILL.md"
+    },
+    {
+      "name": "interaction-design",
+      "displayName": "interaction-design",
+      "description": "Décrit les états et interactions dans le Design IR.",
+      "path": "skills/interaction-design/SKILL.md"
+    },
+    {
+      "name": "design-refactor",
+      "displayName": "design-refactor",
+      "description": "Applique une modification localisée à un nœud du Design IR.",
+      "path": "skills/design-refactor/SKILL.md"
+    },
+    {
+      "name": "export-design",
+      "displayName": "export-design",
+      "description": "Exporte le Design IR, les tokens, SVG et HTML/CSS de manière traçable.",
+      "path": "skills/export-design/SKILL.md"
+    }
+  ],
+  "resources": [
+    {
+      "kind": "web-reference",
+      "label": "IBM Enterprise Design Thinking framework",
+      "url": "https://www.ibm.com/training/enterprise-design-thinking/framework",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "IBM Garage",
+      "url": "https://www.ibm.com/garage",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "IBM Design approach",
+      "url": "https://www.ibm.com/design/approach/design-thinking/",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "IBM Sponsor User program",
+      "url": "https://www.ibm.com/design/research/sponsor-user-program/overview/",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "Carbon accessibility",
+      "url": "https://carbondesignsystem.com/guidelines/accessibility/overview/",
+      "optional": true
+    },
+    {
+      "kind": "web-reference",
+      "label": "WCAG 2.2",
+      "url": "https://www.w3.org/TR/WCAG22/",
+      "optional": true
+    }
+  ],
+  "specializedMode": {
+    "label": "Designer",
+    "description": "Designer agentique avec Design IR persistant, aperçu interactif et responsive dans les conversations desktop/mobile, puis exports structurés.",
+    "workflow": "Brief → IA/flux → wireframe → design system → UI → Design IR → aperçu → review → patch → exports",
+    "allowedSkills": [
+      "ux-research",
+      "user-journey",
+      "information-architecture",
+      "product-design",
+      "ui-design",
+      "design-system",
+      "design-review",
+      "ux-heuristics",
+      "accessibility-audit",
+      "developer-handoff",
+      "design-brief",
+      "wireframe",
+      "responsive-design",
+      "interaction-design",
+      "design-refactor",
+      "export-design"
+    ],
+    "allowedTools": [
+      "read_file",
+      "write_file",
+      "web_fetch",
+      "web_search",
+      "generate_artifact"
+    ],
+    "inputExtensions": [
+      "md",
+      "txt",
+      "pdf",
+      "docx",
+      "pptx",
+      "xlsx",
+      "csv",
+      "png",
+      "jpg",
+      "jpeg",
+      "svg",
+      "html",
+      "json",
+      "sketch"
+    ],
+    "outputFormats": [
+      "md",
+      "json",
+      "csv",
+      "docx",
+      "pptx",
+      "xlsx",
+      "pdf",
+      "svg",
+      "png",
+      "html",
+      "css",
+      "svg",
+      "sketch"
+    ],
+    "sandbox": "enterprise-advisory"
+  },
+  "instructions": "# Designer\n\nTu es le Designer agentique de Bob Work. Le Design IR (JSON versionné) est la source de vérité : ni image, ni HTML, ni export ne le remplace. Pour une nouvelle interface, produis brief → architecture/flux → wireframe → système de tokens/composants → UI dans le Design IR → aperçu HTML local et isolé → revue → patch ciblé.\n\n## Règles d’exécution\n\n- Chaque nœud a un identifiant stable. Une demande ciblée (ex. « réduis la barre latérale ») applique un patch au nœud, sans régénérer le reste.\n- Utilise les layouts FREE/HORIZONTAL/VERTICAL/GRID, les tokens sémantiques et les règles desktop/tablette/mobile. Ne réduis pas mécaniquement le desktop pour le mobile : adapte navigation, densité, ordre et interactions tactiles.\n- Génère l’aperçu HTML uniquement depuis le Design IR ; il est affiché inline dans la conversation sur desktop et mobile. Aucun JavaScript arbitraire ou CDN.\n- Utilise Visualize seulement pour graphiques/diagrammes/3D et ses runtimes partagés ; Designer ne duplique aucun moteur.\n- Exporte Design IR JSON, tokens JSON, SVG et HTML/CSS. Propose Sketch comme échange structuré lorsque l’adaptateur est disponible ; ne génère jamais de .fig.\n- L’aperçu est sandboxé, sans secrets ni réseau par défaut. Respecte accessibilité, contraste, focus, libellés et mouvements réduits.\n\n## Skills\n\nRoutage courant : `design-brief`, `information-architecture`, `user-journey`, `wireframe`, `ui-design`, `design-system`, `responsive-design`, `interaction-design`, `accessibility-audit`, `design-review`, `design-refactor`, `developer-handoff`, `export-design`. Lis le skill concerné avant de l’employer.\n\n## Définition de terminé\n\nUn résultat prêt est un Design IR valide, un aperçu utilisable desktop/mobile, une revue des limites et les exports ouverts demandés.",
+  "releaseNotes": "2.0.0 — Design IR versionné, aperçu HTML isolé desktop/mobile, patchs ciblés, workflow responsive et exports ouverts."
+}

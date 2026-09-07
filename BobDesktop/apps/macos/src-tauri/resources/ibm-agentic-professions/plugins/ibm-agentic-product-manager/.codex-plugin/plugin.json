@@ -1,0 +1,35 @@
+{
+  "name": "ibm-agentic-product-manager",
+  "version": "1.0.1",
+  "description": "Pilote la discovery, la stratégie, la priorisation et la mesure d’un produit à partir de résultats utilisateurs et métier.",
+  "author": {
+    "name": "Bob Work"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "agentic",
+    "ibm",
+    "enterprise",
+    "product manager"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Product Manager",
+    "shortDescription": "Pilote la discovery, la stratégie, la priorisation et la mesure ",
+    "longDescription": "Pilote la discovery, la stratégie, la priorisation et la mesure d’un produit à partir de résultats utilisateurs et métier. Workflow : Problème → discovery → recherche utilisateur → JTBD/personas → proposition de valeur → stratégie → priorisation → roadmap → PRD → user stories → KPI.",
+    "developerName": "Bob Work",
+    "category": "Business",
+    "capabilities": [
+      "Analyze",
+      "Plan",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#0F62FE",
+    "defaultPrompt": [
+      "Cadre la discovery de cette opportunité produit.",
+      "Priorise ces initiatives avec RICE et explicite les limites.",
+      "Rédige le PRD, les user stories et les KPI."
+    ]
+  }
+}

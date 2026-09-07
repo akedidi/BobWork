@@ -1,0 +1,51 @@
+---
+description: Barre qualité plugins Bob Work (niveau ChatGPT Work) et initiative CLI/OSS à la création
+globs: apps/macos/**/*.{rs,py,tsx,ts,json}
+alwaysApply: false
+---
+
+# Plugins Bob Work — barre qualité
+
+Quand tu crées ou refactors un **plugin** (pas un skill seul), vise le niveau **ChatGPT Work**.
+
+## Initiative (chat, pas seulement le wizard)
+
+Le wizard Plugins est facultatif. Si l’utilisateur demande un plugin ou d’y intégrer un CLI dans le chat :
+
+1. **Fais-le toi-même** : choisir, télécharger, embarquer, déclarer, valider.
+2. **Prends l’initiative** : conversion, rendu, packaging, extraction, diagrammes → outil OSS existant (pas un script maison ni une API SaaS si un binaire mature existe).
+3. **Vendor** selon le schéma Bob Work : `vendor/<outil>/<version>/bin/<exe>` + wrapper `scripts/`. SHA-256, `chmod +x`. Jamais Homebrew / `npm i -g` comme unique stratégie. PATH = fallback optionnel déclaré.
+4. Ne demande pas à l’utilisateur de cocher « Binaire embarqué » ni de coller une URL. Ne pas inventer `tools/`, `/usr/local`, `~/.local/bin`.
+
+Catalogue à privilégier : Mermaid, D2, PlantUML, pandoc, ffmpeg, jq, Graphviz, ImageMagick. Autre OSS OK si licence permissive, release macOS, binaire ≤ 80 Mo.
+
+## Minimum Work-level
+
+1. **Mode produit** : `specializedMode` (label, outils, workflow).
+2. **Surface exécutable** : CLI, shell, binaire embarqué, MCP local ou MCP distant.
+3. **Exploration** : outils locaux (CLI/shell/binaires type Mermaid), OAuth, MCP, API, web search, LLM Bob, Computer Use/Chrome — retenir selon le workflow.
+4. **`description`** = bénéfice utilisateur (1–2 phrases). **`resources`** + **`connectorStrategy`** listent les intégrations (y compris optionnelles) — pas la description.
+5. Permissions honnêtes ; zéro secret en clair.
+6. Explique tes choix (retenu vs écarté), avec version / URL / SHA-256 des binaires.
+
+## Familles à explorer
+
+| Kind | Exemples |
+|------|----------|
+| oauth | GitHub, Slack, Monday, Microsoft |
+| mcp / stdio-cli / shell / node-cli | Bundle local, scripts, CLI Node |
+| bundled-bin | mermaid, d2, ffmpeg, pandoc (épinglés, hors ligne) |
+| api-public / api-key | Stooq, Finnhub `${KEY}` |
+| web-search | Accès web Bob |
+| bob-llm | Synthèse / raisonnement chat |
+| database | Connexion SQL/NoSQL (onglet Intégrations → DB). URL/hôte dans le prompt de création → Bob Work crée et lie la connexion au plugin |
+| file / pdf / spreadsheet | Fichiers uploadés par l’utilisateur (overlay, pas le zip packagé) |
+
+## Anti-patterns
+
+- Skill-only sans code/MCP
+- Faux « Connecté »
+- Description remplie de jargon MCP/CLI au lieu du bénéfice utilisateur
+- Intégrations seulement dans `description` et absentes de `resources`
+- Décrire Mermaid/ffmpeg/pandoc sans les embarquer
+- Renvoyer l’utilisateur vers le wizard pour un CLI
