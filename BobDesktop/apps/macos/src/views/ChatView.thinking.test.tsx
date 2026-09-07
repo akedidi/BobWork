@@ -466,6 +466,29 @@ describe('Chat live thinking', () => {
     expect(screen.getByRole('region', { name: 'Plan d’exécution' })).toHaveClass('is-complete')
   })
 
+  it('keeps the right preview panel closed when a prompt creates an asset', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.change(await screen.findByPlaceholderText('Sur quoi travailler ?'), { target: { value: 'Crée une présentation' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-session-done')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-session-done')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', success: true,
+        fullOutput: 'Présentation créée.', taskId: 'task-1',
+        deliverablePaths: ['/tmp/deck.pptx'],
+      } })
+    })
+
+    expect(screen.queryByRole('complementary', { name: 'Aperçus et activité' })).not.toBeInTheDocument()
+    expect(screen.getByText('deck.pptx')).toBeVisible()
+  })
+
   it('does not carry a live sub-agent frame into another conversation', async () => {
     render(
       <MemoryRouter initialEntries={['/chat/conv-1']}>

@@ -33,7 +33,7 @@ import { useConversationUpdated, useConversationMessagesChanged, useTaskUpdated,
 import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath } from '../lib/localFilePaths'
 import { PluginIcon, iconForFileName } from '../components/PluginIcon'
 import { ChromeSnapshotCard } from '../components/ChromeSnapshot/ChromeSnapshotCard'
-import { AUTO_PREVIEW_EXT, INLINE_IMAGE_EXT, INLINE_VISUALIZATION_EXT } from "../constants/fileTypes"
+import { INLINE_IMAGE_EXT, INLINE_VISUALIZATION_EXT } from "../constants/fileTypes"
 import { extractChromeSnapshot, upsertChromeSnapshot, type ChromeSnapshot } from '../lib/chromeSnapshot'
 import { useAppDialog } from '../components/AppDialog'
 import { SubagentStatusPanel, taggedSubagentReasoningId } from '../components/SubagentStatus/SubagentStatusPanel'
@@ -966,17 +966,6 @@ export default function ChatView() {
       setThinkingText('')
       activitiesRef.current = []
       setActivities([])
-
-      const firstDoc = localSources.find(source => source.path && AUTO_PREVIEW_EXT.test(source.path))
-      if (success && firstDoc?.path) {
-        setPreviewRequest({
-          id: `${Date.now()}-${Math.random()}`,
-          target: firstDoc.path,
-          title: firstDoc.title,
-          kind: 'file',
-        })
-        setPanelOpen(true)
-      }
 
       const completedTaskId = event.payload.taskId
       if (completedTaskId) {
