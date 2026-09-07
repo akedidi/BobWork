@@ -1576,6 +1576,7 @@ fn build_prompt_with_history(
     let creating_plugin = plugin_creation.is_some();
     let instruction_context = [
         Some(crate::services::plugin_deploy::PLUGIN_INVOCATION_POLICY.to_string()),
+        Some("Suivi du plan Bob Work : pour une tâche d’implémentation en plusieurs étapes, notamment la création ou la restructuration d’un projet, utilise `update_todo_list` s’il est disponible. Publie avant la première modification un plan de 2 à 8 étapes concrètes, avec exactement une étape `in_progress`. Mets à jour ce même plan après chaque transition et termine avec toutes les étapes `completed`, `failed` ou `skipped`. N’établis pas de plan pour une question simple ou une action unique.".to_string()),
         conversation_summary.filter(|value| !value.trim().is_empty()).map(|value| format!("Résumé cumulatif de la conversation (source de vérité pour les échanges plus anciens) :\n{}", value.trim())),
         (!global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", global_instructions.trim())),
         project_instructions.filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
@@ -2176,6 +2177,9 @@ mod plugin_creation_protocol_tests {
         assert!(prompt.contains("Relance le screening"));
         assert!(prompt.contains("récupère les contenus en arrière-plan"));
         assert!(prompt.contains("n’autorise jamais l’ouverture de Chrome"));
+        assert!(prompt.contains("update_todo_list"));
+        assert!(prompt.contains("exactement une étape `in_progress`"));
+        assert!(prompt.contains("Mets à jour ce même plan après chaque transition"));
         assert!(!prompt.contains("Vendoring"));
     }
 

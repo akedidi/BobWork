@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatView, {
@@ -395,6 +395,75 @@ describe('Chat live thinking', () => {
     fireEvent.click(completedAction.closest('summary')!)
     expect(screen.getByText('La page a été chargée.')).toBeVisible()
     expect(screen.getByText(/"status": 200/)).toBeInTheDocument()
+  })
+
+  it('pins the latest multi-step plan and updates its progress while Bob works', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.change(await screen.findByPlaceholderText('Sur quoi travailler ?'), { target: { value: 'Crée le projet' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-activity')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', eventType: 'tool_started',
+        toolName: 'update_todo_list', payload: { tool_id: 'plan-1', parameters: { todos: [
+          { content: 'Initialiser le projet', status: 'in_progress' },
+          { content: 'Créer l’interface', status: 'pending' },
+          { content: 'Tester le résultat', status: 'pending' },
+        ] } },
+      } })
+    })
+
+    const pinnedPlan = screen.getByRole('region', { name: 'Plan d’exécution' })
+    expect(pinnedPlan.closest('.execution-plan-sticky')).toBeInTheDocument()
+    expect(screen.getByText('0/3 terminées')).toBeVisible()
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', eventType: 'tool_started',
+        toolName: 'update_todo_list', payload: { tool_id: 'plan-2', parameters: { todos: [
+          { content: 'Initialiser le projet', status: 'completed' },
+          { content: 'Créer l’interface', status: 'in_progress' },
+          { content: 'Tester le résultat', status: 'pending' },
+        ] } },
+      } })
+    })
+
+    expect(screen.getByText('1/3 terminées')).toBeVisible()
+    expect(within(pinnedPlan).getByText(/Créer l’interface/).closest('li')).toHaveClass('is-running')
+  })
+
+  it('restores the pinned plan from persisted assistant activity', async () => {
+    mocks.getMessages.mockResolvedValue([{
+      id: 'assistant-with-plan', conversationId: 'conv-1', author: 'assistant',
+      content: 'Projet créé.', attachments: [], sources: [], citations: [],
+      toolsUsed: [{
+        name: 'update_todo_list', timestamp: '2026-09-05T10:02:00Z',
+        eventType: 'tool_finished', title: 'Mise à jour du plan', toolName: 'update_todo_list',
+        payload: { parameters: { title: 'Création du projet', todos: [
+          { content: 'Initialiser le projet', status: 'completed' },
+          { content: 'Créer l’interface', status: 'completed' },
+        ] } },
+        createdAt: '2026-09-05T10:02:00Z',
+      }],
+      sendState: 'sent', errors: [], associatedArtifacts: [], associatedApprovals: [],
+      fileChanges: [], createdAt: '2026-09-05T10:03:00Z',
+    }])
+
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('Création du projet')).toBeVisible()
+    expect(screen.getByText('2/2 terminées')).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Plan d’exécution' })).toHaveClass('is-complete')
   })
 
   it('does not carry a live sub-agent frame into another conversation', async () => {

@@ -40,6 +40,8 @@ import { SubagentStatusPanel, taggedSubagentReasoningId } from '../components/Su
 import { FittedHtmlFrame } from '../components/FittedHtmlFrame'
 import { ConversationMapCard } from '../components/Map/ConversationMapCard'
 import { mapSpecsFromActivities } from '../lib/mapSpec'
+import { ExecutionPlanCard } from '../components/ExecutionPlan/ExecutionPlanCard'
+import { executionPlanFromActivities } from '../lib/executionPlan'
 import bobAvatarIcon from '../assets/bob-avatar.png'
 import { mergeVisibleMessages } from '../lib/chatUtils'
 
@@ -1531,6 +1533,19 @@ export default function ChatView() {
   const showSubagentStatus = isRunning
     && !!displayedConversationId
     && activeSessionRef.current?.conversationId === displayedConversationId
+  const liveExecutionPlan = executionPlanFromActivities(visibleActivities)
+  const persistedExecutionPlan = (() => {
+    for (let index = visibleMsgs.length - 1; index >= 0; index -= 1) {
+      const message = visibleMsgs[index]
+      if (message.role !== 'assistant') continue
+      const plan = executionPlanFromActivities(message.activities)
+      if (plan) return plan
+    }
+    return null
+  })()
+  // Never show an older completed plan while a new run is still waiting to
+  // publish its own plan snapshot.
+  const displayedExecutionPlan = isRunning ? liveExecutionPlan : persistedExecutionPlan
 
   // ── Render ───────────────────────────────────────────────────
   return (
@@ -1648,6 +1663,11 @@ export default function ChatView() {
         aria-label="Messages de la conversation"
         style={{ flex: 1, overflowY: 'auto', padding: '8px 0', display: visibleMsgs.length === 0 && !loadError && !loadingHistory ? 'none' : 'block' }}
       >
+        {displayedExecutionPlan ? (
+          <div className="execution-plan-sticky">
+            <ExecutionPlanCard plan={displayedExecutionPlan} live={isRunning} />
+          </div>
+        ) : null}
         {loadError ? (
           <LoadErrorBanner
             error={loadError}

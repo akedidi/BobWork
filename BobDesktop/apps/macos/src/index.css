@@ -1509,6 +1509,126 @@
     font: 10.5px/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   }
   .msg-assistant > .thinking-activity { margin-top: -2px; margin-bottom: 10px; }
+  .execution-plan-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    max-width: 720px;
+    margin: 0 auto 12px;
+    padding: 6px 20px 4px;
+    background: linear-gradient(to bottom, var(--bg-app) 82%, transparent);
+  }
+  .execution-plan-card {
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-surface) 96%, var(--accent));
+    box-shadow: 0 6px 22px color-mix(in srgb, #000 10%, transparent);
+  }
+  .execution-plan-card.is-complete {
+    border-color: color-mix(in srgb, #22c55e 28%, var(--border));
+  }
+  .execution-plan-card__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 38px;
+    padding: 7px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+  }
+  .execution-plan-card__header:hover { background: var(--bg-hover); }
+  .execution-plan-card__header:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .execution-plan-card__title {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 7px;
+  }
+  .execution-plan-card__title svg { flex: 0 0 auto; color: var(--accent); }
+  .execution-plan-card__title strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .execution-plan-card__count {
+    color: var(--text-muted);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .execution-plan-card__chevron {
+    color: var(--text-muted);
+    transition: transform .16s ease;
+  }
+  .execution-plan-card__header[aria-expanded='false'] .execution-plan-card__chevron { transform: rotate(-90deg); }
+  .execution-plan-card__progress { height: 2px; background: var(--border); }
+  .execution-plan-card__progress span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width .24s ease;
+  }
+  .execution-plan-card.is-complete .execution-plan-card__progress span { background: #22c55e; }
+  .execution-plan-card__steps {
+    display: grid;
+    gap: 1px;
+    max-height: 240px;
+    margin: 0;
+    padding: 6px 12px 9px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    list-style: none;
+  }
+  .execution-plan-card__steps li {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 7px;
+    min-height: 27px;
+    padding: 4px 1px;
+    color: var(--text-secondary);
+  }
+  .execution-plan-card__steps li > span:nth-child(2) { min-width: 0; }
+  .execution-plan-card__steps strong {
+    display: block;
+    overflow-wrap: anywhere;
+    font-size: 11.5px;
+    font-weight: 520;
+    line-height: 1.4;
+  }
+  .execution-plan-card__steps small {
+    display: block;
+    margin-top: 1px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    line-height: 1.35;
+  }
+  .execution-plan-card__steps em {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-style: normal;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+  .execution-plan-card__status { padding-top: 1px; color: var(--text-muted); }
+  .execution-plan-card__status svg { display: block; width: 14px; height: 14px; }
+  .execution-plan-card__steps .is-running { color: var(--text-primary); }
+  .execution-plan-card__steps .is-running .execution-plan-card__status { color: var(--accent); }
+  .execution-plan-card__steps .is-running .execution-plan-card__status svg { animation: task-spin 1s linear infinite; }
+  .execution-plan-card__steps .is-completed .execution-plan-card__status { color: #22c55e; }
+  .execution-plan-card__steps .is-completed strong { color: var(--text-muted); }
+  .execution-plan-card__steps .is-failed .execution-plan-card__status { color: #ef4444; }
   .chrome-snapshot-stack {
     display: flex; flex-direction: column; gap: 10px; margin-top: 10px;
   }
