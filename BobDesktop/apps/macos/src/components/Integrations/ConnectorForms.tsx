@@ -1,4 +1,4 @@
-import { slugifyName } from '../../hooks/useConnectorForms'
+import { createEnvironmentField, environmentFieldsAreValid, slugifyName } from '../../hooks/useConnectorForms'
 import { useT } from '../../i18n'
 
 const fieldLabelStyle = { display: 'flex', flexDirection: 'column' as const, gap: 4, fontSize: 11.5, color: 'var(--text-secondary)' }
@@ -110,6 +110,13 @@ export function AddApiKeyForm({ apiKeyForm, setApiKeyForm, persistApiKey, cancel
 
 export function AddMcpForm({ mcpForm, setMcpForm, persistMcp, cancelEdit }: any) {
   const t = useT()
+  const updateEnvironmentField = (id: string, patch: Record<string, string>) => {
+    setMcpForm((value: any) => ({
+      ...value,
+      envFields: value.envFields.map((field: any) => field.id === id ? { ...field, ...patch } : field),
+    }))
+  }
+  const environmentValid = environmentFieldsAreValid(mcpForm.envFields)
   return (
     <>
       <label>{t('common.name')}<input value={mcpForm.name} onChange={event => setMcpForm((value: any) => ({ ...value, name: slugifyName(event.target.value) }))} placeholder="mon-serveur" /></label>
@@ -128,22 +135,57 @@ export function AddMcpForm({ mcpForm, setMcpForm, persistMcp, cancelEdit }: any)
         <label>{t('integrations.arguments')}<input value={mcpForm.args} onChange={event => setMcpForm((value: any) => ({ ...value, args: event.target.value }))} placeholder="server.py --flag" /></label>
       )}
       {mcpForm.transport === 'stdio' && (
-        <label>{t('integrations.envVars')}
-          <textarea value={mcpForm.envText} onChange={event => setMcpForm((value: any) => ({ ...value, envText: event.target.value }))} placeholder={'API_TOKEN=\${API_TOKEN}\nDEBUG=1'} rows={3} />
-        </label>
+        <details className="mcp-advanced-config" key={mcpForm.originalName || 'new'} open={mcpForm.originalName ? true : undefined}>
+          <summary>{t('integrations.advancedOptional')}</summary>
+          <p className="settings-note">{t('integrations.envVarsHint')}</p>
+          <div className="mcp-environment-fields">
+            {mcpForm.envFields.map((field: any) => (
+              <div className="mcp-environment-row" key={field.id}>
+                <input
+                  aria-label={t('integrations.envKey')}
+                  value={field.key}
+                  onChange={event => updateEnvironmentField(field.id, { key: event.target.value })}
+                  placeholder="API_TOKEN"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <input
+                  aria-label={t('integrations.envValue')}
+                  value={field.value}
+                  onChange={event => updateEnvironmentField(field.id, { value: event.target.value })}
+                  placeholder={field.persistedKey ? t('integrations.keepExistingValue') : '…'}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="danger-link"
+                  aria-label={t('integrations.removeEnvVar', { name: field.key || t('integrations.envVar') })}
+                  onClick={() => setMcpForm((value: any) => ({ ...value, envFields: value.envFields.filter((item: any) => item.id !== field.id) }))}
+                >
+                  {t('common.delete')}
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="secondary-btn mcp-add-environment"
+            onClick={() => setMcpForm((value: any) => ({ ...value, envFields: [...value.envFields, createEnvironmentField()] }))}
+          >
+            {t('integrations.addEnvVar')}
+          </button>
+          {!environmentValid && <p className="plugin-version-warning" role="alert">{t('integrations.invalidEnvVars')}</p>}
+        </details>
       )}
       {mcpForm.transport !== 'stdio' && (
         <label>{t('integrations.httpHeaders')}
           <textarea value={mcpForm.headersText} onChange={event => setMcpForm((value: any) => ({ ...value, headersText: event.target.value }))} placeholder={'Authorization: Bearer …\nX-Api-Key: …'} rows={3} />
         </label>
       )}
-      {mcpForm.transport !== 'stdio' && (
-        <label>{t('integrations.envVars')}
-          <textarea value={mcpForm.envText} onChange={event => setMcpForm((value: any) => ({ ...value, envText: event.target.value }))} placeholder="OPTIONNEL=valeur" rows={2} />
-        </label>
-      )}
       {mcpForm.originalName && <p className="settings-note">{t('integrations.keepExistingSecret')}</p>}
-      <button className="btn-primary" disabled={!mcpForm.name || !mcpForm.commandOrUrl} onClick={() => void persistMcp()}>{mcpForm.originalName ? t('common.save') : t('integrations.addWithBobShell')}</button>
+      <button className="btn-primary" disabled={!mcpForm.name || !mcpForm.commandOrUrl || !environmentValid} onClick={() => void persistMcp()}>{mcpForm.originalName ? t('common.save') : t('integrations.addWithBobShell')}</button>
       {mcpForm.originalName && <button className="secondary-btn" onClick={cancelEdit}>{t('common.cancel')}</button>}
     </>
   )

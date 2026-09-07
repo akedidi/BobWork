@@ -9,18 +9,45 @@ export function slugifyName(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
 }
 
-export function parseEnvLines(text: string): Record<string, string> {
+export interface EnvironmentField {
+  id: string
+  key: string
+  value: string
+  persistedKey?: string
+}
+
+let environmentFieldSequence = 0
+
+export function createEnvironmentField(key = '', persisted = false): EnvironmentField {
+  environmentFieldSequence += 1
+  return { id: `env-${environmentFieldSequence}`, key, value: '', persistedKey: persisted ? key : undefined }
+}
+
+export function environmentFieldsToRecord(fields: EnvironmentField[]): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const eq = trimmed.indexOf('=')
-    if (eq <= 0) continue
-    const key = trimmed.slice(0, eq).trim()
-    const value = trimmed.slice(eq + 1).trim()
+  for (const field of fields) {
+    const key = field.key.trim()
+    const value = field.value.trim()
     if (key && value) out[key] = value
   }
   return out
+}
+
+export function environmentFieldsAreValid(fields: EnvironmentField[]): boolean {
+  const populatedKeys = fields.map(field => field.key.trim()).filter(Boolean)
+  if (new Set(populatedKeys).size !== populatedKeys.length) return false
+  return fields.every(field => {
+    const key = field.key.trim()
+    const value = field.value.trim()
+    if (!key && !value) return true
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return false
+    return Boolean(value) || field.persistedKey === key
+  })
+}
+
+export function removedEnvironmentKeys(fields: EnvironmentField[], originalKeys: string[]): string[] {
+  const currentKeys = new Set(fields.map(field => field.key.trim()).filter(Boolean))
+  return originalKeys.filter(key => !currentKeys.has(key))
 }
 
 export function parseHeaderLines(text: string): Record<string, string> {
@@ -45,7 +72,8 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
     transport: 'stdio',
     commandOrUrl: '',
     args: '',
-    envText: '',
+    envFields: [] as EnvironmentField[],
+    originalEnvKeys: [] as string[],
     headersText: '',
   })
   const [publicApiForm, setPublicApiForm] = useState({
@@ -91,7 +119,8 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
   }
 
   const persistMcp = async () => {
-    const env = parseEnvLines(mcpForm.envText)
+    const env = environmentFieldsToRecord(mcpForm.envFields)
+    const envRemove = removedEnvironmentKeys(mcpForm.envFields, mcpForm.originalEnvKeys)
     const headers = parseHeaderLines(mcpForm.headersText)
     await persistConnector(
       {
@@ -102,10 +131,11 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
         args: mcpForm.args.split(/\s+/).filter(Boolean),
         enabled: true,
         env: Object.keys(env).length ? env : undefined,
+        envRemove: envRemove.length ? envRemove : undefined,
         headers: Object.keys(headers).length ? headers : undefined,
       },
       mcpForm.originalName ? t('integrations.mcpUpdated') : t('integrations.mcpAdded'),
-      () => setMcpForm({ originalName: '', name: '', transport: 'stdio', commandOrUrl: '', args: '', envText: '', headersText: '' }),
+      () => setMcpForm({ originalName: '', name: '', transport: 'stdio', commandOrUrl: '', args: '', envFields: [], originalEnvKeys: [], headersText: '' }),
     )
   }
 
@@ -198,13 +228,15 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
   }
 
   const editMcp = (server: McpServer) => {
+    const envKeys = redactedFieldNames(server.raw?.env)
     setMcpForm({
       originalName: server.name,
       name: server.name,
       transport: server.transport,
       commandOrUrl: server.commandOrUrl,
       args: server.args.join(' '),
-      envText: redactedFieldNames(server.raw?.env).map(key => `${key}=`).join('\n'),
+      envFields: envKeys.map(key => createEnvironmentField(key, true)),
+      originalEnvKeys: envKeys,
       headersText: redactedFieldNames(server.raw?.headers).map(key => `${key}:`).join('\n'),
     })
   }
@@ -233,7 +265,7 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
     })
   }
 
-  const cancelMcpEdit = () => setMcpForm({ originalName: '', name: '', transport: 'stdio', commandOrUrl: '', args: '', envText: '', headersText: '' })
+  const cancelMcpEdit = () => setMcpForm({ originalName: '', name: '', transport: 'stdio', commandOrUrl: '', args: '', envFields: [], originalEnvKeys: [], headersText: '' })
   const cancelPublicApiEdit = () => setPublicApiForm({ originalName: '', name: '', url: '', transport: 'streamable-http' })
   const cancelKeyedApiEdit = () => setApiKeyForm({ originalName: '', name: '', url: '', transport: 'http', authMode: 'query', headerName: 'X-Api-Key', queryName: 'api_key', secret: '', envName: 'API_KEY' })
 

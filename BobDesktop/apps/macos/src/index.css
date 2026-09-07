@@ -1859,6 +1859,14 @@
   .extension-editor label { display: block; margin-bottom: 12px; color: var(--text-secondary); font-size: 11.5px; }
   .extension-editor input, .extension-editor textarea, .extension-editor select { display: block; width: 100%; margin-top: 5px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); color: var(--text-primary); font: inherit; font-size: 12px; }
   .extension-editor textarea { resize: vertical; line-height: 1.5; }
+  .mcp-advanced-config { margin: 0 0 12px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-hover); }
+  .mcp-advanced-config > summary { color: var(--text-secondary); font-size: 11.5px; font-weight: 600; cursor: pointer; }
+  .mcp-advanced-config > .settings-note { margin: 9px 0; }
+  .mcp-environment-fields { display: grid; gap: 7px; }
+  .mcp-environment-row { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(140px, 1.2fr) auto; gap: 7px; align-items: end; }
+  .extension-editor .mcp-environment-row input { min-width: 0; margin: 0; }
+  .mcp-environment-row .danger-link { align-self: stretch; padding: 0 4px; white-space: nowrap; }
+  .mcp-add-environment { margin-top: 9px; }
   .mini-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary); }
 
   .skills-workspace { width: 100%; max-width: 1120px; min-height: 0; }

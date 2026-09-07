@@ -76,6 +76,8 @@ pub struct SaveMcpServerInput {
     #[serde(default)]
     pub env: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
+    pub env_remove: Vec<String>,
+    #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
 }
 

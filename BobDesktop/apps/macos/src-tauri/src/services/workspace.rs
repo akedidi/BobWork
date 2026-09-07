@@ -658,27 +658,18 @@ impl WorkspaceService {
             );
         }
 
-        if input.env.is_some() || input.original_name.is_some() {
+        if input.env.is_some() || !input.env_remove.is_empty() || input.original_name.is_some() {
             let mut env_map = previous
                 .as_ref()
                 .and_then(|value| value.get("env"))
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            for (key, value) in input.env.unwrap_or_default() {
-                let key = key.trim();
-                let value = value.trim();
-                if key.is_empty() || value.is_empty() {
-                    continue;
-                }
-                if !valid_env_key(key) {
-                    return Err(AppError::ValidationFailed(format!(
-                        "Nom de variable d’environnement invalide : {}",
-                        key
-                    )));
-                }
-                env_map.insert(key.to_string(), Value::String(value.to_string()));
-            }
+            apply_env_changes(
+                &mut env_map,
+                input.env_remove,
+                input.env.unwrap_or_default(),
+            )?;
             if !env_map.is_empty() {
                 config.insert("env".into(), Value::Object(env_map));
             }
@@ -1125,6 +1116,22 @@ mod mcp_tests {
     }
 
     #[test]
+    fn structured_environment_changes_can_remove_and_update_values() {
+        let mut env = serde_json::Map::from_iter([
+            ("API_TOKEN".into(), serde_json::Value::String("old".into())),
+            ("DEBUG".into(), serde_json::Value::String("0".into())),
+        ]);
+        super::apply_env_changes(
+            &mut env,
+            vec!["API_TOKEN".into()],
+            std::collections::HashMap::from([("DEBUG".into(), "1".into())]),
+        )
+        .unwrap();
+        assert!(!env.contains_key("API_TOKEN"));
+        assert_eq!(env["DEBUG"], "1");
+    }
+
+    #[test]
     fn editing_a_redacted_api_url_preserves_its_secret_query_value() {
         let edited = super::preserve_redacted_url_secrets(
             "https://api.example.test/v2?api_key=%3Credacted%3E&format=json",
@@ -1368,6 +1375,34 @@ fn valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn apply_env_changes(
+    env: &mut Map<String, Value>,
+    removed: Vec<String>,
+    updates: std::collections::HashMap<String, String>,
+) -> AppResult<()> {
+    for key in removed {
+        let key = key.trim();
+        if !key.is_empty() {
+            env.remove(key);
+        }
+    }
+    for (key, value) in updates {
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        if !valid_env_key(key) {
+            return Err(AppError::ValidationFailed(format!(
+                "Nom de variable d’environnement invalide : {}",
+                key
+            )));
+        }
+        env.insert(key.to_string(), Value::String(value.to_string()));
+    }
+    Ok(())
 }
 
 fn parse_frontmatter(content: &str) -> (Value, String) {

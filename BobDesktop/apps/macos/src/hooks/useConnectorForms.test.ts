@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { parseEnvLines, parseHeaderLines, redactedFieldNames, redactedQueryName, slugifyName } from './useConnectorForms'
+import { createEnvironmentField, environmentFieldsAreValid, environmentFieldsToRecord, parseHeaderLines, redactedFieldNames, redactedQueryName, removedEnvironmentKeys, slugifyName } from './useConnectorForms'
 
 describe('connector form helpers', () => {
-  it('keeps only valid populated environment and header values', () => {
-    expect(parseEnvLines('TOKEN=next\nEXISTING=\n# ignored')).toEqual({ TOKEN: 'next' })
+  it('serializes only complete structured environment fields', () => {
+    expect(environmentFieldsToRecord([
+      { ...createEnvironmentField(), key: 'TOKEN', value: 'next' },
+      createEnvironmentField(),
+    ])).toEqual({ TOKEN: 'next' })
     expect(parseHeaderLines('Authorization: Bearer next\nX-Keep:\n# ignored')).toEqual({ Authorization: 'Bearer next' })
+  })
+
+  it('validates names, duplicates and preserved secret values', () => {
+    expect(environmentFieldsAreValid([{ ...createEnvironmentField(), key: 'DEBUG', value: '1' }])).toBe(true)
+    expect(environmentFieldsAreValid([createEnvironmentField('API_TOKEN', true)])).toBe(true)
+    expect(environmentFieldsAreValid([{ ...createEnvironmentField(), key: 'BAD-NAME', value: '1' }])).toBe(false)
+    expect(environmentFieldsAreValid([
+      { ...createEnvironmentField(), key: 'DEBUG', value: '1' },
+      { ...createEnvironmentField(), key: 'DEBUG', value: '0' },
+    ])).toBe(false)
+  })
+
+  it('identifies a persisted variable removed by the user', () => {
+    expect(removedEnvironmentKeys([createEnvironmentField('DEBUG', true)], ['API_TOKEN', 'DEBUG'])).toEqual(['API_TOKEN'])
   })
 
   it('recovers secret field names without exposing values', () => {

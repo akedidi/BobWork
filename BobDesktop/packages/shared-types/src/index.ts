@@ -1094,6 +1094,8 @@ export interface SaveMcpServerInput {
   enabled: boolean;
   /** Optional environment variables (use ${NAME} placeholders when possible). */
   env?: Record<string, string>;
+  /** Existing environment variables explicitly removed while editing. */
+  envRemove?: string[];
   /** Optional HTTP headers for remote MCP (Authorization, X-Api-Key, …). */
   headers?: Record<string, string>;
 }
