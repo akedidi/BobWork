@@ -1,91 +1,91 @@
 # Bob Work
 
-Bob Work regroupe dans un seul dépôt l’application desktop macOS et son client mobile. Le dossier qui contient le clone n’est pas un niveau supplémentaire du dépôt : `BobDesktop/`, `BobMobile/` et ce README sont directement versionnés.
+Bob Work brings the macOS desktop application and its mobile client together in one repository. The directory containing the clone is not an additional repository level: `BobDesktop/`, `BobMobile/`, and this README are versioned directly at the Git root.
 
-## Organisation du dépôt
+## Repository layout
 
 ```text
-racine Git
-├── BobDesktop/              application macOS, backend local et runtimes
-│   ├── apps/macos/          frontend React + shell Tauri/Rust
-│   ├── packages/            types et composants partagés du desktop
-│   ├── docs/                architecture, sécurité et exploitation
-│   └── README.md            guide complet du desktop
-├── BobMobile/               client Expo iOS/Android
-│   ├── src/                 écrans, API distante et état applicatif
-│   ├── assets/              ressources graphiques
-│   └── README.md            guide complet du mobile
-├── .github/workflows/       vérification, release et smoke tests
-└── README.md                vue d’ensemble du produit
+Git root
+├── BobDesktop/              macOS application, local backend, and runtimes
+│   ├── apps/macos/          React frontend and Tauri/Rust shell
+│   ├── packages/            shared desktop types and components
+│   ├── docs/                architecture, security, and operations
+│   └── README.md            complete desktop guide
+├── BobMobile/               Expo client for iOS and Android
+│   ├── src/                 screens, remote API, and application state
+│   ├── assets/              visual resources
+│   └── README.md            complete mobile guide
+├── .github/workflows/       verification, release, and smoke tests
+└── README.md                product overview
 ```
 
-Les deux projets conservent leurs gestionnaires de dépendances propres : **pnpm** pour BobDesktop et **npm** pour BobMobile. Ils ne forment pas un workspace Node unique.
+The two projects keep separate dependency managers: **pnpm** for BobDesktop and **npm** for BobMobile. They are not a single Node workspace.
 
-## Architecture produit
+## Product architecture
 
 ```text
 ┌──────────────────── BobMobile ────────────────────┐
 │ React Native / Expo                               │
-│ conversations · projets · fichiers · réglages     │
-│ localisation opt-in · notifications · SSE         │
+│ conversations · projects · files · settings       │
+│ opt-in location · notifications · SSE             │
 └───────────────────────┬───────────────────────────┘
-                        │ HTTPS authentifié
+                        │ authenticated HTTPS
                         │ REST + Server-Sent Events
                         ▼
 ┌──────────────────── BobDesktop ───────────────────┐
 │ React / TypeScript / Vite                         │
-│ chat · previews · plugins · intégrations          │
+│ chat · previews · plugins · integrations          │
 ├───────────────────────┬───────────────────────────┤
-│ IPC Tauri             │ API mobile / MCP gateway │
+│ Tauri IPC             │ mobile API / MCP gateway │
 ├───────────────────────▼───────────────────────────┤
-│ Backend Rust                                      │
+│ Rust backend                                      │
 │ services · permissions · scheduler · SQLite       │
-│ coffre local · artefacts · gestion des runtimes   │
+│ local vault · artifacts · runtime management      │
 └───────────┬───────────────────────┬───────────────┘
             │ bob run              │ stdio / HTTP
             ▼                      ▼
 ┌────────────────────┐   ┌─────────────────────────┐
 │ IBM Bob Shell      │   │ MCP · APIs · SSH        │
-│ agent · modes      │   │ outils spécialisés      │
-│ skills · sessions  │   │ systèmes distants       │
+│ agent · modes      │   │ specialized tools       │
+│ skills · sessions  │   │ remote systems          │
 └────────────────────┘   └─────────────────────────┘
 ```
 
-BobDesktop est la source de vérité. Il exécute Bob Shell, conserve l’historique SQLite, applique les autorisations et gère les ressources locales. BobMobile est un client distant : il ne duplique pas la base de conversations et utilise l’API authentifiée exposée par le Mac.
+BobDesktop is the source of truth. It runs Bob Shell, stores SQLite history, enforces permissions, and manages local resources. BobMobile is a remote client: it does not duplicate the conversation database and uses the authenticated API exposed by the Mac.
 
-## Architecture des runtimes
+## Runtime architecture
 
-Un plugin décrit une capacité fonctionnelle ; un runtime fournit les exécutables et bibliothèques nécessaires à cette capacité. Les deux notions restent séparées.
+A plugin describes a product capability; a runtime supplies the executables and libraries required to run that capability. These concepts remain separate.
 
 ```text
-                         demande utilisateur
-                                │
-                                ▼
-                     plugin / outil sélectionné
-                                │
-                       résolution de capacité
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-      runtime partagé    runtime externe     runtime privé
-      livré/réutilisé    optionnel géré      embarqué par un
-      par Bob Work       par Bob Work        plugin personnel
-              │                 │                 │
-              └─────────────────┴─────────────────┘
-                                │
-                     processus contrôlé local
-                    timeout · environnement · logs
+                          user request
+                               │
+                               ▼
+                     selected plugin / tool
+                               │
+                       capability resolution
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+       shared runtime    managed external   private runtime
+       bundled/reused    optional runtime   explicitly bundled
+       by Bob Work       managed by Bob     by a personal plugin
+              │                │                │
+              └────────────────┴────────────────┘
+                               │
+                    controlled local process
+                  timeout · environment · logs
 ```
 
-| Classe | Exemple | Cycle de vie |
+| Class | Example | Lifecycle |
 |---|---|---|
-| Partagé | visualisation, diagrammes, artefacts, Python compatible | Mutualisé entre plusieurs fonctionnalités ; non supprimé lorsqu’il appartient au cœur de l’application |
-| Externe géré | Qiskit ou CodeGraph isolé | Proposé uniquement lorsqu’une tâche le nécessite ; installation, contrôle d’intégrité et suppression lorsque la stratégie est supportée |
-| Privé de plugin | dépendance explicitement embarquée par l’auteur d’un plugin personnel | Déployé avec ce plugin et isolé de la plateforme partagée |
+| Shared | visualization, diagrams, artifacts, compatible Python | Shared by multiple capabilities; not removable when it belongs to the application core |
+| Managed external | isolated Qiskit or CodeGraph | Suggested only when a task needs it; installed, integrity-checked, and removable when the strategy is supported |
+| Plugin private | dependency explicitly bundled by the author of a personal plugin | Deployed with that plugin and isolated from the shared platform |
 
-Les dépendances externes non gérables automatiquement restent détectées et documentées ; Bob Work demande alors une installation manuelle au lieu de prendre silencieusement possession d’un runtime système.
+External dependencies that cannot be managed safely remain detectable and documented. Bob Work then asks for manual installation instead of silently taking ownership of a system runtime.
 
-## Démarrage rapide
+## Quick start
 
 ### BobDesktop
 
@@ -95,7 +95,7 @@ pnpm install
 pnpm dev
 ```
 
-Prérequis principaux : macOS 12+, Node.js 22, pnpm 10, Rust stable et IBM Bob Shell disponible sur le `PATH`.
+Main requirements: macOS 12+, Node.js 22, pnpm 10, stable Rust, and IBM Bob Shell available on `PATH`.
 
 ### BobMobile
 
@@ -105,9 +105,9 @@ npm install
 npm start
 ```
 
-Ouvrez ensuite Bob Work sur le Mac, activez **Réglages → Télécommande**, puis utilisez le lien sécurisé dans BobMobile.
+Then open Bob Work on the Mac, enable **Settings → Remote Control**, and use the secure link in BobMobile.
 
-## Commandes de validation
+## Verification commands
 
 ```bash
 # Desktop
@@ -123,21 +123,21 @@ npm run test:visualization
 npm run test:maps
 ```
 
-## Documentation détaillée
+## Detailed documentation
 
-- [Architecture et développement de BobDesktop](BobDesktop/README.md)
-- [Architecture et développement de BobMobile](BobMobile/README.md)
-- [Documents techniques du desktop](BobDesktop/docs/)
+- [BobDesktop architecture and development](BobDesktop/README.md)
+- [BobMobile architecture and development](BobMobile/README.md)
+- [Desktop technical documents](BobDesktop/docs/)
 
-## Sécurité en bref
+## Security overview
 
-- secrets conservés côté Mac dans le coffre local ;
-- API mobile protégée par un jeton et révocable avec la télécommande ;
-- autorisations sensibles soumises aux politiques de Bob Work ;
-- sandbox locale disponible pour limiter l’accès au disque ;
-- position actuelle désactivée par défaut et utilisée seulement après consentement explicite ;
-- aucun secret ni fichier `.env` ne doit être commité.
+- Secrets remain on the Mac in the local encrypted vault.
+- The mobile API uses a revocable bearer token controlled by Remote Control.
+- Sensitive actions follow Bob Work permission and approval policies.
+- Local sandbox mode can restrict disk access.
+- Current location is disabled by default and used only after explicit consent.
+- Secrets and `.env` files must never be committed.
 
-## Contribution
+## Contributing
 
-Travaillez dans le dossier du projet concerné, exécutez ses tests puis mettez à jour son README si l’architecture, les commandes ou le cycle de vie des runtimes évoluent. Les workflows GitHub à la racine valident et publient actuellement BobDesktop.
+Work inside the relevant project directory, run that project's tests, and update its README whenever architecture, commands, or runtime lifecycles change. Root GitHub workflows currently verify and publish BobDesktop.

@@ -1,100 +1,100 @@
 # BobMobile
 
-BobMobile est le client iOS/Android de Bob Work. Il permet de suivre et piloter depuis un téléphone le moteur Bob Shell qui continue de s’exécuter sur le Mac.
+BobMobile is the iOS and Android client for Bob Work. It lets users monitor and control from a phone the Bob Shell engine that continues to run on their Mac.
 
-Le desktop reste la source de vérité : BobMobile ne possède ni seconde base de conversations, ni copie indépendante des projets, plugins ou autorisations.
+The desktop remains the source of truth. BobMobile does not maintain a second conversation database or independent copies of projects, plugins, and permissions.
 
-## Fonctionnalités
+## Features
 
-- conversations, projets et historique synchronisés depuis BobDesktop ;
-- streaming de la réponse et de l’activité Bob via Server-Sent Events ;
-- lancement, arrêt, reprise et validation des tâches ;
-- sélection de modes, plugins, skills, MCP, APIs et bases autorisés ;
-- pièces jointes, messages vocaux, fichiers produits et previews HTML ;
-- cartes interactives, plusieurs points d’intérêt et itinéraires ;
-- position actuelle opt-in utilisable comme origine d’itinéraire ;
-- notifications push et indicateurs de conversations non lues ;
-- gestion des chats archivés ;
-- interface française, anglaise et espagnole.
+- Conversations, projects, and history synchronized from BobDesktop.
+- Bob response and activity streaming through Server-Sent Events.
+- Start, stop, resume, and approve tasks.
+- Select authorized modes, plugins, skills, MCP servers, APIs, and databases.
+- Attachments, voice messages, generated files, and HTML previews.
+- Interactive maps, multiple points of interest, and routes.
+- Opt-in current location that can be used as a route origin.
+- Push notifications and unread-conversation indicators.
+- Archived chat management.
+- French, English, and Spanish user interface.
 
-![Aperçu de la liste des conversations BobMobile](docs/images/conversations.png)
+![BobMobile conversation list](docs/images/conversations.png)
 
 ## Architecture
 
 ```text
-┌──────────────────────── Application Expo ────────────────────────┐
-│ App.tsx                                                          │
-│ navigation entre conversations, projets, activité, fichiers      │
-│ et réglages                                                       │
+┌────────────────────────── Expo application ───────────────────────┐
+│ App.tsx                                                           │
+│ navigation across conversations, projects, activity, files,      │
+│ and settings                                                      │
 ├───────────────────────────────────────────────────────────────────┤
-│ Écrans                           Composants                        │
-│ ChatScreen                      Prompt / modales / cartes          │
-│ ConversationsScreen             previews WebView / markdown       │
-│ ProjectsScreen                  barres de statut / sélecteurs      │
+│ Screens                           Components                       │
+│ ChatScreen                       prompt / modals / maps            │
+│ ConversationsScreen              WebView previews / Markdown      │
+│ ProjectsScreen                   status bars / selectors          │
 │ FilesScreen · SettingsScreen                                     │
 ├───────────────────────────┬───────────────────────────────────────┤
 │ AppContext                │ BobApi                                │
-│ session · cache mémoire   │ REST JSON · uploads · SSE             │
-│ langue · état réseau      │ jeton Bearer                          │
+│ session · memory cache    │ REST JSON · uploads · SSE             │
+│ locale · network state    │ bearer token                          │
 ├───────────────────────────▼───────────────────────────────────────┤
-│ SecureStore : lien et jeton          Expo modules :               │
-│ aucune base métier locale            location · audio · fichiers  │
+│ SecureStore: link and token          Expo modules:                │
+│ no local business database           location · audio · files     │
 └───────────────────────────┬───────────────────────────────────────┘
                             │ HTTPS
                             ▼
-                 API distante de BobDesktop
+                    BobDesktop remote API
                             │
-                  SQLite · Bob Shell · MCP
+                    SQLite · Bob Shell · MCP
 ```
 
-### Flux d’une conversation
+### Conversation flow
 
 ```text
-prompt mobile
+mobile prompt
     │ POST /conversations/:id/messages
     ▼
-BobDesktop lance Bob Shell
-    │ événements SSE : texte, activité, tâche, approbation
+BobDesktop starts Bob Shell
+    │ SSE events: text, activity, task, approval
     ▼
-BobMobile met à jour l’écran
-    │ GET /messages et /sync
+BobMobile updates the screen
+    │ GET /messages and /sync
     ▼
-état final relu depuis la base SQLite du Mac
+final state reloaded from the Mac SQLite database
 ```
 
-Les rafraîchissements REST réconcilient toujours l’interface avec l’état persistant du Mac. Les événements SSE accélèrent l’affichage, mais ne constituent pas une seconde source de vérité.
+REST refreshes always reconcile the interface with the persistent state on the Mac. SSE events make updates immediate, but they are not a second source of truth.
 
-## Cartes et localisation
+## Maps and location
 
-Les résultats `kind: "bob-map"` produits par les outils cartographiques du desktop sont détectés dans les activités persistées et affichés dans une carte WebView :
+`kind: "bob-map"` results produced by desktop mapping tools are detected in persisted activities and displayed in a WebView map:
 
-- pins rouges numérotés pour les lieux et points d’intérêt ;
-- repères A/B pour un itinéraire ;
-- point bleu réservé à la position actuelle ;
-- tracé et cadrage automatiques de tous les points.
+- Numbered red pins for places and points of interest.
+- A/B markers for routes.
+- A blue dot reserved exclusively for the current device location.
+- Automatic route rendering and framing of every visible point.
 
-La localisation est désactivée par défaut. Son activation dans **Réglages → Position actuelle** demande l’autorisation système en premier plan, puis envoie la coordonnée au BobDesktop connecté. La désactivation efface la coordonnée côté desktop. Aucune collecte en arrière-plan n’est demandée.
+Location is disabled by default. Enabling **Settings → Current Location** requests foreground system permission and sends the coordinate to the connected BobDesktop. Disabling it clears the desktop-side coordinate. The application never requests background location access.
 
-## Connexion à BobDesktop
+## Connecting to BobDesktop
 
-1. Ouvrir Bob Work sur le Mac.
-2. Aller dans **Réglages → Télécommande**.
-3. Activer la télécommande et attendre le statut prêt.
-4. Copier le lien sécurisé puis le coller dans BobMobile.
+1. Open Bob Work on the Mac.
+2. Go to **Settings → Remote Control**.
+3. Enable Remote Control and wait until it is ready.
+4. Copy the secure link and paste it into BobMobile.
 
-Le jeton se trouve dans le fragment du lien, est conservé avec SecureStore et accompagne les requêtes sous forme de Bearer token. Désactiver ou recréer la télécommande révoque le lien précédent.
+The token is stored in the URL fragment, persisted through SecureStore, and sent as a bearer token. Disabling or recreating Remote Control revokes the previous link.
 
-## Prérequis
+## Requirements
 
-- Node.js 22 recommandé ;
-- npm ;
-- Xcode et un simulateur iOS pour le développement macOS ;
-- Android Studio pour un émulateur Android ;
-- une instance BobDesktop accessible pour les scénarios réels.
+- Node.js 22 recommended.
+- npm.
+- Xcode and an iOS Simulator for iOS development on macOS.
+- Android Studio for an Android emulator.
+- A reachable BobDesktop instance for real end-to-end scenarios.
 
-## Installation et développement
+## Installation and development
 
-Depuis la racine Git :
+From the Git root:
 
 ```bash
 cd BobMobile
@@ -102,52 +102,47 @@ npm install
 npm start
 ```
 
-Autres commandes :
+Additional commands:
 
 ```bash
-npm run ios       # génération/build natif et lancement iOS
-npm run android   # génération/build natif et lancement Android
-npm run web       # client web de développement
-npm run mock      # serveur simulé local
+npm run ios       # generate/build native files and launch iOS
+npm run android   # generate/build native files and launch Android
+npm run web       # development web client
+npm run mock      # local simulated server
 ```
 
-Pour une connexion automatique réservée au développement, utilisez les variables Expo prévues dans un fichier `.env` local. Ne commitez jamais le lien ni son jeton.
+Development-only automatic connection can use the documented Expo variables in a local `.env` file. Never commit a connection link or token.
 
-## Structure
+## Project layout
 
 ```text
 BobMobile/
-├── App.tsx                    navigation principale
+├── App.tsx                    main navigation
 ├── src/
-│   ├── api.ts                 client REST authentifié
-│   ├── context/AppContext.tsx connexion, synchronisation et SSE
-│   ├── screens/               écrans fonctionnels
-│   ├── components/            UI réutilisable et carte
-│   ├── types.ts               contrats distants
-│   ├── i18n.ts                catalogues fr/en/es
-│   └── visualizationHtml.ts   sécurisation des previews HTML
-├── assets/                    images et icônes
-├── locales/                   métadonnées natives localisées
-├── scripts/                   mock serveur et utilitaires
-├── app.json                   configuration Expo et permissions
+│   ├── api.ts                 authenticated REST client
+│   ├── context/AppContext.tsx connection, synchronization, and SSE
+│   ├── screens/               product screens
+│   ├── components/            reusable UI and map components
+│   ├── types.ts               remote contracts
+│   ├── i18n.ts                fr/en/es catalogs
+│   └── visualizationHtml.ts   HTML preview hardening
+├── assets/                    images and icons
+├── locales/                   localized native metadata
+├── scripts/                   mock server and release utilities
+├── app.json                   Expo configuration and permissions
 └── package.json
 ```
 
-`ios/`, `.expo/`, `dist/`, `build/` et `node_modules/` sont des sorties locales régénérables et ne sont pas versionnés.
+`ios/`, `.expo/`, `dist/`, `build/`, `.release/`, and `node_modules/` are reproducible local outputs and are not versioned.
 
-## Release iOS sans résidus natifs
+## Clean iOS releases
 
 ```bash
-pnpm ios:release:simulator  # binaire Release non signé, contrôlable localement
-pnpm ios:release:archive    # archive appareil signée pour distribution
+npm run ios:release:simulator  # unsigned Release binary for local validation
+npm run ios:release:archive    # signed device archive for distribution
 ```
 
-La routine supprime les sorties Expo/Xcode du projet, régénère entièrement `ios/` avec
-`expo prebuild --clean`, puis compile dans un DerivedData isolé sous `.release/`. La
-certification finale vérifie la version et le bundle id, refuse les marqueurs Dev Client,
-Metro et écrans de développement, et confirme que `ExpoLocation` est réellement lié au
-binaire natif. Elle évite ainsi qu’un ancien projet iOS ou un ancien pod reste présent
-alors que le JavaScript utilise une version plus récente.
+The release routine removes project-local Expo and Xcode outputs, completely regenerates `ios/` with `expo prebuild --clean`, and builds into isolated DerivedData under `.release/`. Final certification validates the version and bundle identifier, rejects Dev Client, Metro, development-screen markers, source maps, and preview libraries, and confirms that required native modules such as `ExpoLocation` are linked into the binary. This prevents an outdated iOS project or CocoaPod from surviving after JavaScript dependencies change.
 
 ## Tests
 
@@ -160,21 +155,21 @@ npm run test:maps
 npm run doctor
 ```
 
-Avant une livraison, validez au minimum une connexion réelle au Mac, l’envoi d’un prompt, une approbation, l’ouverture d’un artefact et l’activation/désactivation de la localisation sur simulateur ou appareil.
+Before shipping, validate at minimum a real Mac connection, prompt submission, an approval, opening an artifact, and enabling/disabling location on a simulator or physical device.
 
-## Sécurité et confidentialité
+## Security and privacy
 
-- le token de connexion est stocké dans SecureStore ;
-- les secrets d’intégration restent sur BobDesktop ;
-- les previews HTML bloquent la navigation non autorisée ;
-- les permissions photo, microphone, notification et localisation sont demandées au moment utile ;
-- la position n’est jamais activée en arrière-plan ;
-- se déconnecter supprime la session mobile locale, tandis que couper la télécommande révoque l’accès côté Mac.
+- The connection token is stored in SecureStore.
+- Integration secrets remain on BobDesktop.
+- HTML previews block unauthorized navigation.
+- Photo, microphone, notification, and location permissions are requested only when needed.
+- Location is never enabled in the background.
+- Signing out removes the local mobile session; disabling Remote Control revokes access on the Mac.
 
-## Dépannage
+## Troubleshooting
 
-- **Lien expiré** : recréer le lien dans BobDesktop puis reconnecter BobMobile.
-- **Historique indisponible** : vérifier que BobDesktop tourne et que le tunnel est prêt.
-- **Position refusée** : réactiver la permission de BobMobile dans les réglages iOS/Android puis toucher *Actualiser*.
-- **Modules natifs ajoutés** : relancer `npm run ios` ou `npm run android`; un simple refresh Expo peut être insuffisant.
-- **Preview vide** : vérifier l’accès réseau aux ressources autorisées et consulter les logs Metro/WebView.
+- **Expired link:** recreate the link in BobDesktop and reconnect BobMobile.
+- **History unavailable:** confirm that BobDesktop is running and that its tunnel is ready.
+- **Location denied:** re-enable BobMobile permission in iOS or Android settings, then tap *Refresh*.
+- **Native modules added:** rerun `npm run ios` or `npm run android`; an Expo refresh alone may be insufficient.
+- **Blank preview:** check network access to authorized resources and inspect Metro/WebView logs.
