@@ -293,6 +293,9 @@ describe('MessageBubble', () => {
 })
 
 describe('structured conversation interactions', () => {
+  beforeEach(() => setTestLocale('fr'))
+  afterEach(() => setTestLocale(null))
+
   it('normalizes Bob IDE ask_followup_question choices', () => {
     const interaction = interactionFromActivity({
       sessionId: 'session-1',
@@ -336,6 +339,20 @@ describe('structured conversation interactions', () => {
     })).toBeNull()
   })
 
+  it('keeps an open-ended Bob question even when no buttons were suggested', () => {
+    const interaction = interactionFromActivity({
+      sessionId: 'session-1',
+      conversationId: 'conversation-1',
+      eventType: 'user_input_required',
+      payload: { parameters: { question: 'Quel nom souhaitez-vous donner au projet ?' } },
+    })
+
+    expect(interaction).toMatchObject({
+      question: 'Quel nom souhaitez-vous donner au projet ?',
+      choices: [],
+    })
+  })
+
   it('renders each structured choice as a separate accessible button', () => {
     const onChoose = vi.fn()
     render(<ConversationInteractionCard
@@ -359,5 +376,40 @@ describe('structured conversation interactions', () => {
     expect(screen.getByTestId('conversation-interaction')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Installer et continuer' }))
     expect(onChoose).toHaveBeenCalledWith(expect.objectContaining({ action: 'install_runtime' }))
+
+    onChoose.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: /Autre/ }))
+    const otherInput = screen.getByPlaceholderText('Écrivez votre choix…')
+    expect(otherInput).toHaveFocus()
+    fireEvent.change(otherInput, { target: { value: 'Indexer seulement le dossier src' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer' }))
+    expect(onChoose).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'custom_input',
+      value: 'Indexer seulement le dossier src',
+    }))
+  })
+
+  it('turns an existing Other option into one free-text input instead of duplicating it', () => {
+    const onChoose = vi.fn()
+    render(<ConversationInteractionCard
+      interaction={{
+        id: 'question-with-other',
+        kind: 'question',
+        title: 'Format',
+        question: 'Quel format préférez-vous ?',
+        choices: [
+          { id: 'pdf', label: 'PDF', value: 'PDF' },
+          { id: 'other', label: 'Other', description: 'Specify another format.', value: 'Other' },
+        ],
+      }}
+      busy={false}
+      onChoose={onChoose}
+    />)
+
+    expect(screen.getAllByRole('button', { name: /Other/ })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: /Other/ }))
+    fireEvent.change(screen.getByPlaceholderText('Écrivez votre choix…'), { target: { value: 'SVG interactif' } })
+    fireEvent.submit(screen.getByPlaceholderText('Écrivez votre choix…').closest('form')!)
+    expect(onChoose).toHaveBeenCalledWith(expect.objectContaining({ id: 'other', value: 'SVG interactif' }))
   })
 })

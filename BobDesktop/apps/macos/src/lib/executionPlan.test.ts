@@ -36,4 +36,12 @@ describe('execution plan activity parsing', () => {
   it('ignores unrelated tool activity', () => {
     expect(executionPlanFromActivities([{ toolName: 'write_file', payload: { steps: ['One', 'Two'] } }])).toBeNull()
   })
+
+  it('keeps plans longer than eight steps without truncation', () => {
+    const steps = Array.from({ length: 12 }, (_, index) => ({ content: `Step ${index + 1}`, status: index === 0 ? 'in_progress' : 'pending' }))
+    const plan = executionPlanFromActivities([{ toolName: 'update_todo_list', payload: { todos: steps } }])
+
+    expect(plan?.steps).toHaveLength(12)
+    expect(plan?.steps[11]?.title).toBe('Step 12')
+  })
 })

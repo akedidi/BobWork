@@ -457,7 +457,9 @@ export function interactionFromActivity(event: BobActivityEvent): ConversationIn
       value: String(option.value ?? option.prompt ?? label),
     }
   }).filter((choice): choice is ConversationChoice => choice !== null)
-  if (!question || choices.length === 0) return null
+  // Bob may ask a genuinely open-ended question with no suggested options.
+  // The interaction card will still expose its free-text “Other” answer.
+  if (!question) return null
   return {
     id: String(envelope?.id ?? `${event.sessionId}-${Date.now()}`),
     kind: 'question',
@@ -1745,6 +1747,7 @@ export default function ChatView() {
             )}
             {interaction && (
               <ConversationInteractionCard
+                key={interaction.id}
                 interaction={interaction}
                 busy={interactionBusy}
                 onChoose={handleInteractionChoice}
@@ -2005,6 +2008,27 @@ export function ConversationInteractionCard({
   onChoose: (choice: ConversationChoice) => void
 }) {
   const t = useT()
+  const [otherOpen, setOtherOpen] = useState(false)
+  const [otherValue, setOtherValue] = useState('')
+  const explicitOther = interaction.choices.find(choice => (
+    choice.action === 'custom_input'
+    || /^(other|autre|otro)$/i.test(choice.id.trim())
+    || /^(other|autre|otro)(?:\s*…|\s*\.\.\.)?$/i.test(choice.label.trim())
+  ))
+  const fixedChoices = explicitOther
+    ? interaction.choices.filter(choice => choice !== explicitOther)
+    : interaction.choices
+  const submitOther = () => {
+    const value = otherValue.trim()
+    if (!value || busy) return
+    onChoose({
+      id: explicitOther?.id ?? 'other',
+      label: explicitOther?.label ?? t('chat.otherChoice'),
+      description: explicitOther?.description,
+      value,
+      action: 'custom_input',
+    })
+  }
   return (
     <section
       className="conversation-interaction"
@@ -2015,7 +2039,7 @@ export function ConversationInteractionCard({
       <h3 id={`interaction-title-${interaction.id}`}>{interaction.question}</h3>
       {interaction.detail && <p>{interaction.detail}</p>}
       <div className="conversation-interaction__choices">
-        {interaction.choices.map((choice, index) => (
+        {fixedChoices.map((choice, index) => (
           <button
             key={choice.id}
             type="button"
@@ -2027,7 +2051,33 @@ export function ConversationInteractionCard({
             {choice.description && <span>{choice.description}</span>}
           </button>
         ))}
+        <button
+          type="button"
+          className="conversation-interaction__choice conversation-interaction__choice--other"
+          aria-expanded={otherOpen}
+          disabled={busy}
+          onClick={() => setOtherOpen(value => !value)}
+        >
+          <strong>{explicitOther?.label ?? t('chat.otherChoice')}</strong>
+          <span>{explicitOther?.description ?? t('chat.otherChoiceDescription')}</span>
+        </button>
       </div>
+      {otherOpen && (
+        <form className="conversation-interaction__other" onSubmit={event => { event.preventDefault(); submitOther() }}>
+          <label htmlFor={`interaction-other-${interaction.id}`}>{t('chat.otherChoiceLabel')}</label>
+          <div>
+            <input
+              id={`interaction-other-${interaction.id}`}
+              value={otherValue}
+              disabled={busy}
+              autoFocus
+              placeholder={t('chat.otherChoicePlaceholder')}
+              onChange={event => setOtherValue(event.target.value)}
+            />
+            <button type="submit" disabled={busy || !otherValue.trim()}>{t('chat.otherChoiceSend')}</button>
+          </div>
+        </form>
+      )}
       {busy && <div className="conversation-interaction__busy" role="status"><span className="task-spinner" aria-hidden="true" />{t('chat.interactionInstalling')}</div>}
     </section>
   )

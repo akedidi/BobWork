@@ -2914,6 +2914,64 @@
   border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
 }
 
+.conversation-interaction__choice--other {
+  border-style: dashed;
+}
+
+.conversation-interaction__other {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.conversation-interaction__other > label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.conversation-interaction__other > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+}
+
+.conversation-interaction__other input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.conversation-interaction__other input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.conversation-interaction__other button {
+  min-width: 72px;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.conversation-interaction__other button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
 .conversation-interaction__choice span,
 .conversation-interaction__busy {
   color: var(--text-secondary);
