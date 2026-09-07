@@ -3191,7 +3191,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-visualize",
             name: "Visualize",
-            version: "2.4.0",
+            version: "2.5.0",
             description: "Crée des visualisations interactives avec les runtimes partagés Apache ECharts (graphiques et tableaux de bord), Plotly (statistiques et données scientifiques) et Three.js (scènes 3D). Utilise D2, Mermaid et Graphviz pour les diagrammes. Disponible avec toutes les intégrations et sources de données, sans liaison exclusive à une base.",
             category: "recipe",
             manifest: serde_json::json!({
@@ -3200,7 +3200,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                 "agentic": true,
                 "name": "Visualize",
                 "slug": "visualize",
-                "version": "2.4.0",
+                "version": "2.5.0",
                 "author": "Bob Work",
                 "description": "Visualisations interactives avec Apache ECharts, Plotly et Three.js ; diagrammes avec D2, Mermaid et Graphviz. Utilisable avec toutes les intégrations et sources de données, sans liaison exclusive à une base.",
                 "category": "visualization",
@@ -3217,7 +3217,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "workflow": "Comprendre l’intention et les références source → produire VisualSpec, DiagramSpec ou SceneSpec → valider → router sans LLM additionnel → rendre localement → persister provenance, état d’interaction et présentation responsive.",
                     "sandbox": "bob-runtime-managed"
                 },
-                "instructions": "Ne produis jamais de JavaScript exécutable comme représentation canonique. Produis une spécification sémantique validable et des références d’artefacts, jamais de gros jeux de données dans le prompt. Le Shared Rendering API et ses adaptateurs de confiance déterminent le moteur local. Utilise ECharts pour les graphiques métier, Plotly pour les statistiques et données scientifiques, Three.js uniquement pour les scènes 3D réelles, D2 pour cloud/C4/ERD, Mermaid pour flow/sequence/state et Graphviz pour les graphes dirigés. Préserve les filtres, sélections, zoom/caméra et visibilité lorsqu’un même artefact est modifié. La cible par défaut est d’abord le rendu intégré à la conversation, pas une page Web plein écran : optimise d’abord l’état initial pour le viewport réellement courant d’environ 600 × 420 px, puis pour 720 × 480 px, sans scroll horizontal ni scroll de page vertical. Dans 600 × 420 px, réserve au minimum 240 px à la visualisation principale : en-tête inférieur ou égal à 36 px, bande de navigation inférieure ou égale à 34 px et quatre KPI sur une seule ligne compacte inférieure ou égale à 76 px. Ne passe pas les quatre KPI en grille 2 × 2 avant 480 px ; sous cette largeur, montre deux KPI prioritaires et place les autres dans un onglet ou menu si deux lignes comprimeraient le graphique. Montre uniquement la synthèse indispensable (au plus quatre KPI compacts et une visualisation principale) ; place les vues secondaires, détails, longues légendes, tableaux et journaux derrière des onglets, segments, accordéons, menus ou tiroirs accessibles. Chaque onglet doit lui aussi tenir dans le viewport conversation : présente quatre notes ou cartes courtes en grille 2 × 2 plutôt qu’en pile verticale et condense les libellés ; un tableau ou un journal peut avoir son propre scroll interne. N’utilise jamais overflow:hidden pour masquer du contenu essentiel et n’empile pas verticalement toutes les sections. Utilise des grilles fluides avec minmax(0, 1fr), clamp(), dimensions relatives et ResizeObserver/chart.resize ; évite 100vh, les hauteurs/min-width fixes et les textes qui deviennent inférieurs à 12 px après ajustement. Utilise height:100% seulement dans un conteneur dont Bob Work fournit la hauteur et min-height:0 sur les enfants flex/grid. Déclare toujours une présentation responsive distincte pour conversation, desktop, tablette et mobile : contrôles compacts, légende repliable et focus d’entité ; aucune information essentielle ne doit dépendre du survol. Avant livraison, ouvre et vérifie tous les onglets aux tailles 600 × 420, 720 × 480, 520 × 600 et 390 × 700 : scrollWidth ne doit pas dépasser clientWidth, la zone graphique ne doit pas être écrasée et aucun contenu essentiel ne doit être coupé ; si la densité ne le permet pas sans nuire à la lisibilité, conserve seulement la synthèse dans la conversation et réserve la vue complète au panneau d’aperçu."
+                "instructions": "Ne produis jamais de JavaScript exécutable comme représentation canonique. Produis une spécification sémantique validable et des références d’artefacts, jamais de gros jeux de données dans le prompt. Le Shared Rendering API et ses adaptateurs de confiance déterminent le moteur local. Utilise ECharts pour les graphiques métier, Plotly pour les statistiques et données scientifiques, Three.js uniquement pour les scènes 3D réelles, D2 pour cloud/C4/ERD, Mermaid pour flow/sequence/state et Graphviz pour les graphes dirigés. Préserve les filtres, sélections, zoom/caméra et visibilité lorsqu’un même artefact est modifié. La cible par défaut est d’abord le rendu intégré à la conversation, pas une page Web plein écran : optimise d’abord l’état initial pour le viewport réellement courant d’environ 600 × 420 px, puis pour 720 × 480 px, sans scroll horizontal ni scroll de page vertical. Cette cible compacte ne s’applique pas lorsque l’utilisateur demande explicitement un site, une page Web complète ou un graphique pleine page : préserve alors la composition naturelle, autorise le contenu à dépasser le viewport, ajoute `<meta name=\"bob-preview-mode\" content=\"full-page\">` et vérifie le défilement horizontal et vertical au lieu de supprimer artificiellement le scroll. Dans 600 × 420 px, réserve au minimum 240 px à la visualisation principale : en-tête inférieur ou égal à 36 px, bande de navigation inférieure ou égale à 34 px et quatre KPI sur une seule ligne compacte inférieure ou égale à 76 px. Ne passe pas les quatre KPI en grille 2 × 2 avant 480 px ; sous cette largeur, montre deux KPI prioritaires et place les autres dans un onglet ou menu si deux lignes comprimeraient le graphique. Montre uniquement la synthèse indispensable (au plus quatre KPI compacts et une visualisation principale) ; place les vues secondaires, détails, longues légendes, tableaux et journaux derrière des onglets, segments, accordéons, menus ou tiroirs accessibles. Chaque onglet doit lui aussi tenir dans le viewport conversation : présente quatre notes ou cartes courtes en grille 2 × 2 plutôt qu’en pile verticale et condense les libellés ; un tableau ou un journal peut avoir son propre scroll interne. N’utilise jamais overflow:hidden pour masquer du contenu essentiel et n’empile pas verticalement toutes les sections. Utilise des grilles fluides avec minmax(0, 1fr), clamp(), dimensions relatives et ResizeObserver/chart.resize ; évite 100vh, les hauteurs/min-width fixes et les textes qui deviennent inférieurs à 12 px après ajustement. Utilise height:100% seulement dans un conteneur dont Bob Work fournit la hauteur et min-height:0 sur les enfants flex/grid. Déclare toujours une présentation responsive distincte pour conversation, desktop, tablette et mobile : contrôles compacts, légende repliable et focus d’entité ; aucune information essentielle ne doit dépendre du survol. Avant livraison, ouvre et vérifie tous les onglets aux tailles 600 × 420, 720 × 480, 520 × 600 et 390 × 700 : pour le mode compact, scrollWidth ne doit pas dépasser clientWidth, la zone graphique ne doit pas être écrasée et aucun contenu essentiel ne doit être coupé ; pour une page complète, les contenus dépassant le viewport doivent rester atteignables par le scroll. Si la densité ne le permet pas sans nuire à la lisibilité, conserve seulement la synthèse dans la conversation et réserve la vue complète au panneau d’aperçu."
             }),
         },
         BuiltinPlugin {
@@ -3985,7 +3985,7 @@ mod builtin_tests {
             .iter()
             .find(|plugin| plugin.id == "builtin-visualize")
             .expect("Visualize built-in");
-        assert_eq!(visualize.version, "2.4.0");
+        assert_eq!(visualize.version, "2.5.0");
         let visualize_instructions = visualize
             .manifest
             .get("instructions")
@@ -4001,6 +4001,8 @@ mod builtin_tests {
         assert!(
             visualize_instructions.contains("sans scroll horizontal ni scroll de page vertical")
         );
+        assert!(visualize_instructions.contains("bob-preview-mode"));
+        assert!(visualize_instructions.contains("défilement horizontal et vertical"));
         assert!(visualize_instructions.contains("onglets, segments, accordéons, menus ou tiroirs"));
         assert!(plugins
             .iter()

@@ -1000,6 +1000,8 @@ export const es: MessageTree = {
   canvas: {
     live: 'En directo',
     paused: 'En pausa',
+    fit: 'Ajustar',
+    actualSize: 'Tamaño real',
     pause: 'Pausar',
     resume: 'Reanudar',
     inspect: 'Inspeccionar DOM',

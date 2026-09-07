@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { calculateFittedFrameLayout, isCanvasFrameSource, withLocalThreeRuntime } from './FittedHtmlFrame'
+import { calculateFittedFrameLayout, detectHtmlFrameSizing, isCanvasFrameSource, withLocalThreeRuntime } from './FittedHtmlFrame'
 
 describe('calculateFittedFrameLayout', () => {
   it.each([
@@ -35,6 +35,27 @@ describe('calculateFittedFrameLayout', () => {
 
     expect(layout.scale).toBe(1)
     expect(layout.shouldScroll).toBe(true)
+  })
+
+  it('conserve la taille réelle et les deux axes de scroll pour une page complète', () => {
+    const layout = calculateFittedFrameLayout(
+      { width: 1_200, height: 1_800 },
+      { width: 720, height: 480 },
+      'inline',
+      'natural',
+    )
+
+    expect(layout.scale).toBe(1)
+    expect(layout.shouldScrollX).toBe(true)
+    expect(layout.shouldScrollY).toBe(true)
+    expect(layout.frameHeight).toBe(layout.targetHeight)
+  })
+
+  it('détecte les pages web et respecte une déclaration explicite du mode aperçu', () => {
+    expect(detectHtmlFrameSizing('<html><body><header/><main/><footer/></body></html>')).toBe('natural')
+    expect(detectHtmlFrameSizing('<meta name="bob-preview-mode" content="full-page"><div/>')).toBe('natural')
+    expect(detectHtmlFrameSizing('<meta name="bob-preview-mode" content="compact"><header/><main/><footer/>')).toBe('fit')
+    expect(detectHtmlFrameSizing('<div id="dashboard"></div>')).toBe('fit')
   })
 
   it.each([

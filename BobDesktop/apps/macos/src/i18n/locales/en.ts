@@ -999,6 +999,8 @@ export const en = {
   canvas: {
     live: 'Live',
     paused: 'Paused',
+    fit: 'Fit',
+    actualSize: 'Actual size',
     pause: 'Pause',
     resume: 'Resume',
     inspect: 'Inspect DOM',

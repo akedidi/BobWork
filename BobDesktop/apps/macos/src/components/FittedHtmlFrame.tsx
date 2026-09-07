@@ -6,6 +6,21 @@ import { useT } from '../i18n'
 
 type IntrinsicSize = { width: number; height: number }
 type FrameMode = 'inline' | 'panel'
+type FrameSizing = 'fit' | 'natural'
+
+export function detectHtmlFrameSizing(value: string): FrameSizing {
+  const declared = value.match(/<meta\b[^>]*\bname=["']bob-preview-mode["'][^>]*\bcontent=["']([^"']+)["']/i)?.[1]
+    ?? value.match(/\bdata-bob-preview-mode=["']([^"']+)["']/i)?.[1]
+  if (declared && /^(natural|document|full-page|website)$/i.test(declared.trim())) return 'natural'
+  if (declared && /^(fit|compact|conversation)$/i.test(declared.trim())) return 'fit'
+
+  // Semantic website shells should behave like documents even when an older
+  // generated page does not yet contain Bob Work's explicit preview metadata.
+  const hasMain = /<main\b/i.test(value)
+  const hasFooter = /<footer\b/i.test(value)
+  const hasNavigation = /<nav\b/i.test(value) || /<header\b/i.test(value)
+  return hasMain && hasFooter && hasNavigation ? 'natural' : 'fit'
+}
 
 export function isCanvasFrameSource(
   source: MessageEventSource | null,
@@ -19,6 +34,7 @@ export function calculateFittedFrameLayout(
   intrinsic: IntrinsicSize | null,
   containerSize: IntrinsicSize,
   mode: FrameMode,
+  sizing: FrameSizing = 'fit',
 ) {
   const targetHeight = mode === 'inline'
     ? Math.min(680, Math.max(420, Math.round(containerSize.width * 0.68)))
@@ -34,18 +50,24 @@ export function calculateFittedFrameLayout(
     ? Math.min(1, targetHeight / intrinsic.height)
     : 1
   const conversationFitScale = Math.min(widthScale, heightScale)
-  const scale = mode === 'inline' && conversationFitScale >= 0.68
+  const fittedScale = mode === 'inline' && conversationFitScale >= 0.68
     ? conversationFitScale
     : widthScale
+  const scale = sizing === 'natural' ? 1 : fittedScale
   const scaledHeight = intrinsic ? Math.max(1, Math.ceil(intrinsic.height * scale)) : targetHeight
-  const shouldScroll = Boolean(intrinsic && hasUsableViewport && scaledHeight > targetHeight + 1)
+  const scaledWidth = intrinsic ? Math.max(1, Math.ceil(intrinsic.width * scale)) : containerSize.width
+  const shouldScrollX = Boolean(intrinsic && hasUsableViewport && sizing === 'natural' && scaledWidth > containerSize.width + 1)
+  const shouldScrollY = Boolean(intrinsic && hasUsableViewport && scaledHeight > targetHeight + 1)
+  const shouldScroll = shouldScrollX || shouldScrollY
 
   return {
     targetHeight,
     hasUsableViewport,
     scale,
     shouldScroll,
-    frameHeight: shouldScroll ? targetHeight : scaledHeight,
+    shouldScrollX,
+    shouldScrollY,
+    frameHeight: shouldScrollY ? targetHeight : scaledHeight,
   }
 }
 
@@ -95,9 +117,11 @@ const sizeReporter = `<script>
       try {
         var message = JSON.parse(event.data);
         if (message.type === 'bob-visual-fit' && typeof message.scale === 'number') {
+          var scrollX = message.scrollX === true;
+          var scrollY = message.scrollY === true;
           body.style.transformOrigin = 'top left'; body.style.transform = 'scale(' + message.scale + ')';
-          body.style.width = (100 / message.scale) + '%'; body.style.overflow = message.scroll ? 'visible' : 'hidden';
-          root.style.overflowX = 'hidden'; root.style.overflowY = message.scroll ? 'auto' : 'hidden';
+          body.style.width = (100 / message.scale) + '%'; body.style.overflow = scrollX || scrollY ? 'visible' : 'hidden';
+          root.style.overflowX = scrollX ? 'auto' : 'hidden'; root.style.overflowY = scrollY ? 'auto' : 'hidden';
         }
         if (message.type === 'bob-dom-inspector') {
           root.dataset.bobInspect = message.enabled ? 'true' : 'false';
@@ -185,9 +209,13 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
   const [localThreeRuntime, setLocalThreeRuntime] = useState<string | null>(null)
   const [intrinsic, setIntrinsic] = useState<IntrinsicSize | null>(null)
   const [containerSize, setContainerSize] = useState({ width: 1, height: mode === 'inline' ? 380 : 1 })
+  const [detectedSizing, setDetectedSizing] = useState<FrameSizing>('fit')
+  const [sizingChoice, setSizingChoice] = useState<'auto' | FrameSizing>('auto')
 
   useEffect(() => {
     revisionRef.current = ''
+    setDetectedSizing('fit')
+    setSizingChoice('auto')
   }, [src])
 
   useEffect(() => {
@@ -204,7 +232,10 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
     setFrameSource(null)
     setIntrinsic(null)
     readHtmlPreview(src)
-      .then(value => canvasDocument(value, src))
+      .then(value => {
+        if (!disposed) setDetectedSizing(detectHtmlFrameSizing(value))
+        return canvasDocument(value, src)
+      })
       .then(value => fittedDocument(value, src, localThreeRuntime))
       .then(value => prepareFittedHtmlPreview(src, value))
       .then(path => { if (!disposed) { const next=convertFileSrc(path); if (frameSourceRef.current && frameSourceRef.current !== next) setPreviousFrameSource(frameSourceRef.current); frameSourceRef.current=next; setFrameSource(next) } })
@@ -262,18 +293,19 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
   const canvasViewport = mode === 'panel'
     ? { ...containerSize, height: Math.max(1, containerSize.height - 34 - (selection ? 27 : 0)) }
     : containerSize
-  const { frameHeight, hasUsableViewport, scale, shouldScroll } = calculateFittedFrameLayout(intrinsic, canvasViewport, mode)
+  const sizing = sizingChoice === 'auto' ? detectedSizing : sizingChoice
+  const { frameHeight, hasUsableViewport, scale, shouldScrollX, shouldScrollY } = calculateFittedFrameLayout(intrinsic, canvasViewport, mode, sizing)
 
   const sendFit = () => {
     if (!hasUsableViewport) return
-    const message = JSON.stringify({ type: 'bob-visual-fit', scale, scroll: shouldScroll })
+    const message = JSON.stringify({ type: 'bob-visual-fit', scale, scrollX: shouldScrollX, scrollY: shouldScrollY })
     frameRef.current?.contentWindow?.postMessage(message, '*')
     previousFrameRef.current?.contentWindow?.postMessage(message, '*')
   }
 
   useEffect(() => {
     sendFit()
-  }, [scale, frameSource, hasUsableViewport, shouldScroll])
+  }, [scale, frameSource, hasUsableViewport, shouldScrollX, shouldScrollY])
 
   const sendInspector = () => {
     const message = JSON.stringify({ type: 'bob-dom-inspector', enabled: inspector })
@@ -298,7 +330,7 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
 
   return (
     <div ref={containerRef} className={`fitted-html-frame fitted-html-frame--${mode}`}>
-      <div className="live-canvas-toolbar"><span className={live?'is-live':''}>● {live?t('canvas.live'):t('canvas.paused')}</span><button type="button" onClick={()=>setLive(value=>!value)}>{live?t('canvas.pause'):t('canvas.resume')}</button><button type="button" aria-pressed={inspector} className={inspector?'active':''} onClick={()=>{ setSelection(''); setInspector(value=>!value) }}>{t('canvas.inspect')}</button><button type="button" disabled={!previousFrameSource} className={comparison?'active':''} onClick={()=>setComparison(value=>!value)}>{t('canvas.diff')}</button><button type="button" disabled={exporting} onClick={()=>void exportZip()}>{exporting?'…':t('canvas.export')}</button></div>
+      <div className="live-canvas-toolbar"><span className={live?'is-live':''}>● {live?t('canvas.live'):t('canvas.paused')}</span><button type="button" aria-pressed={sizing === 'fit'} className={sizing === 'fit'?'active':''} onClick={()=>setSizingChoice('fit')}>{t('canvas.fit')}</button><button type="button" aria-pressed={sizing === 'natural'} className={sizing === 'natural'?'active':''} onClick={()=>setSizingChoice('natural')}>{t('canvas.actualSize')}</button><button type="button" onClick={()=>setLive(value=>!value)}>{live?t('canvas.pause'):t('canvas.resume')}</button><button type="button" aria-pressed={inspector} className={inspector?'active':''} onClick={()=>{ setSelection(''); setInspector(value=>!value) }}>{t('canvas.inspect')}</button><button type="button" disabled={!previousFrameSource} className={comparison?'active':''} onClick={()=>setComparison(value=>!value)}>{t('canvas.diff')}</button><button type="button" disabled={exporting} onClick={()=>void exportZip()}>{exporting?'…':t('canvas.export')}</button></div>
       {(inspector || selection) && <div className={`live-canvas-selection${inspector&&!selection?' is-hint':''}`} role="status" title={selection || t('canvas.inspectHint')}>{selection || t('canvas.inspectHint')}</div>}
       <div className={`live-canvas-frames ${comparison&&previousFrameSource?'is-comparing':''}`}>
       {comparison && previousFrameSource && <iframe ref={previousFrameRef} src={previousFrameSource} title={`${title} — ${t('canvas.before')}`} sandbox="allow-scripts" referrerPolicy="no-referrer" scrolling="auto" style={{height:frameHeight}} onLoad={onFrameLoad} />}

@@ -944,7 +944,7 @@ pub async fn send_message(
     // not. This also gives the UI a deterministic route to its inline preview.
     if !sending_condense {
         prompt.push_str(&format!(
-            "\n\nSorties et visualisations : tout fichier que tu crées doit être écrit dans le workspace de cette conversation : `{}`. N’utilise jamais /tmp pour un livrable. Pour toute visualisation demandée, crée une exportation HTML locale durable en complément de la VisualSpec/du rendu et cite le chemin absolu du fichier final dans la réponse. Ce fichier sera enregistré comme artefact et affiché directement dans la conversation ainsi que dans le panneau d’aperçu.",
+            "\n\nSorties et visualisations : tout fichier que tu crées doit être écrit dans le workspace de cette conversation : `{}`. N’utilise jamais /tmp pour un livrable. Pour toute visualisation demandée, crée une exportation HTML locale durable en complément de la VisualSpec/du rendu et cite le chemin absolu du fichier final dans la réponse. Ce fichier sera enregistré comme artefact et affiché directement dans la conversation ainsi que dans le panneau d’aperçu. Si l’utilisateur demande un site, une page Web complète ou un graphique volontairement pleine page, conserve sa mise en page documentaire et ajoute `<meta name=\"bob-preview-mode\" content=\"full-page\">` dans le `<head>` : l’aperçu Bob Work utilisera alors la taille naturelle avec défilement horizontal et vertical au besoin. N’aplatis pas une page complète en dashboard compact uniquement pour supprimer le scroll.",
             workspace_root.display()
         ));
     }

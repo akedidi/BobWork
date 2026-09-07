@@ -1003,6 +1003,8 @@ export const fr: MessageTree = {
   canvas: {
     live: 'Direct',
     paused: 'En pause',
+    fit: 'Ajuster',
+    actualSize: 'Taille réelle',
     pause: 'Pause',
     resume: 'Reprendre',
     inspect: 'Inspecter le DOM',
