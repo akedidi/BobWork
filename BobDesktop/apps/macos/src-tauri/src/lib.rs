@@ -533,7 +533,13 @@ pub fn run() {
                         }
                         if task_cancelled {
                             if let Some(task_id) = done.task_id.as_deref() {
-                                let _ = task_service.update_state(&db, task_id, "cancelled");
+                                let _ = task_service.finish_cancelled_run(
+                                    &db,
+                                    task_id,
+                                    done.run_id.as_deref(),
+                                    &content,
+                                    done.shell_task_id.as_deref(),
+                                );
                                 use tauri::Emitter;
                                 let _ = ah2.emit("task-updated", task_id);
                             }

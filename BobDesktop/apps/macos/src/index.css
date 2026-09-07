@@ -1626,6 +1626,7 @@
   .execution-plan-card__steps .is-running { color: var(--text-primary); }
   .execution-plan-card__steps .is-running .execution-plan-card__status { color: var(--accent); }
   .execution-plan-card__steps .is-running .execution-plan-card__status svg { animation: task-spin 1s linear infinite; }
+  .execution-plan-card__steps .is-paused .execution-plan-card__status { color: #f59e0b; }
   .execution-plan-card__steps .is-completed .execution-plan-card__status { color: #22c55e; }
   .execution-plan-card__steps .is-completed strong { color: var(--text-muted); }
   .execution-plan-card__steps .is-failed .execution-plan-card__status { color: #ef4444; }

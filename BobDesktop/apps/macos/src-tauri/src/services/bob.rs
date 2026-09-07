@@ -274,7 +274,7 @@ pub struct BobSessionDoneEvent {
     /// Persistent, structured workspace mutations produced by this run.
     #[serde(default)]
     pub file_changes: Vec<FileChange>,
-    /// True when the user stopped the run — no failure notification.
+    /// True when Bob Work interrupted the run — no failure notification.
     #[serde(default)]
     pub cancelled: bool,
 }
@@ -1354,10 +1354,10 @@ impl BobService {
                             conversation_id: cid,
                             success: false,
                             full_output,
-                            error: Some("Session annulée par l'utilisateur.".into()),
+                            error: Some("Session interrompue.".into()),
                             task_id: task_id.clone(),
                             run_id: run_id.clone(),
-                            shell_task_id: None,
+                            shell_task_id: shell_task_id.clone(),
                             workspace_path: workspace_path.clone(),
                             deliverable_paths: vec![],
                             file_changes: workspace_file_changes(

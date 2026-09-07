@@ -1266,7 +1266,21 @@ pub async fn stop_task(
     bob_service: State<'_, BobService>,
 ) -> Result<(), AppError> {
     if let Some(task_id) = bob_service.session_task_id(&session_id) {
-        let _ = crate::services::task::TaskService::new().update_state(&db, &task_id, "cancelled");
+        let task_service = crate::services::task::TaskService::new();
+        if let Ok(Some(task)) = task_service.get_by_id(&db, &task_id) {
+            let _ = crate::services::audit::AuditService::new().log(
+                &db,
+                "bob.session_cancel_requested",
+                Some("session"),
+                Some(&session_id),
+                serde_json::json!({
+                    "source": "chat_stop_button",
+                    "taskId": task_id,
+                    "conversationId": task.conversation_id,
+                }),
+            );
+        }
+        let _ = task_service.update_state(&db, &task_id, "cancelled");
         let _ = app_handle.emit("task-updated", &task_id);
     }
     bob_service.cancel_session(&session_id)

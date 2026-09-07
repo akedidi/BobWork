@@ -249,6 +249,33 @@ impl TaskService {
         Ok(())
     }
 
+    pub fn finish_cancelled_run(
+        &self,
+        db: &Database,
+        task_id: &str,
+        run_id: Option<&str>,
+        summary: &str,
+        shell_task_id: Option<&str>,
+    ) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = db.connection();
+        if let Some(run_id) = run_id {
+            conn.execute(
+                "UPDATE task_runs SET state='cancelled', ended_at=?1, summary=?2, error=NULL,
+                 shell_task_id=coalesce(?3, shell_task_id) WHERE id=?4",
+                params![now, summary, shell_task_id, run_id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE tasks SET state='cancelled', end_date=?1, summary=?2, errors='[]',
+             shell_task_id=coalesce(?3, shell_task_id),
+             resumable=CASE WHEN coalesce(?3, shell_task_id) IS NOT NULL THEN 1 ELSE 0 END,
+             bob_process_id=NULL, last_event_at=?1, updated_at=?1 WHERE id=?4",
+            params![now, summary, shell_task_id, task_id],
+        )?;
+        Ok(())
+    }
+
     pub fn add_event(
         &self,
         db: &Database,
@@ -566,5 +593,56 @@ mod orphan_recovery_tests {
         let recovered = service.get_by_id(&db, &task.id).unwrap().unwrap();
         assert_eq!(recovered.state, "failed");
         assert!(recovered.bob_process_id.is_none());
+    }
+
+    #[test]
+    fn cancelled_run_keeps_shell_task_resumable() {
+        let db = Database::new_in_memory().expect("database");
+        db.run_migrations().expect("migrations");
+        db.connection()
+            .execute(
+                "INSERT INTO conversations (id,title,date) VALUES ('conversation-1','Test','2026-09-08')",
+                [],
+            )
+            .expect("conversation");
+        let service = TaskService::new();
+        let task = service
+            .create(
+                &db,
+                CreateTaskInput {
+                    objective: "Créer un projet".into(),
+                    project_id: None,
+                    conversation_id: Some("conversation-1".into()),
+                    mode: Some("agent".into()),
+                    permission_policy: None,
+                    budget: None,
+                    max_time: None,
+                    schedule_id: None,
+                },
+            )
+            .expect("task");
+        let run = service.start_run(&db, &task.id, "session-1").expect("run");
+
+        service
+            .finish_cancelled_run(
+                &db,
+                &task.id,
+                Some(&run.id),
+                "Session interrompue.",
+                Some("shell-task-1"),
+            )
+            .expect("cancel run");
+
+        let cancelled = service.get_by_id(&db, &task.id).unwrap().unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(cancelled.resumable);
+        assert_eq!(cancelled.shell_task_id.as_deref(), Some("shell-task-1"));
+        assert_eq!(
+            service
+                .latest_resumable_shell_task_id(&db, "conversation-1")
+                .unwrap()
+                .as_deref(),
+            Some("shell-task-1")
+        );
     }
 }

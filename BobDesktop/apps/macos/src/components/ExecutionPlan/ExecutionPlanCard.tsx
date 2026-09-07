@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronDown, Circle, CircleX, LoaderCircle, Minus, Pin } from 'lucide-react'
+import { Check, ChevronDown, Circle, CircleX, LoaderCircle, Minus, Pause, Pin } from 'lucide-react'
 import type { ExecutionPlan, ExecutionPlanStepStatus } from '../../lib/executionPlan'
 import { executionPlanProgress } from '../../lib/executionPlan'
 import { useT } from '../../i18n'
@@ -7,6 +7,7 @@ import { useT } from '../../i18n'
 function StatusIcon({ status }: { status: ExecutionPlanStepStatus }) {
   if (status === 'completed') return <Check aria-hidden="true" />
   if (status === 'running') return <LoaderCircle aria-hidden="true" />
+  if (status === 'paused') return <Pause aria-hidden="true" />
   if (status === 'failed') return <CircleX aria-hidden="true" />
   if (status === 'skipped') return <Minus aria-hidden="true" />
   return <Circle aria-hidden="true" />
@@ -37,13 +38,16 @@ export function ExecutionPlanCard({ plan, live }: { plan: ExecutionPlan; live: b
       </div>
       {!collapsed ? (
         <ol className="execution-plan-card__steps">
-          {plan.steps.map((step, index) => (
-            <li className={`is-${step.status}`} key={step.id}>
-              <span className="execution-plan-card__status"><StatusIcon status={step.status} /></span>
-              <span><strong>{index + 1}. {step.title}</strong>{step.detail ? <small>{step.detail}</small> : null}</span>
-              <em>{t(`chat.executionPlanStatus.${step.status}` as any)}</em>
-            </li>
-          ))}
+          {plan.steps.map((step, index) => {
+            const displayedStatus = !live && step.status === 'running' ? 'paused' : step.status
+            return (
+              <li className={`is-${displayedStatus}`} key={step.id}>
+                <span className="execution-plan-card__status"><StatusIcon status={displayedStatus} /></span>
+                <span><strong>{index + 1}. {step.title}</strong>{step.detail ? <small>{step.detail}</small> : null}</span>
+                <em>{t(`chat.executionPlanStatus.${displayedStatus}` as any)}</em>
+              </li>
+            )
+          })}
         </ol>
       ) : null}
     </section>

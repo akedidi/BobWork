@@ -1,4 +1,4 @@
-export type ExecutionPlanStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+export type ExecutionPlanStepStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'skipped'
 
 export interface ExecutionPlanStep {
   id: string
@@ -45,6 +45,7 @@ function textValue(record: Record<string, unknown>, keys: string[]): string | un
 function normalizedStatus(value: unknown): ExecutionPlanStepStatus {
   const status = typeof value === 'string' ? value.trim().toLowerCase().replace(/[ -]+/g, '_') : ''
   if (['in_progress', 'running', 'started', 'active', 'current'].includes(status)) return 'running'
+  if (['paused', 'interrupted', 'stopped'].includes(status)) return 'paused'
   if (['completed', 'complete', 'done', 'finished', 'success', 'succeeded'].includes(status)) return 'completed'
   if (['failed', 'error', 'blocked'].includes(status)) return 'failed'
   if (['skipped', 'cancelled', 'canceled'].includes(status)) return 'skipped'

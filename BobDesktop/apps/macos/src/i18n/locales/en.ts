@@ -177,6 +177,7 @@ export const en = {
     executionPlanStatus: {
       pending: 'To do',
       running: 'In progress',
+      paused: 'Interrupted',
       completed: 'Completed',
       failed: 'Failed',
       skipped: 'Skipped',

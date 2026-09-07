@@ -1534,9 +1534,10 @@ export default function ChatView() {
     }
     return null
   })()
-  // Never show an older completed plan while a new run is still waiting to
-  // publish its own plan snapshot.
-  const displayedExecutionPlan = isRunning ? liveExecutionPlan : persistedExecutionPlan
+  // Keep the last plan pinned while a continuation starts. It remains visibly
+  // interrupted until Bob Shell publishes the first fresh plan snapshot.
+  const displayedExecutionPlan = liveExecutionPlan ?? persistedExecutionPlan
+  const executionPlanIsLive = isRunning && liveExecutionPlan !== null
 
   // ── Render ───────────────────────────────────────────────────
   return (
@@ -1656,7 +1657,7 @@ export default function ChatView() {
       >
         {displayedExecutionPlan ? (
           <div className="execution-plan-sticky">
-            <ExecutionPlanCard plan={displayedExecutionPlan} live={isRunning} />
+            <ExecutionPlanCard plan={displayedExecutionPlan} live={executionPlanIsLive} />
           </div>
         ) : null}
         {loadError ? (

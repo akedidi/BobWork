@@ -178,6 +178,7 @@ export const es: MessageTree = {
     executionPlanStatus: {
       pending: 'Pendiente',
       running: 'En curso',
+      paused: 'Interrumpida',
       completed: 'Completada',
       failed: 'Error',
       skipped: 'Omitida',

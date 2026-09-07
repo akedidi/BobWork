@@ -31,6 +31,9 @@ describe('ExecutionPlanCard', () => {
     const toggle = screen.getByRole('button', { name: /Créer le projet/ })
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText(/Initialiser les fichiers/)).toBeVisible()
+    expect(screen.getByText('Interrompue')).toBeVisible()
+    expect(screen.getByText(/Construire l’interface/).closest('li')).toHaveClass('is-paused')
+    expect(screen.queryByText('En cours')).not.toBeInTheDocument()
 
     fireEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
