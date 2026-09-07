@@ -438,6 +438,42 @@ describe('Chat live thinking', () => {
     expect(within(pinnedPlan).getByText(/Créer l’interface/).closest('li')).toHaveClass('is-running')
   })
 
+  it('renders and advances the textual plan format emitted by the real Bob Shell', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.change(await screen.findByPlaceholderText('Sur quoi travailler ?'), { target: { value: 'Crée le projet avec un plan' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-activity')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', eventType: 'tool_started',
+        toolName: 'update_todo_list', payload: { parameters: {
+          todos: '\n[-] Initialiser le projet\n[ ] Créer l’interface\n[ ] Tester le résultat\n',
+        } },
+      } })
+    })
+
+    const pinnedPlan = screen.getByRole('region', { name: 'Plan d’exécution' })
+    expect(within(pinnedPlan).getByText(/Initialiser le projet/).closest('li')).toHaveClass('is-running')
+    expect(within(pinnedPlan).getByText('0/3 terminées')).toBeVisible()
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', eventType: 'tool_finished',
+        content: 'To do list updated: 3 items total.\n\nNext to do item inprogress: Créer l’interface',
+        payload: { output: 'To do list updated: 3 items total.\n\nNext to do item inprogress: Créer l’interface' },
+      } })
+    })
+
+    expect(within(pinnedPlan).getByText('1/3 terminées')).toBeVisible()
+    expect(within(pinnedPlan).getByText(/Créer l’interface/).closest('li')).toHaveClass('is-running')
+  })
+
   it('restores the pinned plan from persisted assistant activity', async () => {
     mocks.getMessages.mockResolvedValue([{
       id: 'assistant-with-plan', conversationId: 'conv-1', author: 'assistant',

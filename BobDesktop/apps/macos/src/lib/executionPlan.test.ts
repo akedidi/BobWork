@@ -44,4 +44,36 @@ describe('execution plan activity parsing', () => {
     expect(plan?.steps).toHaveLength(12)
     expect(plan?.steps[11]?.title).toBe('Step 12')
   })
+
+  it('parses the checkbox text emitted by the real Bob Shell update_todo_list tool', () => {
+    const plan = executionPlanFromActivities([{
+      eventType: 'tool_started',
+      toolName: 'update_todo_list',
+      payload: { parameters: { todos: '\n[x] Initialiser le projet\n[-] Créer l’interface\n[ ] Tester le résultat\n' } },
+    }])
+
+    expect(plan?.steps.map(step => [step.title, step.status])).toEqual([
+      ['Initialiser le projet', 'completed'],
+      ['Créer l’interface', 'running'],
+      ['Tester le résultat', 'pending'],
+    ])
+    expect(executionPlanProgress(plan!)).toEqual({ completed: 1, total: 3, percent: 33 })
+  })
+
+  it('applies unnamed Bob Shell progress results to the latest checkbox snapshot', () => {
+    const plan = executionPlanFromActivities([
+      {
+        eventType: 'tool_started',
+        toolName: 'update_todo_list',
+        payload: { parameters: { todos: '[-] Initialiser le projet\n[ ] Créer l’interface\n[ ] Tester le résultat' } },
+      },
+      {
+        eventType: 'tool_finished',
+        content: 'To do list updated: 3 items total.\n\nNext to do item inprogress: Créer l’interface',
+        payload: { output: 'To do list updated: 3 items total.\n\nNext to do item inprogress: Créer l’interface' },
+      },
+    ])
+
+    expect(plan?.steps.map(step => step.status)).toEqual(['completed', 'running', 'pending'])
+  })
 })
