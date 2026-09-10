@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useContextDraftStore } from '../../stores/contextDraftStore'
 import { useNavigate } from 'react-router-dom'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -24,11 +25,12 @@ import {
 } from '../../lib/ipc'
 import type { BobMode, BobSlashCommand, DbConnection, McpServer, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
 import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from '../../lib/builtinCatalog'
+import { pluginMentionId } from '../../lib/pluginUtils'
 import { engineMeta } from '../../lib/dbEngines'
 import { CATALOG } from '../../views/IntegrationsTabs/catalogData'
 import { PluginIcon, resolveSkillIcon, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
-import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, removeComposerMention } from './composerAttachments'
+import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, type ComposerMentionCatalog } from './composerAttachments'
 import { errorMessage } from '../../lib/errorMessage'
 import {
   applyAutocompleteInsert,
@@ -40,6 +42,7 @@ import {
 } from '../../lib/promptAutocomplete'
 import { useT } from '../../i18n'
 import { useAppDialog } from '../AppDialog'
+import { isApiServer } from '../../hooks/useMcpServers'
 
 type SpeechRecognitionLike = {
   lang: string
@@ -107,7 +110,7 @@ type McpPickerItem = {
   description: string
   icon: string
   insert: string
-  kind: 'integration' | 'mcp'
+  kind: 'integration' | 'api' | 'mcp'
 }
 
 interface Props {
@@ -120,6 +123,9 @@ interface Props {
   busy?: boolean
   queueCount?: number
   initialProjectId?: string
+  initialMode?: string
+  onProjectChange?: (projectId?: string) => void
+  onModeChange?: (mode: string) => void
   focusRequestKey?: string
 }
 
@@ -154,13 +160,17 @@ function formatRecordingDuration(totalSeconds: number) {
 
 export default function Composer({
   placeholder, showProjectPill, showModePill,
-  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId, focusRequestKey,
+  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId, initialMode, onProjectChange, onModeChange, focusRequestKey,
 }: Props) {
   const t = useT()
   const dialog = useAppDialog()
   const resolvedPlaceholder = placeholder ?? t('composer.placeholder')
   const [text, setText] = useState('')
-  const [mode, setMode] = useState('agent')
+  useEffect(() => {
+    useContextDraftStore.setState({ text })
+    return () => { useContextDraftStore.setState({ text: '' }) }
+  }, [text])
+  const [mode, setMode] = useState(initialMode ?? 'agent')
   const [modes, setModes] = useState<BobMode[]>(BUILTIN_MODES)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setProjectId] = useState<string | undefined>(initialProjectId)
@@ -173,6 +183,7 @@ export default function Composer({
   const [slashCommands, setSlashCommands] = useState<BobSlashCommand[]>([])
   const [autocompleteIndex, setAutocompleteIndex] = useState(0)
   const [autocompleteDismissed, setAutocompleteDismissed] = useState<string | null>(null)
+  const [caretIndex, setCaretIndex] = useState(0)
   const [attachments, setAttachments] = useState<string[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
   const [attachSearch, setAttachSearch] = useState('')
@@ -203,6 +214,12 @@ export default function Composer({
   useEffect(() => {
     if (initialProjectId !== undefined) setProjectId(initialProjectId)
   }, [initialProjectId])
+
+  useEffect(() => {
+    setMode(initialMode ?? 'agent')
+    setModeMenu(false)
+    setModeSearch('')
+  }, [initialMode])
 
   useEffect(() => {
     if (!focusRequestKey || disabled) return
@@ -362,7 +379,9 @@ export default function Composer({
       ]).then(([detectedModes, detectedProjects, settings, skillsResult, pluginsResult]) => {
         if (detectedModes.length) setModes(detectedModes)
         setProjects(detectedProjects.filter(project => !project.archived))
-        if (settings?.defaultMode) setMode(current => current === 'agent' ? settings.defaultMode : current)
+        if (settings?.defaultMode && initialMode === undefined) {
+          setMode(current => current === 'agent' ? settings.defaultMode : current)
+        }
         const errors: string[] = []
         if (skillsResult.ok) {
           setSkills(skillsResult.items.filter(skill => skill.enabled))
@@ -453,10 +472,11 @@ export default function Composer({
 
   const handleSend = () => {
     if (!text.trim() || disabled || recording || recordingBusy) return
+    const prompt = normalizeComposerCapabilityMentions(text, mentionCatalog)
     if (onSend) {
-      onSend(text.trim(), mode, attachments, projectId)
+      onSend(prompt, mode, attachments, projectId)
     } else {
-      navigate('/chat', { state: { initialPrompt: text.trim(), mode, attachmentPaths: attachments, projectId } })
+      navigate('/chat', { state: { initialPrompt: prompt, mode, attachmentPaths: attachments, projectId } })
     }
     setText('')
     setAttachments([])
@@ -523,7 +543,13 @@ export default function Composer({
     try {
       const availability = await getVoiceDictationAvailability()
       if (!availability.available) {
-        await dialog.alert({ message: availability.reason === 'requires_app_bundle' ? t('composer.dictationRequiresApp') : t('composer.dictationUnavailable') })
+        await dialog.alert({
+          message: availability.reason === 'requires_app_bundle'
+            ? t('composer.dictationRequiresApp')
+            : availability.reason === 'missing_usage_description'
+              ? t('composer.dictationMissingUsageDescription')
+              : t('composer.dictationUnavailable'),
+        })
         return
       }
       const permission = await requestVoiceDictationPermission()
@@ -576,6 +602,13 @@ export default function Composer({
       : plugins.filter(plugin => filter.includes(plugin.id))
     return sortPluginsForDisplay(filtered)
   }, [plugins, selectedProject?.allowedPlugins])
+  const mentionCatalog = useMemo<ComposerMentionCatalog>(() => ({
+    pluginIds: plugins.flatMap(plugin => {
+      const mentionId = pluginMentionId(plugin)
+      return mentionId === plugin.id ? [mentionId] : [mentionId, plugin.id]
+    }),
+    skillSlugs: skills.map(skill => skill.slug),
+  }), [plugins, skills])
   const mcpPickerItems = useMemo(() => {
     const connectedIds = new Set(
       integrationStatuses.filter(status => status.connected).map(status => status.integrationId),
@@ -590,7 +623,7 @@ export default function Composer({
         name: integration.id === 'outlook-calendar' ? t('integrations.outlookCalendar') : (catalog?.name ?? integration.id),
         description: catalog ? t(catalog.shortKey) : '',
         icon: resolveIntegrationIcon(integration.id),
-        insert: `@skill:${integration.skillSlug}`,
+        insert: `@integration:${integration.id}`,
         kind: 'integration',
       })
     }
@@ -602,26 +635,31 @@ export default function Composer({
     for (const server of mcpServers) {
       if (coveredMcp.has(server.name)) continue
       if (integrationFilter.length > 0 && !integrationFilter.includes(`mcp:${server.name}`)) continue
+      if ((server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_CREDENTIAL_ONLY === '1') continue
+      const api = isApiServer(server)
       items.push({
-        id: `mcp:${server.name}`,
+        id: `${api ? 'api' : 'mcp'}:${server.name}`,
         name: server.name,
-        description: `${server.transport} · ${server.commandOrUrl || t('composer.mcpServerFallback')}`,
+        description: api
+          ? `REST · ${String((server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_BASE_URL || '')}`
+          : `${server.transport} · ${server.commandOrUrl || t('composer.mcpServerFallback')}`,
         icon: 'plugin',
-        insert: `@mcp:${server.name}`,
-        kind: 'mcp',
+        insert: `@${api ? 'api' : 'mcp'}:${server.name}`,
+        kind: api ? 'api' : 'mcp',
       })
     }
     return items
   }, [integrationFilter, integrationStatuses, mcpServers, t])
-  const mention = text.match(/(?:^|\s)@([\w-]*)$/)?.[1]?.toLowerCase()
+
+  const autocompleteQuery = detectAutocompleteQuery(text, caretIndex)
+  const mention = autocompleteQuery?.trigger === '@' ? autocompleteQuery.query.toLowerCase() : undefined
   const mentionItems = mention === undefined ? [] : [
-    ...allowedPlugins.map(plugin => ({ id: `plugin:${plugin.id}`, label: plugin.name, subtitle: 'Plugin', insert: `@plugin:${plugin.id} ` })),
+    ...allowedPlugins.map(plugin => ({ id: `plugin:${pluginMentionId(plugin)}`, label: plugin.name, subtitle: 'Plugin', insert: `@plugin:${pluginMentionId(plugin)} ` })),
     ...allowedSkills.map(skill => ({ id: `skill:${skill.slug}`, label: skill.name, subtitle: 'Skill', insert: `@skill:${skill.slug} ` })),
-    ...mcpPickerItems.map(item => ({ id: item.id, label: item.name, subtitle: item.kind === 'integration' ? t('composer.mcpIntegrationKind') : t('composer.mcpKind'), insert: `${item.insert} ` })),
+    ...mcpPickerItems.map(item => ({ id: item.id, label: item.name, subtitle: item.kind === 'integration' ? t('composer.integrationKind') : item.kind === 'api' ? t('composer.apiKind') : t('composer.mcpKind'), insert: `${item.insert} ` })),
     ...dbConnections.map(item => ({ id: `db:${item.name}`, label: item.name, subtitle: 'DB', insert: `@db:${item.name} ` })),
   ].filter(item => item.label.toLowerCase().includes(mention) || item.id.toLowerCase().includes(mention)).slice(0, 8)
 
-  const autocompleteQuery = detectAutocompleteQuery(text)
   const autocompleteItems: PromptAutocompleteItem[] = useMemo(() => {
     if (!autocompleteQuery) return []
     if (autocompleteQuery.trigger === '/') {
@@ -640,18 +678,22 @@ export default function Composer({
     setAutocompleteIndex(0)
   }, [autocompleteQuery?.trigger, autocompleteQuery?.query, autocompleteItems.length])
 
-  const visibleAutocompleteItems = autocompleteDismissed === text ? [] : autocompleteItems
+  const visibleAutocompleteItems = autocompleteDismissed === `${text}:${caretIndex}` ? [] : autocompleteItems
 
   const insertAutocomplete = (item: PromptAutocompleteItem) => {
-    const query = detectAutocompleteQuery(text)
+    const query = detectAutocompleteQuery(text, caretIndex)
     if (!query) return
+    const nextCaretIndex = query.startIndex + item.insert.length
     setAutocompleteDismissed(null)
     setText(applyAutocompleteInsert(text, query, item.insert))
-    taRef.current?.focus()
+    setCaretIndex(nextCaretIndex)
+    window.requestAnimationFrame(() => {
+      taRef.current?.focus()
+      taRef.current?.setSelectionRange(nextCaretIndex, nextCaretIndex)
+    })
   }
-
   const selectPlugin = (plugin: Plugin) => {
-    insertPluginMention(plugin.id)
+    insertPluginMention(pluginMentionId(plugin))
     setAttachMenu(false)
     setAttachSearch('')
   }
@@ -684,12 +726,28 @@ export default function Composer({
     return allowedPlugins.filter(plugin => `${plugin.name} ${plugin.description ?? ''}`.toLocaleLowerCase().includes(attachQuery))
   }, [allowedPlugins, attachQuery])
 
+  const apiPickerItems = useMemo(
+    () => mcpPickerItems.filter(item => item.kind === 'api'),
+    [mcpPickerItems],
+  )
+  const integrationMcpPickerItems = useMemo(
+    () => mcpPickerItems.filter(item => item.kind !== 'api'),
+    [mcpPickerItems],
+  )
+
   const visibleMcpItems = useMemo(() => {
-    if (!attachQuery) return mcpPickerItems
-    return mcpPickerItems.filter(item =>
+    if (!attachQuery) return integrationMcpPickerItems
+    return integrationMcpPickerItems.filter(item =>
       `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(attachQuery),
     )
-  }, [attachQuery, mcpPickerItems])
+  }, [attachQuery, integrationMcpPickerItems])
+
+  const visibleApiItems = useMemo(() => {
+    if (!attachQuery) return apiPickerItems
+    return apiPickerItems.filter(item =>
+      `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(attachQuery),
+    )
+  }, [apiPickerItems, attachQuery])
 
   const visibleDbItems = useMemo(() => {
     if (!attachQuery) return dbConnections
@@ -707,21 +765,22 @@ export default function Composer({
   const mentionChips = useMemo(() => {
     type Chip = {
       key: string
-      kind: 'plugin' | 'skill' | 'mcp' | 'db'
+      kind: 'plugin' | 'skill' | 'integration' | 'api' | 'mcp' | 'db'
       id: string
       name: string
       subtitle: string
       icon: string
     }
     const chips: Chip[] = []
-    for (const mention of getActiveComposerMentions(text)) {
+    for (const mention of getActiveComposerMentions(text, mentionCatalog)) {
       if (mention.kind === 'plugin') {
-        const plugin = plugins.find(item => item.id === mention.id)
+        const plugin = plugins.find(item => item.id === mention.id || pluginMentionId(item) === mention.id)
         if (!plugin) continue
+        const mentionId = pluginMentionId(plugin)
         chips.push({
           key: `plugin:${plugin.id}`,
           kind: 'plugin',
-          id: plugin.id,
+          id: mentionId,
           name: plugin.name,
           subtitle: plugin.manifest && typeof plugin.manifest === 'object' && 'specializedMode' in (plugin.manifest as object)
             ? t('composer.workMode')
@@ -755,6 +814,31 @@ export default function Composer({
         })
         continue
       }
+      if (mention.kind === 'integration') {
+        const integration = mcpPickerItems.find(item => item.id === `integration:${mention.id}`)
+        if (!integration) continue
+        chips.push({
+          key: `integration:${mention.id}`,
+          kind: 'integration',
+          id: mention.id,
+          name: integration.name,
+          subtitle: t('composer.integrationKind'),
+          icon: integration.icon,
+        })
+        continue
+      }
+      if (mention.kind === 'api') {
+        const api = mcpPickerItems.find(item => item.id === `api:${mention.id}`)
+        chips.push({
+          key: `api:${mention.id}`,
+          kind: 'api',
+          id: mention.id,
+          name: api?.name ?? mention.id,
+          subtitle: t('composer.apiKind'),
+          icon: api?.icon ?? 'plugin',
+        })
+        continue
+      }
       if (mention.kind === 'db') {
         const connection = dbConnections.find(item => item.name === mention.id)
         chips.push({
@@ -778,9 +862,9 @@ export default function Composer({
       })
     }
     return chips
-  }, [dbConnections, mcpPickerItems, plugins, skills, text])
+  }, [dbConnections, mcpPickerItems, mentionCatalog, plugins, skills, t, text])
 
-  const removeMentionChip = (kind: 'plugin' | 'skill' | 'mcp' | 'db', id: string) => {
+  const removeMentionChip = (kind: 'plugin' | 'skill' | 'integration' | 'api' | 'mcp' | 'db', id: string) => {
     setText(current => removeComposerMention(current, kind, id))
     taRef.current?.focus()
   }
@@ -878,10 +962,16 @@ export default function Composer({
           value={text}
           rows={1}
           disabled={disabled}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
           onChange={event => {
             setAutocompleteDismissed(null)
             setText(event.target.value)
+            setCaretIndex(event.target.selectionStart ?? event.target.value.length)
           }}
+          onSelect={event => setCaretIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
           onKeyDown={event => {
             if (visibleAutocompleteItems.length > 0) {
               if (event.key === 'ArrowDown') {
@@ -903,7 +993,7 @@ export default function Composer({
               if (event.key === 'Escape') {
                 event.preventDefault()
                 event.stopPropagation()
-                setAutocompleteDismissed(text)
+                setAutocompleteDismissed(`${text}:${caretIndex}`)
                 return
               }
             }
@@ -1003,7 +1093,7 @@ export default function Composer({
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>{t('composer.manageSkills')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.mcpIntegrations')}</div>
-                  {mcpPickerItems.length > 0 ? (
+                  {integrationMcpPickerItems.length > 0 ? (
                     <div className="attach-plugin-list">
                       {visibleMcpItems.length > 0 ? visibleMcpItems.map(item => (
                         <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
@@ -1012,6 +1102,9 @@ export default function Composer({
                           </span>
                           <span className="attach-plugin-copy">
                             <span className="attach-plugin-title">
+                              <span className={`catalog-kind-badge catalog-kind-badge--${item.kind}`}>
+                                {item.kind === 'integration' ? t('composer.integrationKind') : t('composer.mcpKind')}
+                              </span>
                               <strong>{item.name}</strong>
                             </span>
                             <small>{item.kind === 'integration' ? t('composer.connectorLine', { description: item.description }) : item.description}</small>
@@ -1022,6 +1115,25 @@ export default function Composer({
                     </div>
                   ) : <p className="composer-popover-empty">{selectedProject ? t('composer.noMcpConnectedForProject') : t('composer.noMcpConnected')}</p>}
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>{t('composer.manageIntegrations')}</button>
+                  <div className="composer-popover-separator" />
+                  <div className="composer-popover-title">{t('composer.apis')}</div>
+                  {apiPickerItems.length > 0 ? (
+                    <div className="attach-plugin-list">
+                      {visibleApiItems.length > 0 ? visibleApiItems.map(item => (
+                        <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
+                          <span className="attach-row-icon">
+                            <PluginIcon icon={item.icon} size="sm" className="attach-plugin-icon" />
+                          </span>
+                          <span className="attach-plugin-copy">
+                            <span className="attach-plugin-title"><strong>{item.name}</strong></span>
+                            <small>{item.description}</small>
+                          </span>
+                          <span className="attach-row-action" aria-hidden="true">+</span>
+                        </button>
+                      )) : <p className="composer-popover-empty">{t('composer.noApiMatch')}</p>}
+                    </div>
+                  ) : <p className="composer-popover-empty">{t('composer.noApis')}</p>}
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations', { state: { tab: 'apis' } }) }}>{t('composer.manageApis')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.databases')}</div>
                   {dbConnections.length > 0 ? (
@@ -1092,10 +1204,10 @@ export default function Composer({
               </button>
               {projectMenu && (
                 <ComposerPopover anchorRef={projectButtonRef} ariaLabel="Choisir un projet" className="project-popover">
-                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); setProjectMenu(false) }}>
+                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); onProjectChange?.(undefined); setProjectMenu(false) }}>
                     <span className="composer-project-option"><NoProjectIcon />{t('composer.noProject')}</span>
                   </button>
-                  {projects.map(project => <button className="composer-popover-row" key={project.id} onClick={() => { setProjectId(project.id); if (project.defaultMode) setMode(project.defaultMode); setProjectMenu(false) }}>{project.name}</button>)}
+                  {projects.map(project => <button className="composer-popover-row" key={project.id} onClick={() => { setProjectId(project.id); onProjectChange?.(project.id); if (project.defaultMode) { setMode(project.defaultMode); onModeChange?.(project.defaultMode) } setProjectMenu(false) }}>{project.name}</button>)}
                 </ComposerPopover>
               )}
             </div>
@@ -1112,7 +1224,7 @@ export default function Composer({
                   <input autoFocus value={modeSearch} onChange={event => setModeSearch(event.target.value)} placeholder={t('composer.searchMode')} className="popover-search" />
                   <div className="mode-popover-list">
                     {filteredModes.map(item => (
-                      <button className={`composer-popover-row mode-row ${item.slug === mode ? 'selected' : ''}`} key={item.slug} onClick={() => { setMode(item.slug); setModeMenu(false); setModeSearch('') }}>
+                      <button className={`composer-popover-row mode-row ${item.slug === mode ? 'selected' : ''}`} key={item.slug} onClick={() => { setMode(item.slug); onModeChange?.(item.slug); setModeMenu(false); setModeSearch('') }}>
                         <span><strong>{item.name}</strong><small>{item.description ?? item.slug}</small></span>
                         {item.slug === mode && <span>✓</span>}
                       </button>

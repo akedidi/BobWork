@@ -156,6 +156,25 @@ describe('Composer popovers', () => {
     expect(screen.getByRole('menu', { name: 'Modes Bob' })).toBeVisible()
   })
 
+  it('restores the conversation mode and reports a user mode change', async () => {
+    const onModeChange = vi.fn()
+    const view = await renderComposer({ initialMode: 'plan', onModeChange })
+    expect(screen.getByRole('button', { name: 'Mode Bob : Plan' })).toBeVisible()
+
+    await act(async () => {
+      view.rerender(
+        <AppDialogProvider>
+          <MemoryRouter>
+            <Composer showModePill showProjectPill initialMode="agent" onModeChange={onModeChange} />
+          </MemoryRouter>
+        </AppDialogProvider>,
+      )
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Mode Bob : Agent' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Plan / }))
+    expect(onModeChange).toHaveBeenCalledWith('plan')
+  })
+
   it('shows a distinct no-project icon in the project picker', async () => {
     await renderComposer()
     fireEvent.click(screen.getByRole('button', { name: 'Projet' }))
@@ -428,7 +447,7 @@ describe('Composer popovers', () => {
 
     fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
     const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
-    expect(menu).toHaveTextContent('Intégrations MCP')
+    expect(menu).toHaveTextContent('Intégrations & MCP')
     expect(menu).toHaveTextContent('GitHub')
     expect(menu).toHaveTextContent('mcp-custom-hub')
     const githubRow = screen.getByRole('button', { name: /GitHub/ })
@@ -437,7 +456,34 @@ describe('Composer popovers', () => {
     expect(githubRow.querySelector('.attach-row-action')).toBeTruthy()
 
     fireEvent.click(githubRow)
-    expect(screen.getByRole('textbox')).toHaveValue('@skill:bob-work-github ')
+    expect(screen.getByRole('textbox')).toHaveValue('@integration:github ')
+  })
+
+  it('présente une API REST comme API et insère une mention api', async () => {
+    mocks.getMcpServers.mockResolvedValue([{
+      name: 'tmdb',
+      transport: 'stdio',
+      commandOrUrl: 'python3',
+      args: ['/tmp/rest_api_server.py'],
+      enabled: true,
+      status: 'ready',
+      raw: { env: {
+        BOB_WORK_API_KIND: 'rest',
+        BOB_WORK_API_BASE_URL: 'https://api.themoviedb.org/3',
+        BOB_WORK_API_SECRET: '<redacted>',
+      } },
+    }])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
+    expect(menu).toHaveTextContent('APIs configurées')
+    const tmdbRow = await screen.findByRole('button', { name: /tmdb/i })
+    expect(tmdbRow).toHaveTextContent('REST · https://api.themoviedb.org/3')
+    expect(tmdbRow).not.toHaveTextContent('MCP')
+
+    fireEvent.click(tmdbRow)
+    expect(screen.getByRole('textbox')).toHaveValue('@api:tmdb ')
   })
 
   it('shows Plugins before Skills in one shared scroll body', async () => {
@@ -579,6 +625,32 @@ describe('Composer popovers', () => {
     expect(await screen.findByText('Ajouter au prompt')).toBeVisible()
     fireEvent.click(screen.getByRole('option', { name: /sales/ }))
     expect(screen.getByRole('textbox')).toHaveValue('@db:sales ')
+  })
+
+  it('garde @ actif au milieu du prompt et désactive la complétion des mots', async () => {
+    mocks.getDbConnections.mockResolvedValue([{
+      id: 'db-1',
+      name: 'sales',
+      engine: 'postgresql',
+      config: { host: 'localhost', port: 5432 },
+      hasSecret: true,
+      enabled: true,
+      createdAt: '2026-08-28T00:00:00Z',
+      updatedAt: '2026-08-28T00:00:00Z',
+    }])
+    await renderComposer()
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    expect(input).toHaveAttribute('autocomplete', 'off')
+    expect(input).toHaveAttribute('autocorrect', 'off')
+    expect(input).toHaveAttribute('autocapitalize', 'off')
+    expect(input).toHaveAttribute('spellcheck', 'false')
+
+    fireEvent.change(input, { target: { value: 'avant @sa après' } })
+    input.setSelectionRange('avant @sa'.length, 'avant @sa'.length)
+    fireEvent.select(input)
+    expect(await screen.findByText('Ajouter au prompt')).toBeVisible()
+    fireEvent.click(screen.getByRole('option', { name: /sales/ }))
+    expect(input).toHaveValue('avant @db:sales  après')
   })
 })
 

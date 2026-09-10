@@ -42,6 +42,7 @@ pub mod plugin_extensions;
 pub mod plugin_local_runtime;
 pub mod plugin_mcp;
 pub mod plugin_user_resources;
+pub mod prompt_mentions;
 pub mod pptx_preview;
 pub mod project;
 pub mod qiskit;
@@ -52,3 +53,5 @@ pub mod settings;
 pub mod ssh;
 pub mod task;
 pub mod workspace;
+
+pub mod document_runtime;

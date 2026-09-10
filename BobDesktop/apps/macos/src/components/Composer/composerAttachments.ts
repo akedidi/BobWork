@@ -103,18 +103,78 @@ export function getSuggestedBuiltinPluginId(path: string): string | null {
   return EXTENSION_TO_BUILTIN_PLUGIN[ext] ?? null
 }
 
-export function getActivePluginMention(text: string): string | null {
-  return getActivePluginMentions(text)[0] ?? null
+export interface ComposerMentionCatalog {
+  pluginIds?: readonly string[]
+  skillSlugs?: readonly string[]
+}
+
+const MENTION_ID_CHARS: Record<ComposerMentionChip['kind'], RegExp> = {
+  plugin: /[A-Za-z0-9-]/,
+  skill: /[A-Za-z0-9._-]/,
+  integration: /[A-Za-z0-9-]/,
+  api: /[A-Za-z0-9._-]/,
+  mcp: /[A-Za-z0-9._-]/,
+  db: /[A-Za-z0-9._-]/,
+}
+
+function longestKnownPrefix(rest: string, knownIds: readonly string[]): string | null {
+  let best: string | null = null
+  for (const id of knownIds) {
+    if (!rest.startsWith(id)) continue
+    if (!best || id.length > best.length) best = id
+  }
+  return best
+}
+
+function fallbackMentionId(rest: string, allowed: RegExp): string | null {
+  let length = 0
+  for (const char of rest) {
+    if (!allowed.test(char)) break
+    length += char.length
+  }
+  return length > 0 ? rest.slice(0, length) : null
+}
+
+function matchMentionId(
+  rest: string,
+  knownIds: readonly string[] | undefined,
+  kind: ComposerMentionChip['kind'],
+): string | null {
+  const known = knownIds?.length ? longestKnownPrefix(rest, knownIds) : null
+  if (known) return known
+  return fallbackMentionId(rest, MENTION_ID_CHARS[kind])
+}
+
+function scanTypedMentions(
+  text: string,
+  kind: ComposerMentionChip['kind'],
+  knownIds: readonly string[] | undefined,
+): string[] {
+  const marker = new RegExp(`@${kind}:`, 'g')
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const match of text.matchAll(marker)) {
+    const rest = text.slice(match.index! + match[0].length)
+    const id = matchMentionId(rest, knownIds, kind)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+export function getActivePluginMention(text: string, catalog?: ComposerMentionCatalog): string | null {
+  return getActivePluginMentions(text, catalog)[0] ?? null
 }
 
 /** Unique plugin ids mentioned in composer text, in appearance order. */
-export function getActivePluginMentions(text: string): string[] {
-  return uniqueMentions(text, /@plugin:([A-Za-z0-9-]+)/g)
+export function getActivePluginMentions(text: string, catalog?: ComposerMentionCatalog): string[] {
+  return scanTypedMentions(text, 'plugin', catalog?.pluginIds)
 }
 
 /** Unique skill slugs mentioned in composer text, in appearance order. */
-export function getActiveSkillMentions(text: string): string[] {
-  return uniqueMentions(text, /@skill:([A-Za-z0-9._-]+)/g)
+export function getActiveSkillMentions(text: string, catalog?: ComposerMentionCatalog): string[] {
+  return scanTypedMentions(text, 'skill', catalog?.skillSlugs)
 }
 
 /** Unique MCP server names mentioned in composer text, in appearance order. */
@@ -129,17 +189,84 @@ export function getActiveDbMentions(text: string): string[] {
 export type ComposerMentionChip =
   | { kind: 'plugin'; id: string }
   | { kind: 'skill'; id: string }
+  | { kind: 'integration'; id: string }
+  | { kind: 'api'; id: string }
   | { kind: 'mcp'; id: string }
   | { kind: 'db'; id: string }
 
-/** All @plugin / @skill / @mcp / @db chips for the composer preview, first-seen order. */
-export function getActiveComposerMentions(text: string): ComposerMentionChip[] {
+const PLUGIN_MENTION_ALIASES: Record<string, string> = {
+  'agentic-senior-cloud-architect': 'agentic-cloud-architect',
+  'builtin-cloud-architect': 'agentic-cloud-architect',
+}
+
+function rewriteAttachedPluginMentions(text: string, catalog?: ComposerMentionCatalog): string {
+  const marker = /@plugin:/g
+  let result = ''
+  let lastIndex = 0
+  for (const match of text.matchAll(marker)) {
+    const idx = match.index!
+    if (lastIndex < idx) result += text.slice(lastIndex, idx)
+    const rest = text.slice(idx + match[0].length)
+    const id = matchMentionId(rest, catalog?.pluginIds, 'plugin')
+    if (!id) {
+      result += match[0]
+      lastIndex = idx + match[0].length
+      continue
+    }
+    const tail = rest.slice(id.length)
+    const needsSpace = tail.length > 0 && !/^[\s@]/.test(tail)
+    result += `@plugin:${id}${needsSpace ? ' ' : ''}`
+    lastIndex = idx + match[0].length + id.length
+  }
+  if (lastIndex < text.length) result += text.slice(lastIndex)
+  return result
+}
+
+/** Canonicalize historical plugin ids and keep only one mention per plugin. */
+export function normalizeComposerCapabilityMentions(text: string, catalog?: ComposerMentionCatalog): string {
+  const seenPlugins = new Set<string>()
+  const withDetachedText = rewriteAttachedPluginMentions(text, catalog)
+  let result = ''
+  let lastIndex = 0
+  for (const match of withDetachedText.matchAll(/@plugin:/g)) {
+    const idx = match.index!
+    result += withDetachedText.slice(lastIndex, idx)
+    const rest = withDetachedText.slice(idx + match[0].length)
+    const id = matchMentionId(rest, catalog?.pluginIds, 'plugin')
+    if (!id) {
+      result += match[0]
+      lastIndex = idx + match[0].length
+      continue
+    }
+    const canonical = PLUGIN_MENTION_ALIASES[id] ?? id
+    if (!seenPlugins.has(canonical)) {
+      seenPlugins.add(canonical)
+      result += `@plugin:${canonical}`
+    }
+    lastIndex = idx + match[0].length + id.length
+  }
+  result += withDetachedText.slice(lastIndex)
+  return result
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
+/** All typed capability mentions for the composer preview, first-seen order. */
+export function getActiveComposerMentions(text: string, catalog?: ComposerMentionCatalog): ComposerMentionChip[] {
   const chips: ComposerMentionChip[] = []
   const seen = new Set<string>()
-  const pattern = /@(plugin|skill|mcp|db):([A-Za-z0-9._-]+)/g
+  const pattern = /@(plugin|skill|integration|api|mcp|db):/g
   for (const match of text.matchAll(pattern)) {
     const kind = match[1] as ComposerMentionChip['kind']
-    const id = match[2]
+    const rest = text.slice(match.index! + match[0].length)
+    const knownIds = kind === 'plugin'
+      ? catalog?.pluginIds
+      : kind === 'skill'
+        ? catalog?.skillSlugs
+        : undefined
+    const id = matchMentionId(rest, knownIds, kind)
+    if (!id) continue
     const key = `${kind}:${id}`
     if (seen.has(key)) continue
     seen.add(key)

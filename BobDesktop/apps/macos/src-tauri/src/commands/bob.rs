@@ -252,6 +252,16 @@ pub async fn send_message(
     db: State<'_, Database>,
 ) -> Result<StartSessionResult, AppError> {
     let conv_service = ConversationService::new();
+    let plugin_reference_ids =
+        crate::services::prompt_mentions::plugin_reference_ids(&db)?;
+    let message = crate::services::prompt_mentions::normalize_plugin_mentions(
+        &message,
+        &plugin_reference_ids,
+    );
+    // The selected mode belongs to the conversation and must survive both
+    // route changes and application restarts. Persist again at dispatch time
+    // so mobile/remote clients receive the same guarantee as the desktop UI.
+    conv_service.set_mode(&db, &conversation_id, &mode)?;
     let approved_plugin_ids = approved_plugin_ids.unwrap_or_default();
     let project = if let Some(project_id) = project_id.as_deref() {
         crate::services::project::ProjectService::new().get_by_id(&db, project_id)?
@@ -281,15 +291,18 @@ pub async fn send_message(
                 )));
             }
         }
-        for captures in regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)")
-            .unwrap()
-            .captures_iter(&message)
-        {
-            if !project
-                .allowed_plugins
-                .iter()
-                .any(|value| value == &captures[1])
-            {
+        for requested in crate::services::prompt_mentions::collect_plugin_mention_ids(
+            &message,
+            &plugin_reference_ids,
+        ) {
+            let plugin_id = crate::services::plugin::PluginService::new()
+                .get_by_reference(&db, &requested)?
+                .map(|plugin| plugin.id)
+                .unwrap_or_else(|| requested.clone());
+            if !project.allowed_plugins.iter().any(|value| {
+                crate::services::prompt_mentions::canonical_plugin_mention_id(value)
+                    == crate::services::prompt_mentions::canonical_plugin_mention_id(&plugin_id)
+            }) {
                 return Err(AppError::PermissionDenied(
                     "Ce plugin n’est pas autorisé dans ce projet.".into(),
                 ));
@@ -302,17 +315,17 @@ pub async fn send_message(
     let mut office_plugins = vec![];
     let mut missing_local_tools = vec![];
     let mut checked_plugin_ids = std::collections::HashSet::new();
-    for captures in regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)")
-        .unwrap()
-        .captures_iter(&message)
-    {
-        let plugin_id = &captures[1];
-        if !checked_plugin_ids.insert(plugin_id.to_string()) {
+    for requested in crate::services::prompt_mentions::collect_plugin_mention_ids(
+        &message,
+        &plugin_reference_ids,
+    ) {
+        let plugin = crate::services::plugin::PluginService::new()
+            .get_by_reference(&db, &requested)?
+            .ok_or_else(|| AppError::NotFound(format!("Plugin {} introuvable", requested)))?;
+        let plugin_id = plugin.id.clone();
+        if !checked_plugin_ids.insert(plugin_id.clone()) {
             continue;
         }
-        let plugin = crate::services::plugin::PluginService::new()
-            .get_by_id(&db, plugin_id)?
-            .ok_or_else(|| AppError::NotFound(format!("Plugin {} introuvable", plugin_id)))?;
         if plugin.install_state != "installed" {
             return Err(AppError::PermissionDenied(format!(
                 "Le plugin {} est désactivé.",
@@ -400,7 +413,7 @@ pub async fn send_message(
         let trusted_local_office = plugin.manifest.get("specializedMode").is_some();
         if requires_preflight
             && !trusted_local_office
-            && !approved_plugin_ids.iter().any(|value| value == plugin_id)
+            && !approved_plugin_ids.iter().any(|value| value == &plugin_id)
         {
             return Err(AppError::PermissionDenied(format!(
                 "Le plugin {} nécessite une autorisation explicite avant cette exécution.",
@@ -506,7 +519,9 @@ pub async fn send_message(
         .iter()
         .map(|item| item.id.clone())
         .collect::<std::collections::HashSet<_>>();
-    for connection_id in overlay.linked_connection_ids_for_message(&message) {
+    for connection_id in
+        overlay.linked_connection_ids_for_message(&message, &plugin_reference_ids)
+    {
         if !seen_db_ids.insert(connection_id.clone()) {
             continue;
         }
@@ -522,7 +537,8 @@ pub async fn send_message(
     // Composer paths (e.g. ~/Downloads) are outside Bob Shell's sandbox unless
     // we copy them under `--workspace` first.
     let mut requested_attachment_paths = attachment_paths.unwrap_or_default();
-    requested_attachment_paths.extend(overlay.paths_for_plugin_mentions(&message));
+    requested_attachment_paths
+        .extend(overlay.paths_for_plugin_mentions(&message, &plugin_reference_ids));
     requested_attachment_paths.extend(
         crate::services::db_connection::DbConnectionService::sqlite_file_paths(&db_connections),
     );
@@ -817,6 +833,12 @@ pub async fn send_message(
                 "onenote".into(),
             ]
         });
+    integration_ids.extend(
+        regex::Regex::new(r"@integration:([A-Za-z0-9-]+)")
+            .unwrap()
+            .captures_iter(&message)
+            .filter_map(|captures| captures.get(1).map(|value| value.as_str().to_string())),
+    );
     integration_ids.extend(plugin_integration_ids);
     integration_ids.sort();
     integration_ids.dedup();
@@ -938,6 +960,33 @@ pub async fn send_message(
             local_audio_context,
         )
     };
+
+    if !sending_condense && checked_plugin_ids.contains("agentic-cloud-architect") {
+        prompt.push_str(
+            "\n\nCONTRAT DE LIVRAISON CLOUD ARCHITECT — contrôle plateforme obligatoire : pour tout diagramme d’architecture de plus de 12 composants visibles ou 16 relations, `architecture.svg` et `architecture.png` désignent exclusivement une vue maître déterministe générée avec `scripts/render_professional_svg.py`. Sans directive d’orientation, utilise le paysage 1920×1080. La vue D2/ELK complète reste un livrable technique séparé et ne doit jamais remplacer le master. Génère aussi les vues deployment/network et operations lorsque le modèle dépasse 18 composants. Valide le master avec `python3 scripts/qa_professional_svg.py architecture.svg --master`; une dimension ou orientation différente de la demande, un enchevêtrement de flux ou l’absence des vues requises bloque la livraison. Ne fabrique pas un rapport QA manuel et ne déclare pas PASS si cette commande n’a pas réussi.",
+        );
+        match cloud_architect_display_format(&message) {
+            Some("executive-boxes") => prompt.push_str(
+                "\nFORMAT EXPLICITE `executive-boxes` : force le master fixe 1920×1080, même sous les seuils de densité. Utilise des cartes blanches de dimensions cohérentes, bordures visibles, coins arrondis, icônes alignées, titres contenus, zones fonctionnelles légèrement teintées et clairement délimitées, gouttières réservées aux connecteurs et un flux principal gauche→droite. Déporte le détail excédentaire dans des vues complémentaires.",
+            ),
+            Some("technical-detailed") => prompt.push_str(
+                "\nFORMAT EXPLICITE `technical-detailed` : produis une vue technique séparée avec tous les composants et flux utiles, dans `architecture-technical.svg` et `architecture-technical.png`. Conserve aussi le master `architecture.svg`/`architecture.png` en `executive-boxes` lorsque les seuils de densité sont dépassés. Ne réduis pas les polices pour faire tenir artificiellement la topologie.",
+            ),
+            Some("auto") => prompt.push_str(
+                "\nFORMAT EXPLICITE `auto` : sélectionne `executive-boxes` pour le master dès que la vue est dense et réserve l’auto-layout au livrable technique séparé.",
+            ),
+            _ => {}
+        }
+        match cloud_architect_orientation(&message) {
+            Some("horizontal") => prompt.push_str(
+                "\nORIENTATION EXPLICITE `horizontal` : impose un canvas paysage 1920×1080, une composition gauche→droite et `scripts/render_professional_svg.py --orientation horizontal`. Valide avec `scripts/qa_professional_svg.py architecture.svg --master --orientation horizontal`.",
+            ),
+            Some("vertical") => prompt.push_str(
+                "\nORIENTATION EXPLICITE `vertical` : impose un canvas portrait 1080×1920, une composition haut→bas et `scripts/render_professional_svg.py --orientation vertical`. Valide avec `scripts/qa_professional_svg.py architecture.svg --master --orientation vertical`. Ne livre jamais un paysage simplement pivoté ou étiré.",
+            ),
+            _ => {}
+        }
+    }
 
     // Generated deliverables need a stable home: the conversation workspace is
     // retained and indexed as Bob Work artifacts, while shell temp folders are
@@ -1226,34 +1275,55 @@ async fn generate_first_prompt_title(
 fn translate_prompt_mentions(db: &Database, message: &str) -> String {
     let skill_re = regex::Regex::new(r"@skill:([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)").unwrap();
     let mut translated = skill_re.replace_all(message, "$$$1").to_string();
-    let plugin_re = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)").unwrap();
-    translated = plugin_re
+    let plugin_reference_ids =
+        crate::services::prompt_mentions::plugin_reference_ids(db).unwrap_or_default();
+    translated = crate::services::prompt_mentions::translate_plugin_mentions(
+        db,
+        &translated,
+        &plugin_reference_ids,
+    );
+    let integration_re = regex::Regex::new(r"@integration:([A-Za-z0-9-]+)").unwrap();
+    translated = integration_re
         .replace_all(&translated, |captures: &regex::Captures| {
             let id = captures.get(1).map(|value| value.as_str()).unwrap_or("");
-            let slug = crate::services::plugin::PluginService::new()
-                .get_by_id(db, id)
-                .ok()
-                .flatten()
-                .map(|plugin| {
-                    plugin
-                        .manifest
-                        .get("slug")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(&plugin.name)
-                        .to_string()
-                })
-                .map(|value| {
-                    value
-                        .to_lowercase()
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                        .collect::<String>()
-                });
-            slug.map(|value| format!("${}", value.trim_matches('-')))
-                .unwrap_or_else(|| captures[0].to_string())
+            match id {
+                "github" | "slack" | "monday" => format!("$bob-work-{id}"),
+                "outlook-mail" | "outlook-calendar" | "teams" | "onedrive" => {
+                    format!("$bob-work-{id}")
+                }
+                "onenote" => "$bob-work-microsoft-onenote".into(),
+                _ => captures[0].to_string(),
+            }
+        })
+        .to_string();
+    let api_re = regex::Regex::new(r"@api:([A-Za-z0-9._-]+)").unwrap();
+    translated = api_re
+        .replace_all(&translated, |captures: &regex::Captures| {
+            let id = captures.get(1).map(|value| value.as_str()).unwrap_or("api");
+            let tool = id
+                .chars()
+                .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') { character } else { '_' })
+                .collect::<String>();
+            format!(
+                "Utilise l’API configurée « {id} » via l’outil `{tool}_api_get`; son authentification est injectée automatiquement."
+            )
         })
         .to_string();
     translated
+}
+
+fn cloud_architect_display_format(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    ["executive-boxes", "technical-detailed", "auto"]
+        .into_iter()
+        .find(|format| normalized.contains(&format!("[diagram-format:{format}]")))
+}
+
+fn cloud_architect_orientation(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    ["horizontal", "vertical"]
+        .into_iter()
+        .find(|orientation| normalized.contains(&format!("[diagram-orientation:{orientation}]")))
 }
 
 // ── stop_task ─────────────────────────────────────────────────
@@ -1551,6 +1621,12 @@ fn build_prompt_with_history(
     let web_enabled = web_enabled && !sandbox_mode;
     let computer_use_enabled = computer_use_enabled && !sandbox_mode;
     let chrome_control_enabled = chrome_control_enabled && !sandbox_mode;
+    let document_guidance = if sandbox_mode {
+        ""
+    } else {
+        "\nDocuments natifs Bob Work : LaTeX (Tectonic) et Pandoc sont des runtimes partagés fournis par la plateforme. Utilise les exécutables $BOB_WORK_LATEX et $BOB_WORK_PANDOC ou tectonic/pandoc déjà présents dans PATH. Ne les installe pas et ne les duplique pas dans les plugins. Compile un .tex avec `tectonic -X compile --untrusted --outdir <dossier> <source.tex>`. Convertis Markdown/LaTeX/DOCX/HTML/EPUB avec Pandoc ; pour une sortie PDF utilise `--pdf-engine=tectonic`. Tectonic peut télécharger ses paquets TeX à la première compilation et les réutilise en cache. Place les livrables dans le workspace, vérifie la réussite de la conversion et cite le chemin absolu du PDF final : Bob Work l'affichera dans le lecteur PDF intégré à la conversation. Les plugins déclarent sharedCapabilities latex ou document.convert."
+    };
+    let global_instructions = format!("{global_instructions}{document_guidance}");
     let prefix = match mode {
         "ask" | "quick_chat" =>
             "Réponds de façon concise et directe.",
@@ -1589,8 +1665,8 @@ fn build_prompt_with_history(
 
     let creating_plugin = plugin_creation.is_some();
     let instruction_context = [
+        Some("Suivi du plan Bob Work : pour toute tâche en plusieurs étapes, `update_todo_list` doit être le tout premier appel d’outil s’il est disponible, avant `use_skill`, toute lecture, recherche, commande ou modification. Publie immédiatement un plan initial concret d’au moins 2 étapes, avec une granularité proportionnée à la tâche, zéro étape `completed` et exactement une étape `in_progress`. Après avoir lu les skills ou découvert de nouvelles contraintes, affine ce même plan au lieu d’en créer un tardivement. Le plan peut dépasser 8 étapes lorsque le travail le justifie, sans plafond arbitraire. Mets à jour ce même plan après chaque transition et termine avec toutes les étapes `completed`, `failed` ou `skipped`. N’établis pas de plan pour une question simple ou une action unique.".to_string()),
         Some(crate::services::plugin_deploy::PLUGIN_INVOCATION_POLICY.to_string()),
-        Some("Suivi du plan Bob Work : pour une tâche d’implémentation en plusieurs étapes, notamment la création ou la restructuration d’un projet, utilise `update_todo_list` s’il est disponible. Publie avant la première modification un plan concret d’au moins 2 étapes, avec une granularité proportionnée à la tâche et exactement une étape `in_progress` ; le plan peut dépasser 8 étapes lorsque le travail le justifie, sans plafond arbitraire. Mets à jour ce même plan après chaque transition et termine avec toutes les étapes `completed`, `failed` ou `skipped`. N’établis pas de plan pour une question simple ou une action unique.".to_string()),
         conversation_summary.filter(|value| !value.trim().is_empty()).map(|value| format!("Résumé cumulatif de la conversation (source de vérité pour les échanges plus anciens) :\n{}", value.trim())),
         (!global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", global_instructions.trim())),
         project_instructions.filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
@@ -1609,7 +1685,7 @@ fn build_prompt_with_history(
             "Création de plugin : le wizard est facultatif. Déclare `sharedCapabilities`, `externalRuntimes` et `privateDependencies` selon Runtime Architecture V2. Une dépendance privée référence uniquement un actif packagé, un fichier fourni par l’utilisateur, une source approuvée ou un exécutable connu ; le Runtime Manager réalise l’installation et la validation. Ne lance jamais curl, pip, npm global, Homebrew ou un téléchargement d’exécutable depuis le modèle.".to_string()
         }),
         sandbox_mode.then(crate::services::permission_governance::sandbox_guidance),
-        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, desktop_scroll, press_key). Boucle obligatoire : observe avec get_app_state, décide d’une seule action, exécute-la, puis observe à nouveau pour vérifier son effet avant toute autre action. Arrête après l’objectif, un refus, trois observations sans progrès ou la limite signalée par l’outil. Style ChatGPT Work : reste dans Bob Work et pilote les apps en arrière-plan. open_app sans activate (défaut). Préfère get_app_state puis ui_click / ui_set_value / app_command — sans focus_app. N’appelle focus_app ni bring_to_front=true qu’en dernier recours (fenêtre masquée, saisie clavier globale indispensable). Ne vérifie pas que frontmost=true avant d’agir. Si l’arbre AX est pauvre, capture_screen sans bring_to_front (max 3). Jamais d’action dans Bob Work ou ChatGPT. Ne raconte pas chaque micro-action. N’utilise jamais un aperçu Chrome pour une app Mac ni une URI non HTTP(S). N’exécute jamais osascript/python3/Terminal pour piloter l’UI. Les validations sensibles sont imposées par Bob Work : n’essaie jamais de les contourner ni de répéter une action refusée. Si Accessibilité ou Enregistrement de l’écran est refusé, demande d’autoriser **Bob Work** (pas python3, pas Terminal, pas osascript).".to_string()),
+        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, desktop_scroll, press_key). Boucle obligatoire : observe avec get_app_state, décide d’une seule action, exécute-la, puis observe à nouveau pour vérifier son effet avant toute autre action. Arrête après l’objectif, un refus, trois observations sans progrès ou la limite signalée par l’outil. Style ChatGPT Work : reste dans Bob Work et pilote les apps en arrière-plan. open_app sans activate (défaut). Préfère get_app_state puis ui_click / ui_set_value / app_command — sans focus_app. Pour une saisie clavier globale indispensable, appelle desktop_type une seule fois avec tout le texte, app renseignée et bring_to_front=true ; l’outil conserve alors le focus de la cible pendant la saisie. N’appelle focus_app ni bring_to_front=true qu’en dernier recours (fenêtre masquée, saisie clavier globale indispensable). Ne vérifie pas que frontmost=true avant d’agir. Si l’arbre AX est pauvre, capture_screen sans bring_to_front (max 10). Jamais d’action dans Bob Work ou ChatGPT. Ne raconte pas chaque micro-action. N’utilise jamais un aperçu Chrome pour une app Mac ni une URI non HTTP(S). N’exécute jamais osascript/python3/Terminal pour piloter l’UI. Les validations sensibles sont imposées par Bob Work : n’essaie jamais de les contourner ni de répéter une action refusée. Si Accessibilité ou Enregistrement de l’écran est refusé, demande d’autoriser **Bob Work** (pas python3, pas Terminal, pas osascript).".to_string()),
         chrome_control_enabled.then(|| "Contrôle Chrome Bob Work explicitement demandé pour ce message : utilise uniquement les outils `chrome_*` de bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, demande d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation.".to_string()),
         (!integration_context.is_empty()).then(|| format!("Intégrations locales disponibles (utilise les variables d’environnement nommées, sans jamais les afficher) :\n{}", integration_context.join("\n"))),
         db_context,
@@ -1901,13 +1977,14 @@ Ne recopie jamais ces moteurs dans le plugin. Une autre dépendance n’est priv
 ## Fichiers & structure
 - Bundle uniquement dans ~/.bob/skills/<slug>/ selon le schéma Bob Work ci-dessus (slug a-z, 0-9, tirets). Ne pas inventer d’autres dossiers.
 - Obligatoire : SKILL.md + `.bob-work-plugin.json` (schemaVersion, name, slug, version, description, category, permissions, runtime, entrypoints, specializedMode, connectorStrategy, resources, icon).
+- Contrat strict : `category` = `recipe|integration|executable` (`executable` si un processus est lancé) ; `permissions` = objets `{ "type": "…" }` ; chaque entrypoint = `{ "name": "…", "runtime": "python3|bash|sh|zsh|node|binary", "path": "scripts/..." }`. Interdit d'utiliser `personal` comme catégorie ou `type`/`command`/`args` dans un entrypoint.
 - `icon` (obligatoire) : Bob Work doit lui affecter une icône **par défaut** en adéquation avec la description et le métier. Cherche un logo/favicon public représentatif (outil, profession, secteur) et écris une URL HTTPS du type `https://www.google.com/s2/favicons?domain=<domaine>&sz=128`. Tu peux aussi utiliser une clé locale (`word`, `excel`, `powerpoint`, `onenote`, `document`, `invest`, `computer`, `chrome`, `github`, `slack`, `monday`, `outlook`, `teams`, `calendar`, `onedrive`, `meeting`, `designer`, `consultant`, `rfp`, `product`, `delivery`, `change`, `architecture`, `agentic`, `plugin`) si elle correspond vraiment. Jamais laisser `icon` vide ni le générique `plugin` s’il existe une meilleure correspondance.
 - Ne crée pas de second plugin pour un slug déjà couvert par un builtin Bob Work (Word/Excel/PowerPoint/OneNote/Documents/Computer Use/Chrome…).
 - MCP / CLI / binaires / shell / integrations / browserExtensions selon le besoin réel. Secrets = `${PLACEHOLDER}` ou OAuth catalogue uniquement.
 
 ## Annonce
-- Succès seulement si fichiers écrits et validés.
-- Après succès, invite l’utilisateur à ouvrir Plugins → le plugin pour lancer « Mise en service » (validate / sync MCP / test).
+- Succès seulement si fichiers écrits et validés contre le contrat d'import exact, puis entrypoints exécutés avec succès.
+- À la fin du run, Bob Work importe automatiquement le bundle dans Plugins et Skills. Ne demande pas une « Mise en service » manuelle et ne prétends pas que l'import est confirmé par la seule présence des fichiers.
 - Section finale « Choix de conception » : ressources retenues vs écartées, activation utilisateur, limites."#,
         ]
         .concat(),
@@ -2104,7 +2181,10 @@ mod plugin_creation_protocol_tests {
         assert!(protocol.contains("Exploration obligatoire"));
         assert!(protocol.contains("bénéfice utilisateur"));
         assert!(protocol.contains("PAS dans `description`"));
-        assert!(protocol.contains("Mise en service"));
+        assert!(protocol.contains("importe automatiquement"));
+        assert!(protocol.contains("`recipe|integration|executable`"));
+        assert!(protocol.contains(r#"{ "name": "…", "runtime": "python3|bash|sh|zsh|node|binary", "path": "scripts/..." }"#));
+        assert!(protocol.contains("Interdit d'utiliser `personal` comme catégorie"));
         assert!(protocol.contains("bundled-bin"));
         assert!(protocol.contains("Mermaid"));
         assert!(protocol.contains("homme à tout faire"));
@@ -2192,6 +2272,9 @@ mod plugin_creation_protocol_tests {
         assert!(prompt.contains("récupère les contenus en arrière-plan"));
         assert!(prompt.contains("n’autorise jamais l’ouverture de Chrome"));
         assert!(prompt.contains("update_todo_list"));
+        assert!(prompt.contains("tout premier appel d’outil"));
+        assert!(prompt.contains("avant `use_skill`"));
+        assert!(prompt.contains("zéro étape `completed`"));
         assert!(prompt.contains("exactement une étape `in_progress`"));
         assert!(prompt.contains("peut dépasser 8 étapes"));
         assert!(prompt.contains("Mets à jour ce même plan après chaque transition"));
@@ -2373,7 +2456,13 @@ mod plugin_creation_protocol_tests {
 
 #[cfg(test)]
 mod cto_invest_prompt_tests {
-    use super::{build_office_specialized_context, translate_prompt_mentions};
+    use super::{
+        build_office_specialized_context, cloud_architect_display_format,
+        cloud_architect_orientation, translate_prompt_mentions,
+    };
+    use crate::services::prompt_mentions::{
+        normalize_plugin_mentions, plugin_reference_ids,
+    };
     use crate::db::Database;
     use crate::services::plugin::PluginService;
 
@@ -2443,7 +2532,7 @@ mod cto_invest_prompt_tests {
 
         let translated = translate_prompt_mentions(
             &db,
-            "@plugin:builtin-cloud-architect @skill:newer-custom Dessine l'architecture cible",
+            "@plugin:agentic-cloud-architect @skill:newer-custom Dessine l'architecture cible",
         );
 
         assert!(
@@ -2454,5 +2543,81 @@ mod cto_invest_prompt_tests {
             translated.contains("$newer-custom"),
             "personal skill must remain addressable by Bob Shell: {translated}"
         );
+
+        for legacy_id in ["agentic-senior-cloud-architect", "builtin-cloud-architect"] {
+            let translated = translate_prompt_mentions(
+                &db,
+                &format!("@plugin:{legacy_id} Dessine l'architecture cible"),
+            );
+            assert!(
+                translated.contains("$cloud-architect"),
+                "legacy mention must resolve to the canonical skill: {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn former_cloud_architect_mentions_are_canonicalized_and_deduplicated() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        PluginService::new()
+            .ensure_builtin_plugins(&db)
+            .expect("builtins");
+        let known = plugin_reference_ids(&db).expect("references");
+        assert_eq!(
+            normalize_plugin_mentions(
+                "@plugin:agentic-cloud-architect Dessine @plugin:builtin-cloud-architect @plugin:agentic-senior-cloud-architect",
+                &known,
+            ),
+            "@plugin:agentic-cloud-architect Dessine"
+        );
+    }
+
+    #[test]
+    fn cloud_architect_display_format_is_explicit_and_case_insensitive() {
+        assert_eq!(
+            cloud_architect_display_format("[diagram-format:EXECUTIVE-BOXES] Crée une vue Azure"),
+            Some("executive-boxes")
+        );
+        assert_eq!(
+            cloud_architect_display_format("[diagram-format:technical-detailed]"),
+            Some("technical-detailed")
+        );
+        assert_eq!(cloud_architect_display_format("Crée un diagramme"), None);
+    }
+
+    #[test]
+    fn cloud_architect_orientation_is_explicit_and_case_insensitive() {
+        assert_eq!(
+            cloud_architect_orientation("[diagram-orientation:HORIZONTAL]"),
+            Some("horizontal")
+        );
+        assert_eq!(
+            cloud_architect_orientation("[diagram-orientation:vertical]"),
+            Some("vertical")
+        );
+        assert_eq!(cloud_architect_orientation("diagramme horizontal"), None);
+    }
+
+    #[test]
+    fn integration_mentions_are_distinct_and_load_the_connector_skill() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let translated = translate_prompt_mentions(
+            &db,
+            "@integration:github Compte mes dépôts sans confondre la connexion et le skill",
+        );
+        assert!(translated.contains("$bob-work-github"));
+        assert!(!translated.contains("@integration:github"));
+    }
+
+    #[test]
+    fn api_mentions_select_the_rest_tool_without_exposing_a_secret() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let translated = translate_prompt_mentions(&db, "@api:tmdb Liste les séries récentes");
+        assert!(translated.contains("`tmdb_api_get`"));
+        assert!(!translated.contains("@api:tmdb"));
+        assert!(!translated.contains("api_key="));
     }
 }

@@ -41,18 +41,20 @@ impl PluginUserResourceService {
             .collect())
     }
 
-    pub fn paths_for_plugin_mentions(&self, message: &str) -> Vec<String> {
-        let Ok(regex) = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)") else {
-            return vec![];
-        };
+    pub fn paths_for_plugin_mentions(
+        &self,
+        message: &str,
+        known_plugin_ids: &[String],
+    ) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut paths = Vec::new();
-        for captures in regex.captures_iter(message) {
-            let plugin_id = &captures[1];
-            if !seen.insert(plugin_id.to_string()) {
+        for plugin_id in
+            crate::services::prompt_mentions::collect_plugin_mention_ids(message, known_plugin_ids)
+        {
+            if !seen.insert(plugin_id.clone()) {
                 continue;
             }
-            if let Ok(files) = self.file_paths(plugin_id) {
+            if let Ok(files) = self.file_paths(&plugin_id) {
                 paths.extend(files);
             }
         }
@@ -174,15 +176,17 @@ impl PluginUserResourceService {
         Ok(overlay.linked_databases)
     }
 
-    pub fn linked_connection_ids_for_message(&self, message: &str) -> Vec<String> {
-        let Ok(regex) = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)") else {
-            return vec![];
-        };
+    pub fn linked_connection_ids_for_message(
+        &self,
+        message: &str,
+        known_plugin_ids: &[String],
+    ) -> Vec<String> {
         let mut ids = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for captures in regex.captures_iter(message) {
-            let plugin_id = &captures[1];
-            if let Ok(linked) = self.list_linked_databases(plugin_id) {
+        for plugin_id in
+            crate::services::prompt_mentions::collect_plugin_mention_ids(message, known_plugin_ids)
+        {
+            if let Ok(linked) = self.list_linked_databases(&plugin_id) {
                 for item in linked {
                     if seen.insert(item.connection_id.clone()) {
                         ids.push(item.connection_id);
@@ -357,11 +361,12 @@ mod tests {
             .link_database("builtin-word", "conn-1", "sales")
             .unwrap();
         assert_eq!(linked.len(), 1);
+        let known = vec!["builtin-word".to_string()];
         assert_eq!(
-            svc.linked_connection_ids_for_message("@plugin:builtin-word hello"),
+            svc.linked_connection_ids_for_message("@plugin:builtin-word hello", &known),
             vec!["conn-1"]
         );
-        let paths = svc.paths_for_plugin_mentions("@plugin:builtin-word go");
+        let paths = svc.paths_for_plugin_mentions("@plugin:builtin-word go", &known);
         assert_eq!(paths.len(), 1);
     }
 

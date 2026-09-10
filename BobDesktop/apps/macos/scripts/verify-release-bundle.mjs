@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +15,9 @@ const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1]
 if (!cargoVersion || packageVersion !== cargoVersion || packageVersion !== tauriConfig.version) {
   throw new Error(`Release versions differ: package=${packageVersion}, Cargo=${cargoVersion}, Tauri=${tauriConfig.version}`)
 }
+if (!/^custom-protocol\s*=\s*\[\s*["']tauri\/custom-protocol["']\s*\]/m.test(cargoToml)) {
+  throw new Error('Cargo feature custom-protocol must enable tauri/custom-protocol for production bundles')
+}
 
 const explicitBundle = process.argv[2]
 const targetDir = resolve(process.env.CARGO_TARGET_DIR || join(tauriDir, 'target'))
@@ -23,9 +26,26 @@ const executable = join(bundle, 'Contents/MacOS/bob-work')
 const plist = join(bundle, 'Contents/Info.plist')
 for (const required of [bundle, executable, plist]) statSync(required)
 
+execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'pipe' })
+const requirementCheck = spawnSync(
+  '/usr/bin/codesign',
+  ['--display', '--requirements', '-', bundle],
+  { encoding: 'utf8' },
+)
+if (requirementCheck.status !== 0) {
+  throw new Error(`Unable to read release signature requirement: ${requirementCheck.stderr.trim()}`)
+}
+const designatedRequirement = `${requirementCheck.stdout}\n${requirementCheck.stderr}`.trim()
+if (/\bcdhash\b/i.test(designatedRequirement)) {
+  throw new Error('Release bundle has an unstable ad-hoc cdhash identity; macOS TCC permissions would be lost after an update')
+}
+
 const plistValue = key => execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' }).trim()
 if (plistValue('CFBundleIdentifier') !== tauriConfig.identifier) throw new Error('Unexpected release bundle identifier')
 if (plistValue('CFBundleShortVersionString') !== packageVersion) throw new Error('The packaged version does not match the sources')
+for (const key of ['NSMicrophoneUsageDescription', 'NSSpeechRecognitionUsageDescription']) {
+  if (!plistValue(key)) throw new Error(`Release Info.plist is missing ${key} (Apple dictation requires it)`)
+}
 
 const forbiddenNames = [/\.map$/i, /\.dSYM$/i, /vite\.svg$/i, /tauri\.svg$/i]
 const files = []

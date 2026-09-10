@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   formatFileSize,
   getActiveComposerMentions,
+  normalizeComposerCapabilityMentions,
   getActivePluginMention,
   getActivePluginMentions,
   getFileExtension,
@@ -55,21 +56,40 @@ describe('composerAttachments', () => {
     expect(getActivePluginMention('Sans plugin')).toBeNull()
   })
 
+  it('recognizes plugin mentions even when prompt text is attached without a space', () => {
+    const catalog = { pluginIds: ['builtin-word', 'bob-work-cto-invest'] }
+    expect(getActivePluginMentions('@plugin:builtin-wordAnalyse ce DOCX', catalog)).toEqual(['builtin-word'])
+    expect(normalizeComposerCapabilityMentions('@plugin:builtin-wordAnalyse ce DOCX', catalog))
+      .toBe('@plugin:builtin-word Analyse ce DOCX')
+    expect(getActiveComposerMentions('@plugin:builtin-wordAnalyse @skill:bob-work-github go', catalog)).toEqual([
+      { kind: 'plugin', id: 'builtin-word' },
+      { kind: 'skill', id: 'bob-work-github' },
+    ])
+  })
+
   it('detects multiple plugin, skill and mcp mentions for preview chips', () => {
-    const text = '@plugin:bob-work-ibm-pursuit @skill:bob-work-github @plugin:bob-work-cto-invest @mcp:custom-tools @db:sales go'
+    const text = '@plugin:bob-work-ibm-pursuit @skill:bob-work-github @integration:github @api:tmdb @plugin:bob-work-cto-invest @mcp:custom-tools @db:sales go'
     expect(getActivePluginMentions(text)).toEqual(['bob-work-ibm-pursuit', 'bob-work-cto-invest'])
     expect(getActiveComposerMentions(text)).toEqual([
       { kind: 'plugin', id: 'bob-work-ibm-pursuit' },
       { kind: 'skill', id: 'bob-work-github' },
+      { kind: 'integration', id: 'github' },
+      { kind: 'api', id: 'tmdb' },
       { kind: 'plugin', id: 'bob-work-cto-invest' },
       { kind: 'mcp', id: 'custom-tools' },
       { kind: 'db', id: 'sales' },
     ])
     expect(removeComposerMention(text, 'plugin', 'bob-work-ibm-pursuit')).toBe(
-      '@skill:bob-work-github @plugin:bob-work-cto-invest @mcp:custom-tools @db:sales go',
+      '@skill:bob-work-github @integration:github @api:tmdb @plugin:bob-work-cto-invest @mcp:custom-tools @db:sales go',
     )
     expect(removeComposerMention(text, 'db', 'sales')).toBe(
-      '@plugin:bob-work-ibm-pursuit @skill:bob-work-github @plugin:bob-work-cto-invest @mcp:custom-tools go',
+      '@plugin:bob-work-ibm-pursuit @skill:bob-work-github @integration:github @api:tmdb @plugin:bob-work-cto-invest @mcp:custom-tools go',
     )
+  })
+
+  it('canonicalise et déduplique les anciens noms du plugin Cloud Architect', () => {
+    expect(normalizeComposerCapabilityMentions(
+      '@plugin:agentic-cloud-architect Crée le diagramme @plugin:builtin-cloud-architect @plugin:agentic-senior-cloud-architect',
+    )).toBe('@plugin:agentic-cloud-architect Crée le diagramme')
   })
 })
