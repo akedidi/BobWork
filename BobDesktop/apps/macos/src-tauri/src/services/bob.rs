@@ -211,10 +211,17 @@ impl Drop for WorkspaceApprovalGuard {
 /// require an explicit card when the tool is called. Headless `bob run` must
 /// not rely on `--disable-tool-groups` for this gate (that removes the tools
 /// and prevents the card from ever appearing).
+///
+/// When `allow_outside_workspace` is true (sandbox mode), set
+/// `outsideWorkspaceAllowed` so `write_file` can target host
+/// `~/.bob/skills/<slug>/` for skill/plugin creation. Bob Shell already treats
+/// `$HOME/.bob/**` as in-bounds when `$HOME` is the private sandbox HOME; this
+/// flag covers absolute host paths. Seatbelt still denies Desktop/Documents/etc.
 pub(crate) fn patch_workspace_bob_approval(
     workspace: &Path,
     config: &TaskApprovalConfig,
     ensure_subagents: bool,
+    allow_outside_workspace: bool,
 ) -> AppResult<Option<WorkspaceApprovalPatch>> {
     let bob_dir = workspace.join(".bob");
     std::fs::create_dir_all(&bob_dir)?;
@@ -244,10 +251,14 @@ pub(crate) fn patch_workspace_bob_approval(
     if ensure_subagents && !allowed_permissions.iter().any(|permission| permission == "subagent") {
         allowed_permissions.push("subagent".to_string());
     }
-    settings["approval"] = serde_json::json!({
+    let mut approval = serde_json::json!({
         "autoApprovalEnabled": true,
         "allowed_permissions": allowed_permissions,
     });
+    if allow_outside_workspace {
+        approval["outsideWorkspaceAllowed"] = serde_json::json!(true);
+    }
+    settings["approval"] = approval;
 
     let written_bytes = serde_json::to_vec_pretty(&settings)?;
     std::fs::write(&settings_path, &written_bytes)?;
@@ -652,6 +663,38 @@ fn write_sandbox_mcp(sandbox_home: &Path, mut plan: SandboxMcpPlan, ensure_map: 
     Ok(())
 }
 
+/// Bob Shell reads `$HOME/.bob/settings/settings.json` for
+/// `approval.outsideWorkspaceAllowed`. Workspace `.bob/settings.json` alone is
+/// not enough (task overrides only cover allowed_permissions / autoApproval).
+/// Enable it in the private sandbox HOME so `write_file` can target host
+/// `~/.bob/skills/<slug>/` (skill/plugin creation). Seatbelt still denies other
+/// host paths (Desktop, Documents, settings, vault, …).
+fn write_sandbox_outside_workspace_approval(sandbox_home: &Path) -> AppResult<()> {
+    let settings_dir = sandbox_home.join(".bob").join("settings");
+    std::fs::create_dir_all(&settings_dir)?;
+    let settings_path = settings_dir.join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.is_file() {
+        serde_json::from_slice(&std::fs::read(&settings_path)?).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    let approval = settings
+        .as_object_mut()
+        .unwrap()
+        .entry("approval")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = approval.as_object_mut() {
+        obj.insert("outsideWorkspaceAllowed".into(), serde_json::json!(true));
+    }
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&settings).map_err(|error| {
+            AppError::Serialization(format!("sandbox settings.json: {error}"))
+        })?,
+    )?;
+    Ok(())
+}
+
 /// Expose host platform skills + shared runtimes at `$HOME/.bob/{skills,runtimes}`
 /// inside the private sandbox HOME. Seatbelt remounts the real host paths, but
 /// agents resolve `$HOME/.bob/...` — without these links the tree looks empty
@@ -843,6 +886,59 @@ fn snapshot_workspace(root: Option<&Path>) -> WorkspaceSnapshot {
     snapshot
 }
 
+/// Rewrite ephemeral sandbox HOME paths in assistant text / deliverable lists
+/// to durable host paths. Skill/plugin writes go through `$HOME/.bob/skills`
+/// (symlink to the host); without this rewrite the chat keeps dead
+/// `/var/folders/.../bob-isolated-…/.bob/skills/...` links next to a working
+/// host chip — two "outputs" for one `SKILL.md`.
+pub(crate) fn rewrite_sandbox_home_paths(text: &str, sandbox_home: &Path) -> String {
+    let Some(real_home) = dirs::home_dir() else {
+        return text.to_string();
+    };
+    let sandbox = sandbox_home.to_string_lossy();
+    let host = real_home.to_string_lossy();
+    if sandbox.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.replace(sandbox.as_ref(), host.as_ref());
+    // Also catch leftover bob-isolated temps if sandbox_home was already dropped
+    // from the string form (canonical vs non-canonical /private/var vs /var).
+    static ISOLATED_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = ISOLATED_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(?:/private)?/var/folders/[^/\s)'\]]+/[^/\s)'\]]+/T/bob-isolated-[^/\s)'\]]+",
+        )
+        .expect("isolated sandbox path regex")
+    });
+    out = re
+        .replace_all(&out, host.as_ref())
+        .into_owned();
+    out
+}
+
+pub(crate) fn rewrite_sandbox_home_path_list(
+    paths: Vec<String>,
+    sandbox_home: &Path,
+) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|path| rewrite_sandbox_home_paths(&path, sandbox_home))
+        .collect()
+}
+
+fn rewrite_sandbox_file_changes(
+    changes: Vec<FileChange>,
+    sandbox_home: &Path,
+) -> Vec<FileChange> {
+    changes
+        .into_iter()
+        .map(|change| FileChange {
+            path: rewrite_sandbox_home_paths(&change.path, sandbox_home),
+            change_type: change.change_type,
+        })
+        .collect()
+}
+
 /// Bob Work internal artifacts that may appear during a session but are not
 /// user deliverables and are often deleted immediately afterwards.
 fn is_ephemeral_workspace_path(path: &Path) -> bool {
@@ -912,6 +1008,59 @@ pub(crate) fn filter_published_file_changes(changes: Vec<FileChange>) -> Vec<Fil
             _ => false,
         })
         .collect()
+}
+
+fn path_extension_lower(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn is_office_document_path(path: &str) -> bool {
+    matches!(
+        path_extension_lower(path).as_str(),
+        "ppt" | "pptx" | "doc" | "docx" | "xls" | "xlsx" | "xlsm"
+    )
+}
+
+/// When a turn produced an Office document, hide helper `.py` scripts from the
+/// user-facing created-files / sources lists (they are implementation detail).
+pub(crate) fn suppress_office_helper_python(
+    deliverable_paths: &mut Vec<String>,
+    file_changes: &mut Vec<FileChange>,
+) {
+    let has_office = deliverable_paths.iter().any(|path| is_office_document_path(path))
+        || file_changes
+            .iter()
+            .any(|change| is_office_document_path(&change.path));
+    if !has_office {
+        return;
+    }
+    deliverable_paths.retain(|path| path_extension_lower(path) != "py");
+    file_changes.retain(|change| path_extension_lower(&change.path) != "py");
+}
+
+/// Skip empty / trivial HTML shells that would render as blank Live previews.
+pub(crate) fn is_nontrivial_html_deliverable(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.len() < 80 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = compact.to_ascii_lowercase();
+    if lower == "<html></html>"
+        || lower == "<!doctypehtml><html></html>"
+        || lower == "<html><head></head><body></body></html>"
+        || lower == "<!doctypehtml><html><head></head><body></body></html>"
+    {
+        return false;
+    }
+    true
 }
 
 fn is_workspace_write_tool(name: &str) -> bool {
@@ -1127,7 +1276,7 @@ pub(crate) fn apply_composer_group_grant(options: &mut BobRunOptions, group: &st
         &options.task_approval.allowed_permissions,
         options.enforce_composer_permissions,
     );
-    if group == "edit" && !options.sandbox_mode {
+    if group == "edit" {
         options.trust_workspace = true;
     }
 }
@@ -2109,10 +2258,13 @@ impl BobService {
             // Always expose host skills + runtimes at $HOME/.bob so contracts
             // using `$HOME/.bob/skills/...` and `command -v d2` work in sandbox.
             link_sandbox_host_bob_platform(sandbox.home())?;
+            write_sandbox_outside_workspace_approval(sandbox.home())?;
             if let Some(plan) = mcp_plan {
                 write_sandbox_mcp(sandbox.home(), plan, ensure_map)?;
             }
-            options.trust_workspace = false;
+            options.trust_workspace = true;
+            // Soft workspace check must not cancel write_file under the
+            // seatbelt-writable host remount ~/.bob/skills (skill/plugin create).
             // Subagents + Chrome follow user settings; plugin hooks stay off
             // (host-side elevation). Isolated HOME has no shared task history.
             options.plugin_hooks.clear();
@@ -2294,6 +2446,7 @@ impl BobService {
                             workspace,
                             &options.task_approval,
                             options.subagents_enabled,
+                            options.sandbox_mode,
                         )
                         .ok()
                     })
@@ -3182,7 +3335,7 @@ impl BobService {
 
             info!("Bob session {} done, success={}", sid, success);
             drop(_approval_guard);
-            let (file_changes, removed_unauthorized) = revert_unauthorized_workspace_writes(
+            let (mut file_changes, removed_unauthorized) = revert_unauthorized_workspace_writes(
                 filter_published_file_changes(workspace_file_changes(
                     workspace_path.as_deref().map(Path::new),
                     &initial_workspace,
@@ -3245,7 +3398,6 @@ impl BobService {
                             | "png"
                             | "ppt"
                             | "pptx"
-                            | "py"
                             | "svg"
                             | "txt"
                             | "webp"
@@ -3255,11 +3407,24 @@ impl BobService {
                             | "yml"
                             | "zip"
                     )
+                    && !(matches!(extension.as_str(), "html" | "htm")
+                        && !is_nontrivial_html_deliverable(path))
                 {
                     deliverable_paths.push(change.path.clone());
                 }
             }
+            if let Some(sandbox) = sandbox.as_ref() {
+                // Durable host paths for skill/plugin bundles written via the
+                // private sandbox HOME symlink — otherwise the chat shows a
+                // dead bob-isolated link plus a second host chip.
+                full_output = rewrite_sandbox_home_paths(&full_output, sandbox.home());
+                deliverable_paths =
+                    rewrite_sandbox_home_path_list(deliverable_paths, sandbox.home());
+                file_changes = rewrite_sandbox_file_changes(file_changes, sandbox.home());
+            }
             deliverable_paths = filter_accessible_deliverable_paths(deliverable_paths);
+            file_changes = filter_published_file_changes(file_changes);
+            suppress_office_helper_python(&mut deliverable_paths, &mut file_changes);
 
             let _ = app_handle.emit(
                 "bob-session-done",
@@ -3659,8 +3824,36 @@ mod conversation_title_tests {
 
 #[cfg(test)]
 mod sandbox_platform_link_tests {
-    use super::{link_sandbox_host_bob_platform, shared_diagram_d2_executable};
+    use super::{
+        link_sandbox_host_bob_platform, shared_diagram_d2_executable,
+        write_sandbox_outside_workspace_approval,
+    };
     use std::path::PathBuf;
+
+    #[test]
+    fn writes_outside_workspace_approval_into_sandbox_home_settings() {
+        let sandbox = tempfile::tempdir().unwrap();
+        write_sandbox_outside_workspace_approval(sandbox.path()).unwrap();
+        let path = sandbox
+            .path()
+            .join(".bob/settings/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["approval"]["outsideWorkspaceAllowed"], true);
+
+        // Merge preserves existing keys.
+        std::fs::write(&path, r#"{"licenseConsent":true,"approval":{"allowed_permissions":["read"]}}"#)
+            .unwrap();
+        write_sandbox_outside_workspace_approval(sandbox.path()).unwrap();
+        let merged: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(merged["licenseConsent"], true);
+        assert_eq!(merged["approval"]["outsideWorkspaceAllowed"], true);
+        assert_eq!(
+            merged["approval"]["allowed_permissions"],
+            serde_json::json!(["read"])
+        );
+    }
 
     #[test]
     fn links_host_skills_and_runtimes_into_sandbox_home() {
@@ -4584,8 +4777,31 @@ pub(crate) fn collect_deliverable_file_paths_in_workspace(
 
 #[cfg(test)]
 mod deliverable_path_tests {
-    use super::{collect_deliverable_file_paths, collect_deliverable_file_paths_in_workspace};
+    use super::{
+        collect_deliverable_file_paths, collect_deliverable_file_paths_in_workspace,
+        rewrite_sandbox_home_paths,
+    };
     use std::io::Write;
+
+    #[test]
+    fn rewrites_bob_isolated_skill_paths_to_host_home() {
+        let sandbox = std::env::temp_dir().join(format!("bob-isolated-{}", uuid::Uuid::new_v4()));
+        let text = format!(
+            "Créé : [`SKILL.md`]({}/.bob/skills/demo/SKILL.md) et aussi /private{}/.bob/skills/demo/SKILL.md",
+            sandbox.display(),
+            sandbox.display()
+        );
+        let rewritten = rewrite_sandbox_home_paths(&text, &sandbox);
+        let home = dirs::home_dir().unwrap();
+        assert!(
+            rewritten.contains(&format!("{}/.bob/skills/demo/SKILL.md", home.display())),
+            "rewritten={rewritten}"
+        );
+        assert!(
+            !rewritten.contains("bob-isolated-") && !rewritten.contains(sandbox.to_str().unwrap()),
+            "rewritten={rewritten}"
+        );
+    }
 
     #[test]
     fn extracts_existing_desktop_pptx_paths() {
@@ -5184,6 +5400,45 @@ mod tests {
     }
 
     #[test]
+    fn office_turns_hide_helper_python_scripts() {
+        let mut deliverables = vec![
+            "/tmp/pitch.pptx".into(),
+            "/tmp/create_pitch.py".into(),
+        ];
+        let mut changes = vec![
+            FileChange {
+                path: "/tmp/pitch.pptx".into(),
+                change_type: "created".into(),
+            },
+            FileChange {
+                path: "/tmp/create_pitch.py".into(),
+                change_type: "created".into(),
+            },
+        ];
+        suppress_office_helper_python(&mut deliverables, &mut changes);
+        assert_eq!(deliverables, vec!["/tmp/pitch.pptx".to_string()]);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].path.ends_with("pitch.pptx"));
+    }
+
+    #[test]
+    fn empty_html_shells_are_not_nontrivial_deliverables() {
+        let root = std::env::temp_dir().join(format!("bob-html-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let empty = root.join("empty.html");
+        std::fs::write(&empty, "<html></html>\n").unwrap();
+        let rich = root.join("dashboard.html");
+        std::fs::write(
+            &rich,
+            "<!doctype html><html><body><h1>Sales</h1><canvas id=\"c\"></canvas><script>console.log(1)</script></body></html>",
+        )
+        .unwrap();
+        assert!(!is_nontrivial_html_deliverable(&empty));
+        assert!(is_nontrivial_html_deliverable(&rich));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn workspace_diff_ignores_ephemeral_internal_paths() {
         let root = std::env::temp_dir().join(format!("bob-file-ephemeral-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".bob-work").join("attachments").join("run-1"))
@@ -5304,6 +5559,7 @@ mod tests {
                 allowed_permissions: vec!["read".into()],
             },
             false,
+            false,
         )
         .unwrap()
         .expect("approval patch");
@@ -5326,6 +5582,7 @@ mod tests {
                 allowed_permissions: vec!["read".into()],
             },
             false,
+            false,
         )
         .unwrap()
         .expect("approval patch");
@@ -5340,6 +5597,7 @@ mod tests {
             written["approval"]["allowed_permissions"],
             json!(["read", "mcp"])
         );
+        assert!(written["approval"]["outsideWorkspaceAllowed"].is_null());
 
         restore_workspace_bob_approval(patch).unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -5358,6 +5616,7 @@ mod tests {
                 allowed_permissions: vec!["read".into()],
             },
             true,
+            false,
         )
         .unwrap()
         .expect("approval patch");
@@ -5385,6 +5644,7 @@ mod tests {
                 auto_approval_enabled: true,
                 allowed_permissions: vec!["read".into(), "edit".into()],
             },
+            false,
             false,
         )
         .unwrap()
@@ -5421,6 +5681,7 @@ mod tests {
                 allowed_permissions: vec!["execute".into()],
             },
             false,
+            false,
         )
         .unwrap()
         .expect("approval patch");
@@ -5429,6 +5690,35 @@ mod tests {
         let restored = std::fs::read_to_string(&settings_path).unwrap();
         assert!(restored.contains("licenseConsent"));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_allows_outside_workspace_in_sandbox() {
+        let root = std::env::temp_dir().join(format!(
+            "bob-approval-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["edit".into()],
+            },
+            false,
+            true,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        let settings_path = root.join(".bob/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(written["approval"]["outsideWorkspaceAllowed"], true);
+
+        restore_workspace_bob_approval(patch).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

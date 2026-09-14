@@ -512,6 +512,8 @@ impl TerminalSandbox {
         // LaTeX, Pandoc, Office helpers), MCP scripts. Desktop/Documents remain
         // denied under /Users. Always remount the whole tree — piecemeal
         // mounts of ~/.bob/runtimes alone left plugins unusable in sandbox.
+        // Skills/plugins creation needs write on host ~/.bob/skills only
+        // (settings, vault, runtimes stay read-only).
         let bob_root = real_home.as_ref().map(|h| h.join(".bob"));
         if let Some(bob_root) = bob_root.as_ref() {
             if bob_root.is_dir() {
@@ -522,6 +524,19 @@ impl TerminalSandbox {
                     ));
                     allow_lookup_chain(&mut profile, &canonical)?;
                 }
+            }
+            let skills_root = bob_root.join("skills");
+            if let Err(error) = std::fs::create_dir_all(&skills_root) {
+                tracing::warn!(
+                    "sandbox: could not ensure host ~/.bob/skills for skill/plugin creation: {error}"
+                );
+            }
+            if let Ok(canonical_skills) = skills_root.canonicalize() {
+                profile.push_str(&format!(
+                    "(allow file-read* file-write* (subpath {}))\n",
+                    quoted(&canonical_skills)?
+                ));
+                allow_lookup_chain(&mut profile, &canonical_skills)?;
             }
         }
         for path in extra_reads {
@@ -1152,6 +1167,66 @@ mod tests {
                 render.status.success(),
                 "cloud-architect renderer must be readable in sandbox: {}",
                 String::from_utf8_lossy(&render.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_bob_skills_writable_for_skill_and_plugin_creation() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let skills = home.join(".bob").join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let sandbox = TerminalSandbox::new(&workspace, Path::new("/bin/sh")).unwrap();
+        let probe = skills.join(format!(
+            ".bob-sandbox-skill-write-probe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&probe);
+        let write = sandbox
+            .command("/bin/sh")
+            .args([
+                "-c",
+                &format!(
+                    "printf 'ok' > '{}' && cat '{}'",
+                    probe.display(),
+                    probe.display()
+                ),
+            ])
+            .output()
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(&probe);
+        assert!(
+            write.status.success(),
+            "sandbox must allow creating skills/plugins under host ~/.bob/skills: {}",
+            String::from_utf8_lossy(&write.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&write.stdout).trim(), "ok");
+
+        // Host settings stay read-only (vault / mcp config must not be writable).
+        let settings = home.join(".bob").join("settings");
+        if settings.is_dir() {
+            let blocked = sandbox
+                .command("/bin/sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "printf 'no' > '{}/.bob-sandbox-settings-write-probe' 2>/dev/null",
+                        settings.display()
+                    ),
+                ])
+                .output()
+                .await
+                .unwrap();
+            let _ = std::fs::remove_file(settings.join(".bob-sandbox-settings-write-probe"));
+            assert!(
+                !blocked.status.success(),
+                "host ~/.bob/settings must remain read-only in sandbox"
             );
         }
     }

@@ -3,8 +3,11 @@
 //! Bob Shell 2 headless (`bob run`) does not emit a documented `approval_required`
 //! stream event. Starting a session is default-allow (no “autoriser bob run”
 //! popup): Bob Work is unusable without `bob run`. Mid-run risky actions keep
-//! their own paths. `--trust` is still withheld in sandbox mode, and restrictive
-//! policies still require a grant unless the built-in session-start grant exists.
+//! their own paths. In sandbox mode `--trust` is passed so Bob Shell tools are
+//! not soft-blocked outside the workspace folder — Seatbelt remains the FS
+//! boundary (including writable host `~/.bob/skills` for skill/plugin creation).
+//! Restrictive policies still require a grant unless the built-in session-start
+//! grant exists.
 
 use crate::db::Database;
 use crate::error::AppResult;
@@ -17,10 +20,10 @@ pub const ACTION_SESSION_START: &str = "bob.session_start";
 /// escalation advice. Seatbelt (`sandbox-exec`) enforces the hard FS/process boundary.
 /// French sandbox guidance (legacy default). Prefer `agent_locale::sandbox_guidance`.
 pub fn sandbox_guidance_fr() -> String {
-    "Mode sandbox Bob Work : tu travailles uniquement dans le dossier connecté via Bob Work (workspace) et un HOME/TMP privés de session, détruits à la fin du run — installs et états locaux ne sont pas conservés. Aucun accès aux autres dossiers du Mac (Maison, Bureau, Documents, Downloads, /etc, autres projets) ni au bureau macOS. Computer Use est indisponible. Chrome et les sous-agents restent utilisables s’ils sont activés (Chrome via le bridge hôte Bob Work). Les serveurs MCP locaux configurés restent utilisables. N’utilise pas --trust. Ces limites s’appliquent aussi au terminal, scripts, sous-processus, liens symboliques et plugins. Ne retente jamais une opération refusée avec un autre outil pour contourner la limite.\n\
+    "Mode sandbox Bob Work : tu travailles uniquement dans le dossier connecté via Bob Work (workspace) et un HOME/TMP privés de session, détruits à la fin du run — installs et états locaux ne sont pas conservés. Aucun accès aux autres dossiers du Mac (Maison, Bureau, Documents, Downloads, /etc, autres projets) ni au bureau macOS — la confinement disque est assurée par la sandbox OS (Seatbelt), pas par un soft-block workspace des outils. Computer Use est indisponible. Chrome et les sous-agents restent utilisables s’ils sont activés (Chrome via le bridge hôte Bob Work). Les serveurs MCP locaux configurés restent utilisables. Ces limites s’appliquent aussi au terminal, scripts, sous-processus, liens symboliques et plugins. Ne retente jamais une opération refusée (Operation not permitted / limitations sandbox) avec un autre outil pour contourner la limite.\n\
 $HOME pointe vers un HOME privé de sandbox, pas la maison réelle de l’utilisateur : un succès sur ~/Desktop ou ~/Documents crée/lit seulement ce HOME isolé. Pour prouver une limite hors workspace, utilise un chemin absolu du Mac hôte (par ex. /Users/<user>/Desktop/…) et rapporte explicitement que c’est bloqué par les limitations de la sandbox Bob Work (Operation not permitted) — ne présente pas le HOME isolé comme le Bureau réel.\n\
 Réseau : HTTPS public reste disponible pour l’inférence ; le réseau local, les adresses privées (RFC1918), le link-local et les métadonnées cloud (169.254.169.254) sont interdits. Quotas : durée, CPU, mémoire, taille de fichier et stockage du HOME de session sont plafonnés.\n\
-Runtimes partagés plateforme (LaTeX, Pandoc, diagram/D2, skills) sont exposés via `$HOME/.bob/skills` et `$HOME/.bob/runtimes` (liens vers l’hôte) et via PATH / `$BOB_WORK_D2`. Utilise ces chemins — ne déclare pas le plugin ou D2 absents sans avoir testé `test -f \"$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py\"` et `command -v d2` (ou `$BOB_WORK_D2`). Exception runtime externe : si un plugin ne peut pas s’exécuter parce qu’il dépend d’un runtime externe (`externalRuntimes`, CLI hôte hors runtimes partagés, installation sous ~/.bob/runtimes/external) et que l’échec vient de la sandbox, commence toujours par « Cette action est bloquée par les limitations de la sandbox Bob Work : ce plugin dépend d’un runtime externe » ; nomme le plugin et le runtime ; dis clairement à l’utilisateur de désactiver le mode sandbox dans Réglages → Permissions, puis de relancer hors isolation. Ne simule pas le résultat.\n\
+Runtimes partagés plateforme (LaTeX, Pandoc, diagram/D2, skills) sont exposés via `$HOME/.bob/skills` et `$HOME/.bob/runtimes` (liens vers l’hôte) et via PATH / `$BOB_WORK_D2`. Utilise ces chemins — ne déclare pas le plugin ou D2 absents sans avoir testé `test -f \"$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py\"` et `command -v d2` (ou `$BOB_WORK_D2`). Exception création skill/plugin : sur demande explicite (`@skill:skill-creator`, `@skill:plugin-creator`, modes skill_builder / plugin_builder, « crée un skill/plugin »), tu **dois** créer ou modifier des bundles sous `$HOME/.bob/skills/<slug>/` avec `write_file` / outils d’édition (ou le terminal) — ces écritures vont sur l’hôte et **persistent** après la session. Ne refuse pas en citant un soft-block workspace : cet arbre est autorisé en sandbox. N’écris pas ailleurs sous `~/.bob` (settings, vault, runtimes). Exception runtime externe : si un plugin ne peut pas s’exécuter parce qu’il dépend d’un runtime externe (`externalRuntimes`, CLI hôte hors runtimes partagés, installation sous ~/.bob/runtimes/external) et que l’échec vient de la sandbox, commence toujours par « Cette action est bloquée par les limitations de la sandbox Bob Work : ce plugin dépend d’un runtime externe » ; nomme le plugin et le runtime ; dis clairement à l’utilisateur de désactiver le mode sandbox dans Réglages → Permissions, puis de relancer hors isolation. Ne simule pas le résultat.\n\
 Pour les résumés courts, préfère une liste à puces Markdown (une ligne par constat) plutôt qu’un tableau.\n\
 En cas de refus : commence toujours par « Cette action est bloquée par les limitations de la sandbox Bob Work : … » ; nomme l’action et la ressource sans révéler de secret ; distingue un refus de consigne d’une erreur réellement renvoyée par un outil et ne prétends pas avoir effectué une opération non exécutée.\n\
 Ne conseille jamais de désactiver la sandbox, de passer en accès direct au disque, d’activer Computer Use ou l’accès complet à l’ordinateur, ni d’élever les privilèges — sauf l’exception runtime externe ci-dessus. Propose plutôt de joindre une copie du fichier nécessaire à la conversation ou de travailler sur une copie explicitement fournie dans le workspace. Pour une action système ou une installation incompatible hors runtime externe, explique la limite sandbox et fournis seulement les étapes que l’utilisateur peut examiner et effectuer lui-même, sans les exécuter. Si aucune solution dans le workspace ne convient, arrête cette action et demande une entrée compatible."
@@ -127,8 +130,10 @@ pub fn unattended_preflight_message(policy: &str) -> String {
 
 /// Whether the child `bob run` may receive `--trust`.
 ///
-/// Sandbox mode never trusts the workspace. Session start itself is never
-/// gated; restrictive policies still withhold `--trust` unless a grant exists
+/// Sandbox mode always passes `--trust`: Seatbelt is the FS boundary, and Bob
+/// Shell's soft workspace check must not cancel `write_file` under the allowed
+/// host remount `~/.bob/skills` (skill/plugin creation). Outside sandbox,
+/// restrictive policies still withhold `--trust` unless a grant exists
 /// (including the built-in `bob.session_start` default-allow grant).
 pub fn should_pass_trust(
     policy: &str,
@@ -137,7 +142,7 @@ pub fn should_pass_trust(
     sandbox_mode: bool,
 ) -> bool {
     if sandbox_mode {
-        return false;
+        return true;
     }
     if has_grant || preflight_approved {
         return true;
@@ -388,6 +393,8 @@ mod tests {
             "distingue un refus de consigne",
             "Ne conseille jamais de désactiver la sandbox",
             "Exception runtime externe",
+            "Exception création skill/plugin",
+            "$HOME/.bob/skills/<slug>/",
             "Réglages → Permissions",
             "Computer Use",
             "joindre une copie du fichier",
@@ -479,11 +486,11 @@ mod tests {
             false
         ));
         assert!(should_pass_trust("never_ask", false, false, false));
-        assert!(!should_pass_trust("never_ask", false, false, true));
+        assert!(should_pass_trust("never_ask", false, false, true));
     }
 
     #[test]
-    fn ask_for_important_skips_preflight_and_trusts_unless_sandbox() {
+    fn ask_for_important_skips_preflight_and_trusts_including_sandbox() {
         assert!(!needs_preflight(
             "ask_for_important",
             &RiskContext::default(),
@@ -499,7 +506,7 @@ mod tests {
         ));
         assert!(should_pass_trust("ask_for_important", false, false, false));
         assert!(should_pass_trust("ask_for_important", true, false, false));
-        assert!(!should_pass_trust("ask_for_important", true, false, true));
+        assert!(should_pass_trust("ask_for_important", true, false, true));
     }
 
     #[test]
@@ -507,7 +514,7 @@ mod tests {
         assert!(!should_pass_trust("always_ask", false, false, false));
         assert!(should_pass_trust("always_ask", true, false, false));
         assert!(should_pass_trust("always_ask", false, true, false));
-        assert!(!should_pass_trust("always_ask", true, true, true));
+        assert!(should_pass_trust("always_ask", true, true, true));
     }
 
     #[test]

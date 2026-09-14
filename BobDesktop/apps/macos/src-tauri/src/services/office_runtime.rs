@@ -262,6 +262,8 @@ pub fn default_runtime_policy_block(
          - Utilise les runtimes Python partagés de la plateforme : {engines}.\n\
          - DOCX → runtime `shared.docx` (python-docx) ; PPTX → `shared.pptx` (python-pptx) ; XLSX/CSV → `shared.xlsx` (openpyxl).\n\
          - Workflow : outils MCP office-tools (`inspect_*`, `extract_*`, `read_*`, `validate_*`) puis `execute_command` Python avec le PYTHONPATH injecté par Bob Work.\n\
+         - Préfère `python3 -c '…'` ou un script temporaire ; **ne laisse pas de fichier `.py` helper** dans le workspace (create_*.py, build_*.py, etc.) sauf si l’utilisateur demande explicitement un script réutilisable. Supprime les helpers après succès.\n\
+         - Le livrable utilisateur est le fichier Office (DOCX/PPTX/XLSX), pas le script Python.\n\
          - Ne fais jamais `pip install python-docx`, `pip install python-pptx` ni `pip install openpyxl` dans le workspace.\n\
          - N'utilise pas Docling, Pandoc, LibreOffice, unoconv ou une manipulation OOXML brute sauf si l'utilisateur le demande explicitement."
     )
@@ -465,6 +467,7 @@ mod tests {
         assert!(block.contains("shared.pptx"));
         assert!(block.contains("python-docx"));
         assert!(block.contains("python-pptx"));
+        assert!(block.contains(".py helper"));
     }
 
     #[test]

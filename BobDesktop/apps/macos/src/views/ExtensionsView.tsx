@@ -7,6 +7,7 @@ import { PluginIcon, resolveSkillIcon } from '../components/PluginIcon'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import { errorMessage } from '../lib/errorMessage'
 import { isBuiltinSkill, sortSkillsForDisplay } from '../lib/builtinCatalog'
+import { formatCatalogDate } from '../lib/formatDate'
 import type { WorkspaceSkill } from '@bob-work/shared-types'
 import { useT } from '../i18n'
 import { useAppStore } from '../stores/appStore'
@@ -318,6 +319,15 @@ export default function ExtensionsView() {
             {selectedSkill.parentSlug ? <div><dt>{t('skills.parent')}</dt><dd>{selectedSkill.parentSlug}</dd></div> : null}
             {selectedSkill.relativePath ? <div><dt>{t('skills.relativePath')}</dt><dd>{selectedSkill.relativePath}</dd></div> : null}
             <div><dt>Portée</dt><dd>{skillScopeLabel(selectedSkill)}</dd></div>
+            {selectedSkill.createdAt ? (
+              <div>
+                <dt>{isBuiltinSkill(selectedSkill) ? t('skills.availableSince') : t('skills.createdAt')}</dt>
+                <dd>{formatCatalogDate(selectedSkill.createdAt)}</dd>
+              </div>
+            ) : null}
+            {selectedSkill.updatedAt && selectedSkill.updatedAt !== selectedSkill.createdAt ? (
+              <div><dt>{t('skills.updatedAt')}</dt><dd>{formatCatalogDate(selectedSkill.updatedAt)}</dd></div>
+            ) : null}
             <div><dt>Fichier</dt><dd title={selectedSkill.sourcePath}>{selectedSkill.sourcePath}</dd></div>
           </dl></section>
           {(selectedSkill.childSkills?.length ?? 0) > 0 ? (

@@ -29,8 +29,10 @@ pub struct AppSettings {
     pub telemetry_enabled: bool,
     pub computer_use_enabled: bool,
     pub chrome_control_enabled: bool,
-    /// Confine bob run to the connected workspace (never pass `--trust`;
-    /// Computer Use forced off; Chrome/subagents follow settings via host bridge).
+    /// Confine bob run to the connected workspace via Seatbelt (Computer Use
+    /// forced off; Chrome/subagents follow settings via host bridge). `--trust`
+    /// is passed so skill/plugin writes under host `~/.bob/skills` are not
+    /// soft-blocked; other host paths stay denied by the OS sandbox.
     pub sandbox_mode: bool,
     /// When true, Bob Work may retrieve short excerpts from other conversations
     /// (same project when applicable) to enrich the prompt.

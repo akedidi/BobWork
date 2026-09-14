@@ -177,11 +177,28 @@ impl ArtifactService {
             "xls" => "xlsx".into(),
             other => other.to_string(),
         };
-        let title = canonical
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Artefact")
-            .replace('_', " ");
+        let title = {
+            let file_name = canonical
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            // Personal skills/plugins are always `…/<slug>/SKILL.md` — the stem
+            // "SKILL" is useless in the chat chip; prefer the slug folder name.
+            if file_name.eq_ignore_ascii_case("SKILL.md") {
+                canonical
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("SKILL.md")
+                    .replace('_', " ")
+            } else {
+                canonical
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("Artefact")
+                    .replace('_', " ")
+            }
+        };
         let size = std::fs::metadata(&canonical)
             .ok()
             .map(|meta| meta.len() as i64);

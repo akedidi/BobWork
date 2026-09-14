@@ -30,6 +30,8 @@ const skills = [{
   scope: 'global-bob',
   enabled: true,
   sourcePath: '/Users/me/.bob/skills/analyse-contrats/SKILL.md',
+  createdAt: '2026-08-11T12:00:00Z',
+  updatedAt: '2026-08-12T09:30:00Z',
 }]
 
 describe('ExtensionsView', () => {
@@ -153,5 +155,7 @@ describe('ExtensionsView', () => {
     )
     expect(await screen.findByRole('complementary', { name: 'Détails du skill Analyse contrats' })).toBeVisible()
     expect(screen.getByText('/Users/me/.bob/skills/analyse-contrats/SKILL.md')).toBeVisible()
+    expect(screen.getByText('Créé le')).toBeVisible()
+    expect(screen.getByText('Modifié le')).toBeVisible()
   })
 })

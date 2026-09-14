@@ -13,7 +13,9 @@ import { LoadErrorBanner } from '../LoadErrorBanner';
 import { statusTone } from '../../lib/statusTone';
 import { PluginIcon, resolvePluginIcon, resolveSkillIcon } from '../PluginIcon';
 import { PluginFileResourcesSection } from './PluginFileResources';
+import { formatCatalogDate } from '../../lib/formatDate';
 import { useT } from '../../i18n';
+import { isBuiltinPlugin } from '../../lib/builtinCatalog';
 
 type OpenIntegrationsOpts = { tab?: string; highlight?: string; provider?: string };
 
@@ -31,6 +33,7 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
   onVersionChanged: (message: string, expectedVersion?: string) => Promise<void>
 }) {
   const navigate = useNavigate()
+  const t = useT()
   const manifest = metadataOf(plugin)
   const enabled = isEnabled(plugin)
   const protectedBuiltin = isProtectedBuiltin(plugin)
@@ -84,6 +87,25 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
       {protectedBuiltin && <p className="settings-note" style={{ margin: 0 }}>Plugin intégré : désactivation possible, suppression impossible.</p>}
     </div>
     <section className="skill-detail-section"><h3>Description</h3><p>{plugin.description || 'Aucune description.'}</p></section>
+    {(plugin.createdAt || plugin.updatedAt || plugin.author) ? (
+      <section className="skill-detail-section">
+        <h3>{t('plugins.metadata')}</h3>
+        <dl>
+          {plugin.createdAt ? (
+            <div>
+              <dt>{isBuiltinPlugin(plugin) ? t('plugins.availableSince') : t('plugins.createdAt')}</dt>
+              <dd>{formatCatalogDate(plugin.createdAt)}</dd>
+            </div>
+          ) : null}
+          {plugin.updatedAt && plugin.updatedAt !== plugin.createdAt ? (
+            <div><dt>{t('plugins.updatedAt')}</dt><dd>{formatCatalogDate(plugin.updatedAt)}</dd></div>
+          ) : null}
+          {plugin.author ? (
+            <div><dt>{t('plugins.author')}</dt><dd>{plugin.author}</dd></div>
+          ) : null}
+        </dl>
+      </section>
+    ) : null}
     <PluginBundledContentSection manifest={manifest} />
     <PluginSkillsSection plugin={plugin} manifest={manifest} />
     <PluginResourcesSection

@@ -210,6 +210,7 @@ export function FittedHtmlFrame({ src, title, mode, zoom = 1 }: { src: string; t
   const containerRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [frameSource, setFrameSource] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState(false)
   const revisionRef = useRef('')
   const [reloadToken, setReloadToken] = useState(0)
   const [live, setLive] = useState(true)
@@ -240,16 +241,21 @@ export function FittedHtmlFrame({ src, title, mode, zoom = 1 }: { src: string; t
   useEffect(() => {
     let disposed = false
     setFrameSource(null)
+    setLoadError(false)
     setIntrinsic(null)
     readHtmlPreview(src)
       .then(value => {
         if (!disposed) setDetectedSizing(detectHtmlFrameSizing(value))
+        const compact = value.replace(/\s+/g, '')
+        if (!value.trim() || compact.length < 40 || /^<!doctypehtml><html><\/html>$/i.test(compact) || /^<html><\/html>$/i.test(compact)) {
+          throw new Error('empty-html')
+        }
         return canvasDocument(value, src)
       })
       .then(value => fittedDocument(value, src, localThreeRuntime))
       .then(value => prepareFittedHtmlPreview(src, value))
       .then(path => { if (!disposed) setFrameSource(convertFileSrc(path)) })
-      .catch(() => undefined)
+      .catch(() => { if (!disposed) { setFrameSource(null); setLoadError(true) } })
     return () => { disposed = true }
   }, [src, localThreeRuntime, reloadToken])
 
@@ -340,6 +346,9 @@ export function FittedHtmlFrame({ src, title, mode, zoom = 1 }: { src: string; t
     <div ref={containerRef} className={`fitted-html-frame fitted-html-frame--${mode}`}>
       <div className="live-canvas-toolbar"><span className={live?'is-live':''}>● {live?t('canvas.live'):t('canvas.paused')}</span><button type="button" aria-pressed={sizing === 'fit'} className={sizing === 'fit'?'active':''} onClick={()=>setSizingChoice('fit')}>{t('canvas.fit')}</button><button type="button" aria-pressed={sizing === 'natural'} className={sizing === 'natural'?'active':''} onClick={()=>setSizingChoice('natural')}>{t('canvas.actualSize')}</button><button type="button" onClick={()=>setLive(value=>!value)}>{live?t('canvas.pause'):t('canvas.resume')}</button><button type="button" aria-pressed={inspector} className={inspector?'active':''} onClick={()=>{ setSelection(''); setInspector(value=>!value) }}>{t('canvas.inspect')}</button><button type="button" disabled={exporting} onClick={()=>void exportZip()}>{exporting?'…':t('canvas.export')}</button></div>
       {(inspector || selection) && <div className={`live-canvas-selection${inspector&&!selection?' is-hint':''}`} role="status" title={selection || t('canvas.inspectHint')}>{selection || t('canvas.inspectHint')}</div>}
+      {loadError ? (
+        <div className="fitted-html-frame__error" role="status">{t('chat.previewUnavailable')}</div>
+      ) : (
       <div className="live-canvas-frames">
       <iframe
         ref={frameRef}
@@ -355,6 +364,7 @@ export function FittedHtmlFrame({ src, title, mode, zoom = 1 }: { src: string; t
         onLoad={onFrameLoad}
       />
       </div>
+      )}
     </div>
   )
 }

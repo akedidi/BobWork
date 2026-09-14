@@ -36,7 +36,7 @@ export { normalizeAssistantMarkdown } from '@bob-work/chat-display'
 import { isActiveTaskState, latestActiveTaskForConversation } from '../lib/activeTasks'
 import { useAppStore, useConversationStore } from '../stores/appStore'
 import { useConversationUpdated, useConversationMessagesChanged, useTaskUpdated, useBobSessionDone } from '../hooks/useTauriEvents'
-import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath } from '../lib/localFilePaths'
+import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath, resolveDurableLocalPath } from '../lib/localFilePaths'
 import { PluginIcon, iconForFileName } from '../components/PluginIcon'
 import { ChromeSnapshotCard } from '../components/ChromeSnapshot/ChromeSnapshotCard'
 import { INLINE_IMAGE_EXT, INLINE_VISUALIZATION_EXT } from "../constants/fileTypes"
@@ -81,16 +81,34 @@ function sourcesFromDeliverablePaths(paths: string[] | undefined): MessageSource
 }
 
 /** Replace only links whose filename matches a persisted session deliverable. */
-function resolveDeliverableLinks(markdown: string, sources: MessageSource[]): string {
+function resolveDeliverableLinks(markdown: string, sources: MessageSource[], homeDir = ''): string {
   if (!markdown || !sources.length) return markdown
   const byName = new Map(
     sources
       .filter((source): source is MessageSource & { path: string } => !!source.path)
       .map(source => [fileNameFromPath(source.path).toLowerCase(), source.path]),
   )
+  const byKey = new Map(
+    sources
+      .filter((source): source is MessageSource & { path: string } => !!source.path)
+      .map(source => [normalizeLocalFilePathKey(source.path), source.path]),
+  )
   return markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (whole, label: string, rawTarget: string) => {
     const target = rawTarget.trim().replace(/^<|>$/g, '')
-    if (/^(?:[a-z]+:|\/|~\/)/i.test(target)) return whole
+    const durable = homeDir ? resolveDurableLocalPath(target, homeDir) : target
+    const key = normalizeLocalFilePathKey(durable)
+    const fromSource = byKey.get(key)
+    if (fromSource) {
+      const name = label.includes('/') || label.includes('~') ? fileNameFromPath(fromSource) : label
+      return `[${name}](${/\s/.test(fromSource) ? `<${fromSource}>` : fromSource})`
+    }
+    if (/^(?:[a-z]+:|\/|~\/)/i.test(target)) {
+      if (durable !== target && durable.startsWith('/')) {
+        const name = label.includes('/') || label.includes('~') ? fileNameFromPath(durable) : label
+        return `[${name}](${/\s/.test(durable) ? `<${durable}>` : durable})`
+      }
+      return whole
+    }
     const resolved = byName.get(fileNameFromPath(target).toLowerCase())
     if (!resolved) return whole
     return `[${label}](${/\s/.test(resolved) ? `<${resolved}>` : resolved})`
@@ -407,6 +425,20 @@ export default function ChatView() {
   const [bobMode, setBobMode] = useState('agent')
   const [interaction, setInteraction] = useState<ConversationInteraction | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
+  const [homeDir, setHomeDir] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void import('@tauri-apps/api/path')
+      .then(api => api.homeDir())
+      .then(path => {
+        if (!cancelled) setHomeDir(path)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const messageScrollRef = useRef<HTMLDivElement>(null)
@@ -1034,9 +1066,12 @@ export default function ChatView() {
   }, [convId, taskId])
 
   const openPreview = useCallback((target: string, title?: string, kind?: 'file' | 'web') => {
-    setPreviewRequest({ id: `${Date.now()}-${Math.random()}`, target, title, kind })
+    const durable = kind === 'web' || !homeDir
+      ? target
+      : (resolveDurableLocalPath(target, homeDir) || target)
+    setPreviewRequest({ id: `${Date.now()}-${Math.random()}`, target: durable, title, kind })
     setPanelOpen(true)
-  }, [])
+  }, [homeDir])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1788,6 +1823,7 @@ export default function ChatView() {
                 )}
                 <MessageBubble
                   msg={msg}
+                  homeDir={homeDir}
                   onOpenResource={openPreview}
                   canEdit={
                     msg.role === 'user'
@@ -1973,6 +2009,7 @@ function MarkdownTableFrame({ node: _node, ...props }: ComponentPropsWithoutRef<
 
 export function MessageBubble({
   msg,
+  homeDir = '',
   onOpenResource,
   canEdit = false,
   isEditing = false,
@@ -1981,6 +2018,7 @@ export function MessageBubble({
   onSubmitEdit,
 }: {
   msg: Msg
+  homeDir?: string
   onOpenResource: (target: string, title?: string, kind?: 'file' | 'web') => void
   canEdit?: boolean
   isEditing?: boolean
@@ -2050,7 +2088,7 @@ export function MessageBubble({
             <div className="msg-user" data-testid="chat-message-user">{msg.content}</div>
           )}
           {!isEditing && timestamp && <time className="message-timestamp" dateTime={msg.ts}>{timestamp}</time>}
-          {!isEditing && <MessageResources msg={msg} onOpen={onOpenResource} />}
+          {!isEditing && <MessageResources msg={msg} homeDir={homeDir} onOpen={onOpenResource} />}
           {!isEditing && (
             <div className="msg-user-actions message-actions-below">
               {canEdit && (
@@ -2097,7 +2135,7 @@ export function MessageBubble({
                 img: ({ src, alt }) => (
                   <ResilientImage source={src || ''} alt={alt || 'Image'} className="markdown-inline-image" />
                 ),
-              }}>{normalizeAssistantMarkdown(linkifyLocalFilePaths(resolveDeliverableLinks(msg.content, msg.sources ?? [])))}</ReactMarkdown>
+              }}>{normalizeAssistantMarkdown(linkifyLocalFilePaths(resolveDeliverableLinks(msg.content, msg.sources ?? [], homeDir)))}</ReactMarkdown>
             </div>
           )}
           {mapSpecsFromActivities(msg.activities).map((spec, index) => (
@@ -2108,7 +2146,7 @@ export function MessageBubble({
               {msg.error}
             </p>
           )}
-          <MessageResources msg={msg} onOpen={onOpenResource} />
+          <MessageResources msg={msg} homeDir={homeDir} onOpen={onOpenResource} />
           <FileChanges changes={msg.fileChanges} onOpen={onOpenResource} />
           {msg.snapshots?.some(snapshot => !snapshot.background) ? (
             <div className="chrome-snapshot-stack">
@@ -2261,6 +2299,22 @@ export function ConversationInteractionCard({
   )
 }
 
+function selectPrimaryVisualizations<T extends { target?: string | null; name?: string }>(
+  resources: T[],
+  messageContent: string,
+): T[] {
+  const html = resources.filter(item => item.target && /\.html?$/i.test(item.target))
+  if (html.length <= 1) return html
+  const cited = html.filter(item => {
+    const name = item.name || fileNameFromPath(item.target || '')
+    return Boolean(name) && messageContent.includes(name)
+  })
+  if (cited.length === 1) return cited
+  if (cited.length > 1) return [cited[cited.length - 1]!]
+  // Prefer the last HTML path (usually the final dashboard over an early stub).
+  return [html[html.length - 1]!]
+}
+
 function InlineVisualizationPreview({ src, label, onOpen }: { src: string; label: string; onOpen: () => void }) {
   const t = useT()
 
@@ -2275,7 +2329,7 @@ function InlineVisualizationPreview({ src, label, onOpen }: { src: string; label
   )
 }
 
-function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
+function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: string; onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
   const t = useT()
   const merged = mergeMessageSources(
     msg.sources,
@@ -2294,15 +2348,56 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
         url: snapshot.url,
       })),
   )
-  const candidates = merged
-    .map(item => ({
-      id: item.id,
-      name: item.title,
-      target: item.url || item.path,
-      kind: item.url && !item.path ? 'web' as const : 'file' as const,
-      fromAttachment: Boolean((msg.attachments ?? []).some(att => att.path === item.path || att.url === item.url)),
-    }))
-    .filter(item => item.target)
+  const candidates = (() => {
+    const byKey = new Map<string, {
+      id: string
+      name?: string
+      target: string
+      kind: 'web' | 'file'
+      fromAttachment: boolean
+    }>()
+    for (const item of merged) {
+      const rawTarget = item.url || item.path
+      if (!rawTarget) continue
+      const isWeb = Boolean(item.url && !item.path)
+      const durable = !isWeb && homeDir
+        ? resolveDurableLocalPath(rawTarget, homeDir)
+        : rawTarget
+      const target = durable || rawTarget
+      const key = isWeb ? `web:${target}` : `file:${normalizeLocalFilePathKey(target)}`
+      const existing = byKey.get(key)
+      if (!existing) {
+        byKey.set(key, {
+          id: item.id,
+          name: item.title,
+          target,
+          kind: isWeb ? 'web' : 'file',
+          fromAttachment: Boolean((msg.attachments ?? []).some(att => att.path === item.path || att.url === item.url)),
+        })
+        continue
+      }
+      // Prefer a host absolute path and a more specific title (slug > "SKILL").
+      const preferred = existing.kind === 'file'
+        ? preferAbsoluteLocalPath(existing.target, target)
+        : existing.target
+      const name = (() => {
+        const next = item.title || existing.name
+        if (!next) return existing.name
+        if (!existing.name) return next
+        if (existing.name.toUpperCase() === 'SKILL' && next.toUpperCase() !== 'SKILL') return next
+        if (next.toUpperCase() === 'SKILL' && existing.name.toUpperCase() !== 'SKILL') return existing.name
+        return existing.name.length >= next.length ? existing.name : next
+      })()
+      byKey.set(key, {
+        ...existing,
+        target: preferred,
+        name,
+        fromAttachment: existing.fromAttachment
+          || Boolean((msg.attachments ?? []).some(att => att.path === item.path || att.url === item.url)),
+      })
+    }
+    return Array.from(byKey.values())
+  })()
 
   // Paths cited in prose (e.g. sandbox "BLOCKED: …/Desktop/probe.txt") must not
   // become openable chips unless the file actually exists on disk.
@@ -2354,7 +2449,10 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
     ? resources.filter(item => item.target && INLINE_IMAGE_EXT.test(item.target))
     : []
   const visualizationResources = msg.role === 'assistant'
-    ? resources.filter(item => item.kind === 'file' && item.target && INLINE_VISUALIZATION_EXT.test(item.target))
+    ? selectPrimaryVisualizations(
+      resources.filter(item => item.kind === 'file' && item.target && INLINE_VISUALIZATION_EXT.test(item.target)),
+      msg.content || '',
+    )
     : []
   return (
     <>

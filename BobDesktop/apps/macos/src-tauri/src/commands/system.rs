@@ -262,6 +262,25 @@ pub async fn microphone_authorization_state() -> Result<String, AppError> {
     }
 }
 
+/// Returns macOS Speech Recognition TCC state without prompting.
+#[tauri::command]
+pub async fn speech_recognition_authorization_state() -> Result<String, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(
+            tokio::task::spawn_blocking(crate::macos_permissions::speech_recognition_authorization)
+                .await
+                .map_err(|error| AppError::Io(error.to_string()))?
+                .key()
+                .into(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("authorized".into())
+    }
+}
+
 /// Shows the native macOS microphone sheet the first time it is called.
 #[tauri::command]
 pub async fn request_microphone_permission() -> Result<String, AppError> {

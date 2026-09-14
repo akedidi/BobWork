@@ -378,7 +378,7 @@ def bridge_required_error() -> str:
         f"Le pont de contrôle natif de {app} est indisponible. Relancez l’app {app}, "
         f"puis autorisez **{app}** (pas python3, pas Terminal, pas osascript) dans "
         "Réglages Système → Confidentialité et sécurité → Accessibilité, "
-        f"ou Réglages {app} → Accès et contrôle → Demander Accessibilité. "
+        f"ou Réglages {app} → Permissions → Demander Accessibilité. "
         "Bob Work et Bob Work-test sont distincts : cochez l’app réellement lancée."
     )
 
@@ -536,7 +536,7 @@ def accessibility_hint(stderr: str) -> dict:
         "hint": (
             "Autorisez **Bob Work** (pas python3, pas Terminal) dans "
             "Réglages Système → Confidentialité et sécurité → Accessibilité, "
-            "ou Réglages Bob Work → Accès et contrôle → Demander Accessibilité."
+            "ou Réglages Bob Work → Permissions → Demander Accessibilité."
         ),
         "error": stderr.strip() or "System Events failed",
     }

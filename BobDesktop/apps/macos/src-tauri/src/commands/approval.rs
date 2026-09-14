@@ -209,8 +209,8 @@ pub async fn resolve_approval(
                     .map(|s| s.sandbox_mode)
                     .unwrap_or(true);
                 launch.options.sandbox_mode |= sandbox;
-                launch.options.trust_workspace = !launch.options.sandbox_mode
-                    && !crate::services::permission_governance::task_group_explicitly_denied(
+                launch.options.trust_workspace =
+                    !crate::services::permission_governance::task_group_explicitly_denied(
                         &launch.options.task_approval.allowed_permissions,
                         "edit",
                     );

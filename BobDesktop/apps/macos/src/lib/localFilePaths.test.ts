@@ -4,6 +4,7 @@ import {
   fileNameFromPath,
   linkifyLocalFilePaths,
   normalizeLocalFilePathKey,
+  resolveDurableLocalPath,
 } from './localFilePaths'
 
 describe('localFilePaths', () => {
@@ -96,16 +97,26 @@ describe('localFilePaths', () => {
     expect(linkifyLocalFilePaths(input)).toBe(input)
   })
 
-  it('normalizes file:// citations so HTML previews can resolve', () => {
-    const spaced =
-      'file:///Users/aniskedidi/Library/Application Support/com.bobwork.desktop.test/workspaces/run/revenue_dashboard.html'
-    expect(extractLocalFilePaths(`Preview: ${spaced}`)).toEqual([
-      '/Users/aniskedidi/Library/Application Support/com.bobwork.desktop.test/workspaces/run/revenue_dashboard.html',
-    ])
+  it('collapses bob-isolated skill paths onto the host ~/.bob/skills key', () => {
+    const isolated =
+      '/private/var/folders/5n/8bqj71ls731721nymrrw18tc0000gn/T/bob-isolated-Edb9u5/.bob/skills/learning-path-sandbox-v2/SKILL.md'
+    const host = '/Users/aniskedidi/.bob/skills/learning-path-sandbox-v2/SKILL.md'
+    expect(normalizeLocalFilePathKey(isolated)).toBe(normalizeLocalFilePathKey(host))
+    expect(normalizeLocalFilePathKey('~/.bob/skills/learning-path-sandbox-v2/SKILL.md')).toBe(
+      normalizeLocalFilePathKey(host),
+    )
+  })
+
+  it('rewrites bob-isolated and ~/ paths to a durable host path', () => {
+    const home = '/Users/aniskedidi'
     expect(
-      extractLocalFilePaths(
-        'Voir [revenue_dashboard.html](file:///Users/me/Library/Application Support/app/dash.html)',
+      resolveDurableLocalPath(
+        '/var/folders/5n/8bqj71ls731721nymrrw18tc0000gn/T/bob-isolated-xyz/.bob/skills/demo/SKILL.md',
+        home,
       ),
-    ).toEqual(['/Users/me/Library/Application Support/app/dash.html'])
+    ).toBe('/Users/aniskedidi/.bob/skills/demo/SKILL.md')
+    expect(resolveDurableLocalPath('~/.bob/skills/demo/SKILL.md', home)).toBe(
+      '/Users/aniskedidi/.bob/skills/demo/SKILL.md',
+    )
   })
 })

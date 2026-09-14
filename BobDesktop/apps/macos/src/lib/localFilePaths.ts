@@ -33,6 +33,8 @@ function followsWebUrlScheme(text: string, pathStart: number): boolean {
 /**
  * Collapse `/Users/me/Desktop/a.pptx` and `~/Desktop/a.pptx` to the same key
  * so chips / extracts don’t show the same file twice.
+ * Also collapse ephemeral sandbox HOME paths (`…/bob-isolated-…/.bob/skills/…`)
+ * onto the host `~/.bob/skills/…` key — same skill file, one chip.
  */
 export function normalizeLocalFilePathKey(path: string): string {
   const cleaned = cleanCandidate(path)
@@ -40,10 +42,35 @@ export function normalizeLocalFilePathKey(path: string): string {
   if (cleaned.startsWith('~/')) return `home:${cleaned.slice(2)}`
   const homeRelative = cleaned.match(/^\/(?:Users|home)\/[^/]+\/(.+)$/i)
   if (homeRelative) return `home:${homeRelative[1]}`
+  const isolatedBob = cleaned.match(
+    /(?:\/private)?\/var\/folders\/[^/]+\/[^/]+\/T\/bob-isolated-[^/]+\/(\.bob\/.+)$/i,
+  )
+  if (isolatedBob) return `home:${isolatedBob[1]}`
+  return cleaned
+}
+
+/** Expand `~/…` and rewrite dead bob-isolated skill paths to the host home tree. */
+export function resolveDurableLocalPath(path: string, homeDir: string): string {
+  const cleaned = cleanCandidate(path)
+  if (!cleaned || !homeDir) return cleaned
+  const home = homeDir.replace(/\/$/, '')
+  if (cleaned.startsWith('~/')) {
+    return `${home}/${cleaned.slice(2)}`
+  }
+  const isolated = cleaned.match(
+    /^((?:\/private)?\/var\/folders\/[^/]+\/[^/]+\/T\/bob-isolated-[^/]+)(\/.+)$/i,
+  )
+  if (isolated) {
+    return `${home}${isolated[2]}`
+  }
   return cleaned
 }
 
 export function preferAbsoluteLocalPath(a: string, b: string): string {
+  const aIsolated = /bob-isolated-/i.test(a)
+  const bIsolated = /bob-isolated-/i.test(b)
+  if (aIsolated && !bIsolated) return b
+  if (bIsolated && !aIsolated) return a
   if (a.startsWith('/') && !b.startsWith('/')) return a
   if (b.startsWith('/') && !a.startsWith('/')) return b
   // Prefer longer (more specific) absolute path

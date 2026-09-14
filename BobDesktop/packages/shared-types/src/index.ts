@@ -943,7 +943,7 @@ export interface AppSettings {
   telemetryEnabled: boolean;
   computerUseEnabled: boolean;
   chromeControlEnabled: boolean;
-  /** Confine bob run to the connected workspace (no --trust; Computer Use off; Chrome/subagents follow settings). */
+  /** Confine bob run via Seatbelt (Computer Use off; Chrome/subagents follow settings). `--trust` is passed so skill/plugin writes under ~/.bob/skills are not soft-blocked. */
   sandboxMode: boolean;
   /**
    * When true, Bob Work may retrieve short excerpts from other conversations

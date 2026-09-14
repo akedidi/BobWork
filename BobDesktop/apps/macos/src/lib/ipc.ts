@@ -195,6 +195,9 @@ export type MicrophoneAuthorizationState = 'not_determined' | 'denied' | 'restri
 export const getMicrophoneAuthorizationState = () =>
   invoke<MicrophoneAuthorizationState>('microphone_authorization_state');
 
+export const getSpeechRecognitionAuthorizationState = () =>
+  invoke<MicrophoneAuthorizationState>('speech_recognition_authorization_state');
+
 export const requestMicrophonePermission = () =>
   invoke<MicrophoneAuthorizationState>('request_microphone_permission');
 

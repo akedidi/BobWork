@@ -23,8 +23,12 @@ const mocks = vi.hoisted(() => ({
   exportBobalytics: vi.fn(),
   getPermissionGrants: vi.fn(),
   getNotificationAuthState: vi.fn(),
+  getMicrophoneAuthorizationState: vi.fn(),
+  getSpeechRecognitionAuthorizationState: vi.fn(),
   requestMicrophonePermission: vi.fn(),
   requestVoiceDictationPermission: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
+  requestChromeAutomationPermission: vi.fn(),
   getRemoteControlStatus: vi.fn(),
   getMcpServers: vi.fn(),
   testMcpServer: vi.fn(),
@@ -99,6 +103,8 @@ vi.mock('../lib/ipc', () => ({
   exportBobalytics: mocks.exportBobalytics,
   getPermissionGrants: mocks.getPermissionGrants,
   getNotificationAuthState: mocks.getNotificationAuthState,
+  getMicrophoneAuthorizationState: mocks.getMicrophoneAuthorizationState,
+  getSpeechRecognitionAuthorizationState: mocks.getSpeechRecognitionAuthorizationState,
   updateSettings: mocks.updateSettings,
   revokePermissionGrant: vi.fn(),
   importConversations: vi.fn(),
@@ -109,19 +115,31 @@ vi.mock('../lib/ipc', () => ({
   updateConversation: mocks.updateConversation,
   deleteConversation: mocks.deleteConversation,
   openMacosPrivacyPane: vi.fn(),
-  getChromeControlStatus: vi.fn().mockResolvedValue(null),
-  getComputerUseStatus: vi.fn().mockResolvedValue(null),
+  getChromeControlStatus: vi.fn().mockResolvedValue({
+    chromeInstalled: true,
+    mcpConfigured: true,
+    mcpEnabled: true,
+    automation: 'granted',
+    automationMessage: 'ok',
+    appName: 'Bob Work',
+  }),
+  getComputerUseStatus: vi.fn().mockResolvedValue({
+    mcpConfigured: true,
+    mcpEnabled: true,
+    accessibility: 'granted',
+    accessibilityMessage: 'ok',
+  }),
   getOrcaCliStatus: mocks.getOrcaCliStatus,
   testMcpServer: mocks.testMcpServer,
-  isNotificationAuthGranted: vi.fn().mockReturnValue(false),
+  isNotificationAuthGranted: (state: string) => state === 'authorized' || state === 'provisional' || state === 'ephemeral',
   requestNotificationAuthorization: vi.fn(),
   requestMicrophonePermission: mocks.requestMicrophonePermission,
   requestVoiceDictationPermission: mocks.requestVoiceDictationPermission,
   getRemoteControlStatus: mocks.getRemoteControlStatus,
   getMcpServers: mocks.getMcpServers,
   restartRemoteControl: vi.fn(),
-  requestAccessibilityPermission: vi.fn(),
-  requestChromeAutomationPermission: vi.fn(),
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
+  requestChromeAutomationPermission: mocks.requestChromeAutomationPermission,
   installBobShell: vi.fn(),
   getAppInfo: vi.fn().mockResolvedValue({ appName: 'Bob Work', appVersion: '0.1.9', tauriVersion: '2.x', os: 'macos', arch: 'aarch64', dataDir: '/tmp', logDir: '/tmp' }),
   openDataDir: vi.fn(),
@@ -256,9 +274,13 @@ describe('SettingsView progressive loading', () => {
       },
     })
     mocks.getPermissionGrants.mockResolvedValue([])
-    mocks.getNotificationAuthState.mockResolvedValue('granted')
+    mocks.getNotificationAuthState.mockResolvedValue('authorized')
+    mocks.getMicrophoneAuthorizationState.mockResolvedValue('authorized')
+    mocks.getSpeechRecognitionAuthorizationState.mockResolvedValue('authorized')
     mocks.requestMicrophonePermission.mockResolvedValue('authorized')
     mocks.requestVoiceDictationPermission.mockResolvedValue({ microphone: 'authorized', speechRecognition: 'authorized' })
+    mocks.requestAccessibilityPermission.mockResolvedValue(true)
+    mocks.requestChromeAutomationPermission.mockResolvedValue('granted')
     mocks.updateSettings.mockResolvedValue(undefined)
     mocks.getOrcaCliStatus.mockResolvedValue({
       installed: false,
@@ -626,8 +648,13 @@ describe('SettingsView progressive loading', () => {
     expect(screen.queryByText('Interface en français uniquement', { exact: false })).not.toBeInTheDocument()
   })
 
-  it('demande explicitement les autorisations vocales depuis les permissions macOS', async () => {
+  it('demande explicitement les autorisations vocales depuis les permissions', async () => {
     renderSettings({ tab: 'permissions' })
+
+    expect(await screen.findByRole('heading', { name: 'Permissions de notifications' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Accessibilité' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Automatisation Chrome' })).toBeVisible()
+    expect((await screen.findAllByText('Accordée')).length).toBeGreaterThanOrEqual(4)
 
     const request = await screen.findByRole('button', { name: 'Autoriser microphone et dictée' })
     fireEvent.click(request)
@@ -666,7 +693,7 @@ describe('SettingsView progressive loading', () => {
 
     fireEvent.click(sandbox)
     expect(sandbox).toBeChecked()
-    expect(screen.getAllByText(/Un refus ne nécessite pas de désactiver la protection/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/limitation sandbox Bob Work/).length).toBeGreaterThan(0)
     expect(directDisk).not.toBeChecked()
     await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ sandboxMode: true })))
 

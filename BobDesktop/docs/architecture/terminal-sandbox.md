@@ -29,9 +29,10 @@ VM):
   (`sandbox-node.cjs` for Node, `$HOME/bin` wrappers for curl/wget/nc, Chrome MCP
   URL validation) because current macOS Seatbelt only accepts `localhost`/`*` as
   remote hosts — CIDR filters are rejected by `sandbox-exec`.
-- **Session policy**: never pass `--trust`; Computer Use MCP and plugin hooks stay
-  forced off. Chrome and subagents follow user settings. Remote MCP gateway stays
-  forbidden.
+- **Session policy**: pass `--trust` so Bob Shell tools are not soft-blocked on
+  the seatbelt-writable host remount `~/.bob/skills` (skill/plugin creation).
+  Computer Use MCP and plugin hooks stay forced off. Chrome and subagents follow
+  user settings. Remote MCP gateway stays forbidden.
 
 Environment inheritance is cleared. Only Bob’s inference credential (plus proxy /
 custom CA env when present) is injected. Resume IDs are not reused with the

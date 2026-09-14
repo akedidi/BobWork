@@ -76,7 +76,7 @@ const plugins = [{
   id: 'builtin-documents', name: 'Documents', version: '1.0.0', description: 'Créer et lire des documents.', scope: 'system', category: 'recipe', installState: 'installed', validationState: 'valid', createdAt: '', updatedAt: '',
   manifest: { builtin: true, icon: 'document', slug: 'bob-work-documents', capabilities: ['document.read', 'document.create'], permissions: [{ type: 'file.read' }, { type: 'file.write' }] },
 }, {
-  id: 'cloud', name: 'Cloud Architect', version: '1.0.0', availableVersion: '1.1.0', description: 'Analyser une architecture cloud.', scope: 'personal', category: 'executable', installState: 'disabled', validationState: 'valid', createdAt: '', updatedAt: '',
+  id: 'cloud', name: 'Cloud Architect', version: '1.0.0', availableVersion: '1.1.0', description: 'Analyser une architecture cloud.', scope: 'personal', category: 'executable', installState: 'disabled', validationState: 'valid', createdAt: '2026-08-08T08:00:00Z', updatedAt: '2026-08-09T10:00:00Z',
   manifest: { agentic: true, slug: 'cloud-architect', runtime: { python: '>=3.9', cli: true }, instructions: 'Analyser et vérifier.', permissions: [{ type: 'command.execute' }, { type: 'mcp.connect' }], mcpServers: { architecture: { command: 'python3' } }, integrations: [{ provider: 'cloud' }], browserExtensions: [{ id: 'browser' }], hooks: [{ id: 'prepare' }], scheduledTaskTemplates: [{ id: 'review' }], skills: [
     { name: 'architecture-review', displayName: 'Revue d’architecture', description: 'Challenger une architecture avant décision.' },
     { name: 'tradeoff-analysis', displayName: 'Arbitrages', description: 'Comparer les options et leurs compromis.' },
@@ -377,6 +377,8 @@ describe('PluginsView', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
 
     expect(await screen.findByRole('heading', { name: 'Skills' })).toBeVisible()
+    expect(screen.getByText('Créé le')).toBeVisible()
+    expect(screen.getByText('Modifié le')).toBeVisible()
     expect(screen.getByText('Revue d’architecture')).toBeVisible()
     expect(screen.getByText('Challenger une architecture avant décision.')).toBeVisible()
     expect(screen.getByText('Arbitrages')).toBeVisible()

@@ -341,11 +341,11 @@ fn missing_browser_capability_error(
             );
         }
         parts.push(format!(
-            "Dans Réglages → Accès et contrôle, cliquez « Demander Automatisation Chrome » pour faire apparaître {app_name} dans la liste, puis Revérifier."
+            "Dans Réglages → Permissions, cliquez « Demander Automatisation Chrome » pour faire apparaître {app_name} dans la liste, puis Revérifier."
         ));
     } else if needs_accessibility {
         parts.push(format!(
-            "Le réglage est activé, mais Accessibilité macOS manque pour {app_name}. Réglages Système → Confidentialité et sécurité → Accessibilité : autorisez {app_name}, puis Revérifier dans Accès et contrôle."
+            "Le réglage est activé, mais Accessibilité macOS manque pour {app_name}. Réglages Système → Confidentialité et sécurité → Accessibilité : autorisez {app_name}, puis Revérifier dans Permissions."
         ));
     } else {
         parts.push(
@@ -1358,7 +1358,7 @@ pub async fn send_message(
                 "Autoriser Bob Shell à démarrer cette session ? Capacité : {}{}.",
                 risk.summary(),
                 if settings.sandbox_mode {
-                    " · mode sandbox (workspace uniquement, sans --trust)"
+                    " · mode sandbox (Seatbelt ; --trust pour skills/plugins sous ~/.bob/skills)"
                 } else {
                     ""
                 }
@@ -2031,7 +2031,7 @@ fn build_prompt_with_history(
             app = crate::app_identity::app_display_name()
         )),
         chrome_control_enabled.then(|| format!(
-            "Contrôle Chrome Bob Work explicitement demandé pour ce message : utilise uniquement les outils `chrome_*` de bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, dis explicitement d’autoriser **{app} → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation — pas python3, pas osascript. Bob Work et Bob Work-test sont des apps distinctes : une case pour l’une ne suffit pas pour l’autre. Dans Réglages → Accès et contrôle, clique « Demander Automatisation Chrome » si {app} n’apparaît pas encore.",
+            "Contrôle Chrome Bob Work explicitement demandé pour ce message : utilise uniquement les outils `chrome_*` de bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, dis explicitement d’autoriser **{app} → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation — pas python3, pas osascript. Bob Work et Bob Work-test sont des apps distinctes : une case pour l’une ne suffit pas pour l’autre. Dans Réglages → Permissions, clique « Demander Automatisation Chrome » si {app} n’apparaît pas encore.",
             app = crate::app_identity::app_display_name()
         )),
         (!integration_context.is_empty()).then(|| format!("Intégrations locales disponibles (utilise les variables d’environnement nommées, sans jamais les afficher) :\n{}", integration_context.join("\n"))),

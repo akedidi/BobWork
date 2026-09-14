@@ -135,14 +135,12 @@ export function useSettingsData() {
   }, [t, appName])
 
   useEffect(() => {
-    if (tab !== 'extensions') return
+    if (tab !== 'extensions' && tab !== 'permissions') return
     setChromeLoading(true)
     setComputerUseLoading(true)
-    setOrcaCliLoading(true)
     setChromeError(null)
     setComputerUseError(null)
-    setOrcaCliError(null)
-    
+
     getChromeControlStatus()
       .then(status => {
         setChromeError(null)
@@ -153,7 +151,7 @@ export function useSettingsData() {
         setChromeError(error)
       })
       .finally(() => setChromeLoading(false))
-      
+
     getComputerUseStatus()
       .then(status => {
         setComputerUseError(null)
@@ -165,6 +163,15 @@ export function useSettingsData() {
       })
       .finally(() => setComputerUseLoading(false))
 
+    if (tab !== 'extensions') {
+      setComputerUseTools(null)
+      setChromeTools(null)
+      return
+    }
+
+    setOrcaCliLoading(true)
+    setOrcaCliError(null)
+
     getOrcaCliStatus()
       .then(status => {
         setOrcaCliError(null)
@@ -175,7 +182,7 @@ export function useSettingsData() {
         setOrcaCliError(error)
       })
       .finally(() => setOrcaCliLoading(false))
-      
+
     if (settings?.computerUseEnabled) {
       void testMcpServer('bob-work-computer-use').then(setComputerUseTools).catch(() => setComputerUseTools(null))
     } else {

@@ -6,13 +6,12 @@ import { translate } from '../../i18n/translate'
 import ExtensionsSettingsTab from './ExtensionsSettingsTab'
 
 const mocks = vi.hoisted(() => ({
-  requestChromeAutomationPermission: vi.fn(),
   openMacosPrivacyPane: vi.fn(),
 }))
 
 vi.mock('../../lib/ipc', () => ({
-  requestChromeAutomationPermission: mocks.requestChromeAutomationPermission,
   openMacosPrivacyPane: mocks.openMacosPrivacyPane,
+  requestChromeAutomationPermission: vi.fn(),
   requestAccessibilityPermission: vi.fn(),
   importConversations: vi.fn(),
   exportConversations: vi.fn(),
@@ -42,7 +41,7 @@ const settings = {
 } as AppSettings
 
 const longDeniedMessage =
-  'Autorisez Bob Work-test → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation. Si Bob Work-test n’apparaît pas dans la liste, cliquez d’abord sur « Demander Automatisation Chrome » dans Réglages → Accès et contrôle (macOS n’affiche une app qu’après son premier ordre Apple Event). Bob Work et Bob Work-test sont des applications distinctes : une case cochée pour l’une ne couvre pas l’autre. C’est « Bob Work-test » qu’il faut autoriser.'
+  'Autorisez Bob Work-test → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation. Si Bob Work-test n’apparaît pas dans la liste, cliquez d’abord sur « Demander Automatisation Chrome » dans Réglages → Permissions (macOS n’affiche une app qu’après son premier ordre Apple Event). Bob Work et Bob Work-test sont des applications distinctes : une case cochée pour l’une ne couvre pas l’autre. C’est « Bob Work-test » qu’il faut autoriser.'
 
 function renderChromeTab(overrides: Record<string, unknown> = {}) {
   const setStatus = vi.fn()
@@ -91,28 +90,24 @@ describe('ExtensionsSettingsTab Chrome automation', () => {
     mocks.openMacosPrivacyPane.mockResolvedValue(undefined)
   })
 
-  it('keeps Chrome automation actions and hides the sticky denied tutorial', () => {
+  it('shows automation status and points requests to Permissions settings', () => {
     renderChromeTab()
 
-    expect(screen.getByRole('button', { name: 'Demander Automatisation Chrome' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Demander Automatisation Chrome' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Ouvrir Automatisation (pour Chrome)' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: t('settings.recheck') })).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Ouvrir Automatisation (pour Chrome)' })).toBeVisible()
+    expect(screen.getByText(t('settings.managePermissionsInSettings'))).toBeVisible()
     expect(screen.queryByText(/macOS n’affiche une app qu’après/)).not.toBeInTheDocument()
-    expect(screen.getByText(/activez Bob Work-test → Google Chrome/)).toBeVisible()
   })
 
-  it('asks for permission from this app then opens Automation without a sticky overlay', async () => {
-    mocks.requestChromeAutomationPermission.mockRejectedValue(new Error(longDeniedMessage))
-    const { setStatus, showTransientStatus } = renderChromeTab()
+  it('rechecks Chrome automation from Access & control without requesting it there', async () => {
+    const { refreshChromeStatus, showTransientStatus } = renderChromeTab()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Demander Automatisation Chrome' }))
+    fireEvent.click(screen.getByRole('button', { name: t('settings.recheck') }))
 
     await waitFor(() => {
-      expect(showTransientStatus).toHaveBeenCalledWith(
-        t('settings.automationDenied', { appName: 'Bob Work-test' }),
-      )
+      expect(refreshChromeStatus).toHaveBeenCalled()
     })
-    expect(setStatus).not.toHaveBeenCalled()
-    expect(mocks.openMacosPrivacyPane).toHaveBeenCalledWith('automation')
+    expect(showTransientStatus).not.toHaveBeenCalled()
   })
 })

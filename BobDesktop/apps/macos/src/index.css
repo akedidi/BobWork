@@ -2699,6 +2699,7 @@
   .fitted-html-frame--inline { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; }
   .fitted-html-frame--panel { height: 100%; flex: 1; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; }
   .fitted-html-frame iframe { display: block; width: 100%; min-height: 0; border: 0; background: white; }
+  .fitted-html-frame__error { padding: 24px 16px; color: var(--text-muted); font-size: 13px; text-align: center; }
   .live-canvas-toolbar {
     min-width: 0; flex-shrink: 0; display: flex; align-items: center; gap: 5px;
     padding: 5px 7px; border-bottom: 1px solid var(--border); background: var(--bg-surface);

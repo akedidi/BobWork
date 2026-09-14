@@ -761,6 +761,7 @@ pub fn run() {
             commands::system::open_macos_privacy_pane,
             commands::system::get_voice_dictation_availability,
             commands::system::microphone_authorization_state,
+            commands::system::speech_recognition_authorization_state,
             commands::system::request_microphone_permission,
             commands::system::request_voice_dictation_permission,
             commands::native_audio_recording::start_native_audio_recording,

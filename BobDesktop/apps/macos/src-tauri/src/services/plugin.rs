@@ -4210,7 +4210,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         &["inspect_docx", "extract_docx_text", "validate_docx"]
                     )
                 },
-                "instructions": "Mode Microsoft Word Bob Work (local, sans upload distant). Quand un .docx est joint au chat, traite-le comme un mode document dédié : active ce mode spécialisé, inspecte le package avec inspect_docx, extrais le contenu avec extract_docx_text, puis modifie via python-docx dans une commande Python locale. Préserve ordre des sections, titres, listes, tableaux, liens, en-têtes/pieds et styles existants. Travaille sur une copie sauf autorisation explicite d’écrasement. Ne crée jamais un faux .docx (fichier texte renommé). Après écriture, validate_docx et renvoie le chemin absolu pour Quick Look."
+                "instructions": "Mode Microsoft Word Bob Work (local, sans upload distant). Quand un .docx est joint au chat, traite-le comme un mode document dédié : active ce mode spécialisé, inspecte le package avec inspect_docx, extrais le contenu avec extract_docx_text, puis modifie via python-docx dans une commande Python locale (`python3 -c` de préférence). Ne laisse pas de .py helper dans le workspace sauf demande explicite. Préserve ordre des sections, titres, listes, tableaux, liens, en-têtes/pieds et styles existants. Travaille sur une copie sauf autorisation explicite d’écrasement. Ne crée jamais un faux .docx (fichier texte renommé). Après écriture, validate_docx et renvoie le chemin absolu pour Quick Look."
             }),
         },
         BuiltinPlugin {
@@ -4235,7 +4235,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     &["pptx"],
                     &["inspect_pptx", "list_pptx_slides", "validate_pptx", "read_file", "write_file", "execute_command", "use_mcp_tool"],
                     &["python-pptx"],
-                    "1) inspect_pptx / list_pptx_slides sur le PPTX joint. 2) Modifier via python-pptx en conservant masters et layouts. 3) validate_pptx. 4) Chemin absolu pour aperçu."
+                    "1) inspect_pptx / list_pptx_slides sur le PPTX joint. 2) Modifier via python-pptx (`python3 -c` de préférence, pas de .py helper laissé dans le workspace). 3) validate_pptx. 4) Chemin absolu pour aperçu."
                 ),
                 "mcpServers": {
                     "office-tools": office_mcp_server(
@@ -4245,7 +4245,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         &["inspect_pptx", "list_pptx_slides", "validate_pptx"]
                     )
                 },
-                "instructions": "Mode Microsoft PowerPoint Bob Work (local). Si un modèle PPTX est joint, réutilise masters, layouts, polices, couleurs et dimensions. Une idée claire par slide, pas de débordement de texte, notes sources si pertinent. Utilise inspect_pptx et list_pptx_slides avant modification, python-pptx pour éditer, validate_pptx après sauvegarde. Renvoie le chemin absolu PPTX pour Quick Look."
+                "instructions": "Mode Microsoft PowerPoint Bob Work (local). Si un modèle PPTX est joint, réutilise masters, layouts, polices, couleurs et dimensions. Une idée claire par slide, pas de débordement de texte, notes sources si pertinent. Utilise inspect_pptx et list_pptx_slides avant modification, python-pptx pour éditer (`python3 -c` ou script temporaire — ne laisse pas de .py helper sauf demande explicite), validate_pptx après sauvegarde. Renvoie le chemin absolu PPTX pour Quick Look."
             }),
         },
         BuiltinPlugin {
@@ -4280,7 +4280,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         &["inspect_xlsx", "read_xlsx_sheet", "validate_xlsx"]
                     )
                 },
-                "instructions": "Mode Microsoft Excel Bob Work (local). Quand un .xlsx/.csv est joint, inspect_xlsx puis read_xlsx_sheet via le MCP office-tools. Préserve formules, formats numériques, cellules fusionnées, plages nommées, validations et graphiques. Ne remplace jamais une formule par sa valeur affichée. Pour un nouveau classeur : en-têtes explicites, types adaptés, largeurs lisibles. Utilise openpyxl en sandbox Python. Après sauvegarde, validate_xlsx et renvoie le chemin absolu."
+                "instructions": "Mode Microsoft Excel Bob Work (local). Quand un .xlsx/.csv est joint, inspect_xlsx puis read_xlsx_sheet via le MCP office-tools. Préserve formules, formats numériques, cellules fusionnées, plages nommées, validations et graphiques. Ne remplace jamais une formule par sa valeur affichée. Pour un nouveau classeur : en-têtes explicites, types adaptés, largeurs lisibles. Utilise openpyxl en sandbox Python (`python3 -c` de préférence ; pas de .py helper laissé sauf demande). Après sauvegarde, validate_xlsx et renvoie le chemin absolu."
             }),
         },
         BuiltinPlugin {
