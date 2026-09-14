@@ -16,6 +16,7 @@ import { GrowingPromptInput } from '../components/GrowingPromptInput'
 import { NoProjectIcon } from '../components/NoProjectIcon'
 import { PromptAutocompleteList } from '../components/PromptAutocompleteList'
 import { SelectedPluginChips } from '../components/SelectedPluginChips'
+import { TaskPermissionsList } from '../components/TaskPermissionsList'
 import { isSubagentRelatedActivity, SubagentStatusPanel, type SubagentActivity } from '../components/SubagentStatusPanel'
 import { TopBar } from '../components/TopBar'
 import { AppContext } from '../context/AppContext'
@@ -23,8 +24,10 @@ import { modeLabel, riskLevelLabel } from '../labels'
 import { normalizeAssistantMarkdown } from '../markdown'
 import { mapSpecsFromToolsUsed } from '../mapSpec'
 import { addPluginReference, removePluginReference } from '../pluginReferences'
-import { formatTime } from '../i18n'
+import { formatMessageTimestamp } from '../messageTimestamp'
 import { applyPromptAutocomplete, buildPromptAutocompleteItems, detectPromptAutocomplete, type PromptAutocompleteItem } from '../promptAutocomplete'
+import { approvalGroupFromActionType } from '../taskPermissions'
+import { getTaskApprovalSnapshot, grantPermissionForTask, hydrateTaskPermissionStore, useTaskApprovalStore } from '../taskPermissionStore'
 import { colors, commonStyles } from '../theme'
 import type { Approval, BobActivityPayload, BobSlashCommand, BobTokenPayload, Catalog, Conversation, FileChange, Message, ModeOption, Project, PromptAttachment, QueuedPrompt, RemoteArtifact } from '../types'
 import { isAllowedVisualizationRequest, safeVisualizationHtml, visualizationScrollScript } from '../visualizationHtml'
@@ -32,6 +35,7 @@ import { isAllowedVisualizationRequest, safeVisualizationHtml, visualizationScro
 export function ChatScreen({ conversation, onBack }: { conversation: Conversation; onBack: () => void }) {
   const insets = useSafeAreaInsets()
   const { api, bootstrap, history, liveEvents, approvals, setActiveConversationId, refreshApprovals, refreshHistory, t } = useContext(AppContext)
+  const taskApproval = useTaskApprovalStore()
   const [messages, setMessages] = useState<Message[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(false)
@@ -67,6 +71,7 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
   useEffect(() => {
     setActiveConversationId(conversation.id)
     setSubagentActivities([])
+    void hydrateTaskPermissionStore()
     return () => setActiveConversationId(null)
   }, [conversation.id, setActiveConversationId])
 
@@ -218,7 +223,17 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
     setSending(true)
     setTaskState('starting')
     try {
-      const input = { prompt: item.prompt, mode: item.mode, projectId: item.projectId, pluginIds: item.pluginIds, skillSlugs: item.skillSlugs, mcpNames: item.mcpNames, dbNames: item.dbNames, attachments: item.attachments }
+      const input = {
+        prompt: item.prompt,
+        mode: item.mode,
+        projectId: item.projectId,
+        pluginIds: item.pluginIds,
+        skillSlugs: item.skillSlugs,
+        mcpNames: item.mcpNames,
+        dbNames: item.dbNames,
+        attachments: item.attachments,
+        taskApproval: item.taskApproval ?? getTaskApprovalSnapshot(),
+      }
       const response = item.editMessageId
         ? await api.resendPrompt(conversation.id, item.editMessageId, input)
         : await api.sendPrompt(conversation.id, input)
@@ -239,7 +254,19 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
   const waitingForInfo = taskState === 'awaiting_info'
   const send = async () => {
     if (!api || !prompt.trim() || sending) return
-    const item: QueuedPrompt = { id: `${Date.now()}-${Math.random()}`, prompt: prompt.trim(), mode, projectId: conversation.projectId ?? undefined, pluginIds: [...pluginIds], skillSlugs: [...skillSlugs], mcpNames: [...mcpNames], dbNames: [...dbNames], attachments: [...attachments], editMessageId: editingMessageId ?? undefined }
+    const item: QueuedPrompt = {
+      id: `${Date.now()}-${Math.random()}`,
+      prompt: prompt.trim(),
+      mode,
+      projectId: conversation.projectId ?? undefined,
+      pluginIds: [...pluginIds],
+      skillSlugs: [...skillSlugs],
+      mcpNames: [...mcpNames],
+      dbNames: [...dbNames],
+      attachments: [...attachments],
+      editMessageId: editingMessageId ?? undefined,
+      taskApproval: getTaskApprovalSnapshot(),
+    }
     setPrompt(''); setAttachments([])
     if (bobWorking && !waitingForInfo && !editingMessageId) {
       setPromptQueue(current => [...current, item])
@@ -362,6 +389,10 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
     setActionBusy(approval.id)
     try {
       await api.resolveApproval(approval.id, decision, duration)
+      if (decision === 'approved' && (duration === 'task' || duration === 'always')) {
+        const group = approvalGroupFromActionType(approval.actionType)
+        if (group) grantPermissionForTask(group)
+      }
       await Promise.all([refreshApprovals(), refreshHistory()])
     } catch { Alert.alert(t('error'), t('approvalFailed')) } finally { setActionBusy(null) }
   }
@@ -414,19 +445,25 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
             : <Pressable style={[styles.send, (!prompt.trim() || sending) && styles.sendDisabled]} onPress={() => void send()} disabled={!prompt.trim() || sending} accessibilityLabel={t('send')}>{sending ? <ActivityIndicator size="small" color={colors.white} /> : <Ionicons name="arrow-up" size={22} color={colors.white} />}</Pressable>}
         </View>
         <View style={styles.composerMetaRow}>
-          <Pressable style={styles.modeChip} onPress={() => setModeModal(true)} accessibilityLabel={t('mode')}>
+          <Pressable style={styles.modeChip} onPress={() => setModeModal(true)} accessibilityLabel={t('modeAndPermissions')}>
             <Ionicons name="sparkles-outline" size={14} color={colors.accent} />
             <Text style={styles.modeChipText}>{modeLabel(mode, t)}</Text>
+            <Text style={styles.permChipText}>
+              {taskApproval.autoApprovalEnabled && taskApproval.allowedPermissions.length > 0
+                ? t('permStatusAuto')
+                : t('permStatusAsk')}
+            </Text>
             <Ionicons name="chevron-up" size={13} color={colors.textMuted} />
           </Pressable>
           {selectedTools > 0 ? <Text style={styles.selectedResourcesText}>{t('selectedResources', { count: selectedTools })}</Text> : null}
         </View>
       </View>
 
-      <AppModal visible={modeModal} title={t('mode')} onClose={() => setModeModal(false)}>
+      <AppModal visible={modeModal} title={t('modeAndPermissions')} onClose={() => setModeModal(false)}>
         <ScrollView showsVerticalScrollIndicator={false}>
+          <Text style={styles.sectionTitle}>{t('mode')}</Text>
           {modes.map(item => (
-            <Pressable key={item.id} style={styles.selectorRow} onPress={() => { setMode(item.id); setModeModal(false) }}>
+            <Pressable key={item.id} style={styles.selectorRow} onPress={() => setMode(item.id)}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.selectorName}>{modeLabel(item.id, t)}</Text>
                 {item.description ? <Text style={styles.selectorDesc} numberOfLines={2}>{item.description}</Text> : null}
@@ -434,6 +471,15 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
               {mode === item.id ? <Ionicons name="checkmark-circle" color={colors.accent} size={22} /> : null}
             </Pressable>
           ))}
+          <TaskPermissionsList
+            mode={mode}
+            mcpEnabled={bootstrap?.settings.mcpEnabled !== false}
+            subagentsEnabled={bootstrap?.settings.subagentsEnabled !== false}
+            t={t}
+          />
+          <Pressable style={[commonStyles.primaryButton, { marginTop: 16, marginBottom: 8 }]} onPress={() => setModeModal(false)}>
+            <Text style={commonStyles.primaryButtonText}>{t('done')}</Text>
+          </Pressable>
         </ScrollView>
       </AppModal>
 
@@ -510,7 +556,7 @@ function StreamingResponseBubble({ text }: { text: string }) {
       <View style={styles.avatar}><Image source={require('../../assets/bob-avatar.png')} style={styles.avatarImage} resizeMode="contain" /></View>
       <View style={[styles.bubble, styles.assistantBubble]}>
         <Text style={styles.author}>Bob</Text>
-        <MessageMarkdown value={text} user={false} />
+        <MessageMarkdown value={text} />
       </View>
     </View>
   )
@@ -537,12 +583,18 @@ function MessageBubble({ message, onEdit }: { message: Message; onEdit?: () => v
   const { language, t } = useContext(AppContext)
   const user = message.author === 'user'
   const attachments = Array.isArray(message.attachments) ? message.attachments : []
+  const timestamp = formatMessageTimestamp(message.createdAt, language)
   return (
     <View style={[styles.messageRow, user && styles.userMessageRow]}>
       {!user && <View style={styles.avatar}><Image source={require('../../assets/bob-avatar.png')} style={styles.avatarImage} resizeMode="contain" /></View>}
       <View style={[styles.bubble, user ? styles.userBubble : styles.assistantBubble]}>
-        <View style={styles.messageHeader}><Text style={[styles.author, user && styles.userAuthor]}>{user ? t('you') : 'Bob'}</Text><Text style={[styles.time, user && styles.userTime]}>{formatTime(message.createdAt, language)}</Text></View>
-        <MessageMarkdown value={message.content} user={user} />
+        <View style={styles.messageHeader}>
+          <Text style={[styles.author, user && styles.userAuthor]}>{user ? t('you') : 'Bob'}</Text>
+          {timestamp ? <Text style={[styles.time, user && styles.userTime]}>{timestamp}</Text> : null}
+        </View>
+        {user
+          ? <Text selectable style={styles.userPlainText}>{message.content}</Text>
+          : <MessageMarkdown value={message.content} />}
         {!user ? mapSpecsFromToolsUsed(message.toolsUsed).map((spec, index) => <ConversationMapCard key={`${spec.title}-${index}`} spec={spec} />) : null}
         {!user && message.artifacts?.length ? <ArtifactResources artifacts={message.artifacts} /> : null}
         {!user && message.fileChanges?.length ? <FileChanges changes={message.fileChanges} /> : null}
@@ -581,30 +633,31 @@ function FileChanges({ changes }: { changes: FileChange[] }) {
   </View>
 }
 
-export function MessageMarkdown({ value, user }: { value: string; user: boolean }) {
-  const textColor = user ? colors.white : colors.text
+export function MessageMarkdown({ value }: { value: string }) {
+  const textColor = colors.text
   const elements = useMarkdown(normalizeAssistantMarkdown(value), {
     renderer: bobMarkdownRenderer,
     colorScheme: 'dark',
-    theme: { colors: { text: textColor, link: user ? '#E0EAFF' : '#8FB0FF', code: textColor, border: user ? '#8FB0FF' : colors.border } },
+    theme: { colors: { text: textColor, link: '#8FB0FF', code: textColor, border: colors.border } },
     styles: {
-      text: { color: textColor, fontSize: 14, lineHeight: 21 },
+      // Align with Bob Desktop ui-specification type scale (15px body).
+      text: { color: textColor, fontSize: 15, lineHeight: 22 },
       paragraph: { marginTop: 0, marginBottom: 8 },
-      h1: { color: textColor, fontSize: 22, lineHeight: 28, marginBottom: 8 },
-      h2: { color: textColor, fontSize: 19, lineHeight: 25, marginBottom: 7 },
-      h3: { color: textColor, fontSize: 17, lineHeight: 23, marginBottom: 6 },
-      h4: { color: textColor, fontSize: 15, lineHeight: 21, marginBottom: 5 },
-      h5: { color: textColor, fontSize: 14, lineHeight: 20, marginBottom: 4 },
-      h6: { color: textColor, fontSize: 13, lineHeight: 19, marginBottom: 4 },
+      h1: { color: textColor, fontSize: 22, lineHeight: 28, marginBottom: 8, fontWeight: '700' },
+      h2: { color: textColor, fontSize: 20, lineHeight: 26, marginBottom: 7, fontWeight: '700' },
+      h3: { color: textColor, fontSize: 17, lineHeight: 23, marginBottom: 6, fontWeight: '700' },
+      h4: { color: textColor, fontSize: 15, lineHeight: 21, marginBottom: 5, fontWeight: '700' },
+      h5: { color: textColor, fontSize: 14, lineHeight: 20, marginBottom: 4, fontWeight: '600' },
+      h6: { color: textColor, fontSize: 13, lineHeight: 19, marginBottom: 4, fontWeight: '600' },
       list: { marginVertical: 4 },
-      li: { color: textColor, fontSize: 14, lineHeight: 21 },
-      blockquote: { borderLeftWidth: 3, borderLeftColor: user ? '#D6E2FF' : colors.accent, paddingLeft: 10, marginVertical: 6, opacity: .92 },
-      codespan: { color: textColor, backgroundColor: user ? '#376BCF' : '#0B1220', fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 12 },
-      code: { backgroundColor: user ? '#315FBA' : '#080C14', borderWidth: 1, borderColor: user ? '#8FB0FF' : colors.border, borderRadius: 10, padding: 10, marginVertical: 7 },
-      table: { borderWidth: 1, borderColor: user ? '#8FB0FF' : colors.border, borderRadius: 8, marginVertical: 8 },
-      tableRow: { borderBottomWidth: 1, borderBottomColor: user ? '#8FB0FF' : colors.border },
+      li: { color: textColor, fontSize: 15, lineHeight: 22 },
+      blockquote: { borderLeftWidth: 3, borderLeftColor: colors.accent, paddingLeft: 10, marginVertical: 6, opacity: .92 },
+      codespan: { color: textColor, backgroundColor: '#0B1220', fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 13 },
+      code: { backgroundColor: '#080C14', borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, marginVertical: 7 },
+      table: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, marginVertical: 8 },
+      tableRow: { borderBottomWidth: 1, borderBottomColor: colors.border },
       tableCell: { paddingHorizontal: 8, paddingVertical: 7, minWidth: 88 },
-      hr: { backgroundColor: user ? '#8FB0FF' : colors.border, height: 1, marginVertical: 9 },
+      hr: { backgroundColor: colors.border, height: 1, marginVertical: 9 },
     },
   })
   return <View style={styles.markdown}>{elements.map((element, index) => <Fragment key={`markdown-${index}`}>{element}</Fragment>)}</View>
@@ -613,16 +666,24 @@ export function MessageMarkdown({ value, user }: { value: string; user: boolean 
 class BobMarkdownRenderer extends Renderer {
   override code(text: string, _language?: string, containerStyle?: ViewStyle, textStyle?: TextStyle): ReactNode {
     return (
-      <ScrollView
-        key={this.getKey()}
-        horizontal
-        nestedScrollEnabled
-        showsHorizontalScrollIndicator
-        style={styles.markdownCodeScroll}
-        contentContainerStyle={[containerStyle, styles.markdownCodeScrollContent]}
-      >
-        <View><Text selectable style={textStyle}>{text}</Text></View>
-      </ScrollView>
+      <View key={this.getKey()} style={styles.markdownCodeFrame}>
+        <Pressable
+          style={styles.markdownCodeCopy}
+          accessibilityLabel="Copy"
+          onPress={() => void Clipboard.setStringAsync(text)}
+        >
+          <Ionicons name="copy-outline" size={14} color={colors.textMuted} />
+        </Pressable>
+        <ScrollView
+          horizontal
+          nestedScrollEnabled
+          showsHorizontalScrollIndicator
+          style={styles.markdownCodeScroll}
+          contentContainerStyle={[containerStyle, styles.markdownCodeScrollContent]}
+        >
+          <View><Text selectable style={textStyle}>{text}</Text></View>
+        </ScrollView>
+      </View>
     )
   }
 
@@ -823,8 +884,8 @@ function SelectorRow({ name, description, selected, onPress }: { name: string; d
 
 const styles = StyleSheet.create({
   messages: { flex: 1 }, messagesContent: { flexGrow: 1, justifyContent: 'flex-end', paddingHorizontal: 12, paddingVertical: 18 }, messageRow: { width: '100%', flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, userMessageRow: { justifyContent: 'flex-end' }, streamingMessage: { marginTop: 9 }, avatar: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, avatarImage: { width: 29, height: 29 },
-  bubble: { maxWidth: '88%', borderRadius: 18, paddingHorizontal: 13, paddingVertical: 10 }, userBubble: { backgroundColor: '#386FDA', borderBottomRightRadius: 6 }, assistantBubble: { flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 6 }, messageHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 5 }, author: { color: colors.accent, fontSize: 10, fontWeight: '900', textTransform: 'uppercase', letterSpacing: .5 }, userAuthor: { color: '#E0EAFF' }, time: { color: colors.textMuted, fontSize: 9, opacity: .8 }, userTime: { color: '#E0EAFF' }, markdown: { width: '100%', overflow: 'hidden' },
-  markdownCodeScroll: { width: '100%', maxWidth: '100%', marginVertical: 7 }, markdownCodeScrollContent: { minWidth: '100%' },
+  bubble: { maxWidth: '88%', borderRadius: 18, paddingHorizontal: 13, paddingVertical: 10 }, userBubble: { backgroundColor: '#386FDA', borderBottomRightRadius: 6 }, assistantBubble: { flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 6 }, messageHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 5 }, author: { color: colors.accent, fontSize: 10, fontWeight: '900', textTransform: 'uppercase', letterSpacing: .5 }, userAuthor: { color: '#E0EAFF' }, time: { color: colors.textMuted, fontSize: 9, opacity: .8 }, userTime: { color: '#E0EAFF' }, userPlainText: { color: colors.white, fontSize: 15, lineHeight: 22 }, markdown: { width: '100%', overflow: 'hidden' },
+  markdownCodeFrame: { position: 'relative', width: '100%', marginVertical: 7 }, markdownCodeCopy: { position: 'absolute', top: 8, right: 8, zIndex: 2, width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border }, markdownCodeScroll: { width: '100%', maxWidth: '100%' }, markdownCodeScrollContent: { minWidth: '100%', paddingTop: 4 },
   markdownTableScroll: { width: '100%', maxWidth: '100%', marginVertical: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.surface, overflow: 'hidden' }, markdownTableScrollContent: { flexGrow: 1 }, markdownTable: { flexGrow: 1 }, markdownTableRow: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }, markdownTableHeaderRow: { backgroundColor: colors.surfaceRaised }, markdownTableCell: { minHeight: 42, justifyContent: 'flex-start', paddingHorizontal: 10, paddingVertical: 8, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border }, markdownTableLastCell: { borderRightWidth: 0 },
   messageAttachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }, messageAttachment: { maxWidth: 210, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8, backgroundColor: colors.surfaceRaised }, messageAttachmentText: { maxWidth: 165, color: colors.textMuted, fontSize: 10 }, userAttachmentText: { color: colors.white }, older: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, paddingVertical: 15 }, olderText: { color: colors.textMuted, fontSize: 11 },
   messageActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 7, paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }, userMessageActions: { borderTopColor: '#8FB0FF' }, messageAction: { minHeight: 24, flexDirection: 'row', alignItems: 'center', gap: 4 }, messageActionText: { color: colors.textMuted, fontSize: 9, fontWeight: '700' }, userMessageActionText: { color: colors.white },
@@ -836,7 +897,7 @@ const styles = StyleSheet.create({
   queuePanel: { maxHeight: 125, gap: 4, marginBottom: 8, padding: 8, borderRadius: 11, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background }, queueHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 }, queueTitle: { flex: 1, color: colors.text, fontSize: 10, fontWeight: '900' }, queueClear: { color: colors.accent, fontSize: 9, fontWeight: '800' }, queueItem: { minHeight: 25, flexDirection: 'row', alignItems: 'center', gap: 5 }, queuePrompt: { flex: 1, minWidth: 0, color: colors.textMuted, fontSize: 10 },
   taskActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 7 }, taskAction: { minHeight: 34, maxWidth: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border }, taskActionText: { flexShrink: 1, color: colors.accent, fontSize: 10, lineHeight: 13, fontWeight: '800', textAlign: 'center' }, composerBanner: { minHeight: 32, flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 7, paddingHorizontal: 9, borderRadius: 9, backgroundColor: colors.accentSoft }, composerBannerText: { flex: 1, color: colors.accent, fontSize: 10, fontWeight: '800' },
   promptRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 }, plus: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceRaised }, plusBadge: { position: 'absolute', top: -4, right: -4, minWidth: 17, height: 17, paddingHorizontal: 4, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent }, plusBadgeText: { color: colors.white, fontSize: 9, fontWeight: '900' }, prompt: { flex: 1, minWidth: 0, minHeight: 40, color: colors.text, backgroundColor: colors.surfaceRaised, borderRadius: 13, paddingHorizontal: 12, paddingTop: 10, paddingBottom: 9, fontSize: 14 }, send: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent }, inlineStop: { backgroundColor: colors.danger }, sendDisabled: { opacity: .42 },
-  composerMetaRow: { minHeight: 31, flexDirection: 'row', alignItems: 'center', gap: 7, paddingTop: 6 }, modeChip: { minHeight: 27, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 9, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background }, modeChipText: { color: colors.text, fontSize: 10, fontWeight: '800' }, selectedResourcesText: { flex: 1, color: colors.textMuted, fontSize: 9, textAlign: 'right' },
+  composerMetaRow: { minHeight: 31, flexDirection: 'row', alignItems: 'center', gap: 7, paddingTop: 6 }, modeChip: { minHeight: 27, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 9, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background }, modeChipText: { color: colors.text, fontSize: 10, fontWeight: '800' }, permChipText: { color: colors.textMuted, fontSize: 9, fontWeight: '700' }, selectedResourcesText: { flex: 1, color: colors.textMuted, fontSize: 9, textAlign: 'right' },
   actionRow: { minHeight: 64, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, actionIcon: { width: 42, height: 42, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accentSoft }, actionText: { flex: 1, color: colors.text, fontWeight: '700' },
   selectorRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 9 }, selectorName: { color: colors.text, fontSize: 14, fontWeight: '700' }, selectorDesc: { color: colors.textMuted, fontSize: 11, lineHeight: 16, marginTop: 3 }, sectionTitle: { color: colors.textMuted, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', letterSpacing: .8, marginTop: 12, marginBottom: 3 },
   catalogSearch: { minHeight: 42, marginTop: 14, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceRaised }, catalogSearchInput: { flex: 1, minWidth: 0, color: colors.text, fontSize: 14, paddingVertical: 8 }, emptySection: { color: colors.textMuted, fontSize: 12, lineHeight: 18, paddingVertical: 8 },

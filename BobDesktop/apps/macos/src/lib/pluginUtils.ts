@@ -24,8 +24,18 @@ export type PluginMetadata = {
   scheduledTaskTemplates?: unknown[];
   releaseNotes?: string;
   connectorStrategy?: { tiers?: Array<{ id?: string; kind?: string; provider?: string; required?: boolean; auth?: string }>; explored?: string[]; fallback?: string };
-  resources?: Array<{ kind?: string; label?: string; optional?: boolean; provider?: string; notes?: string }>;
-  skills?: Array<{ name?: string; displayName?: string; description?: string; path?: string }>;
+  resources?: Array<{ kind?: string; label?: string; optional?: boolean; provider?: string; notes?: string; script?: string; runtimeId?: string; command?: string }>;
+  /** Objects (IBM-style) or string paths/names (prompt-created plugins). */
+  skills?: Array<string | { name?: string; displayName?: string; description?: string; path?: string }>;
+  bundledContent?: {
+    instructions?: Array<{ label?: string; path?: string }>
+    referenceDocs?: number
+    scripts?: number
+    icons?: {
+      total?: number
+      providers?: Record<string, number>
+    }
+  };
   specializedMode?: { allowedSkills?: string[] };
 };
 
@@ -36,36 +46,69 @@ export type PluginSkillRef = {
   path?: string
 };
 
+/** Derive a stable skill id from a relative path like `skills/foo/SKILL.md`. */
+export function skillNameFromPath(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/')
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length >= 2 && parts[parts.length - 1].toLocaleLowerCase() === 'skill.md') {
+    return parts[parts.length - 2]
+  }
+  const file = parts[parts.length - 1] ?? normalized
+  return file.replace(/\.md$/i, '') || normalized
+}
+
+function pushSkill(
+  skills: PluginSkillRef[],
+  seen: Set<string>,
+  candidate: { name: string; displayName?: string; description?: string; path?: string },
+) {
+  const name = candidate.name.trim()
+  if (!name) return
+  const key = name.toLocaleLowerCase()
+  if (seen.has(key)) return
+  seen.add(key)
+  skills.push({
+    name,
+    displayName: candidate.displayName?.trim() || name,
+    description: candidate.description?.trim() || '',
+    path: candidate.path?.trim() || undefined,
+  })
+}
+
 export function pluginSkillsOf(manifest: PluginMetadata): PluginSkillRef[] {
   const seen = new Set<string>()
   const skills: PluginSkillRef[] = []
   for (const skill of manifest.skills ?? []) {
-    const name = skill.name?.trim()
-    if (!name) continue
-    const key = name.toLocaleLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    skills.push({
+    if (typeof skill === 'string') {
+      const raw = skill.trim()
+      if (!raw) continue
+      const looksLikePath = raw.includes('/') || /\.md$/i.test(raw)
+      if (looksLikePath) {
+        const name = skillNameFromPath(raw)
+        pushSkill(skills, seen, { name, displayName: name, path: raw })
+      } else {
+        pushSkill(skills, seen, { name: raw, displayName: raw })
+      }
+      continue
+    }
+    const path = skill.path?.trim()
+    const name = skill.name?.trim() || (path ? skillNameFromPath(path) : '')
+    pushSkill(skills, seen, {
       name,
       displayName: skill.displayName?.trim() || name,
       description: skill.description?.trim() || '',
-      path: skill.path?.trim() || undefined,
+      path,
     })
   }
   for (const allowed of manifest.specializedMode?.allowedSkills ?? []) {
-    const name = allowed.trim()
-    if (!name) continue
-    const key = name.toLocaleLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    skills.push({ name, displayName: name, description: '' })
+    pushSkill(skills, seen, { name: allowed, displayName: allowed })
   }
   return skills
 }
 
 export function catalogSlugForPluginSkill(
   skillName: string,
-  catalog: Array<{ slug: string; name: string }>,
+  catalog: Array<{ slug: string; name: string; childSkills?: Array<{ slug: string; name: string }> }>,
   parentSlug?: string,
 ): { slug: string; kind: 'skill' | 'plugin-skill' } | null {
   const needle = skillName.trim().toLocaleLowerCase()
@@ -73,12 +116,26 @@ export function catalogSlugForPluginSkill(
   const exact = catalog.find(item =>
     item.slug.toLocaleLowerCase() === needle || item.name.toLocaleLowerCase() === needle)
   if (exact) return { slug: exact.slug, kind: 'skill' }
+  for (const item of catalog) {
+    const nested = item.childSkills?.find(child =>
+      child.slug.toLocaleLowerCase() === needle
+      || child.slug.toLocaleLowerCase().endsWith(`/${needle}`)
+      || child.name.toLocaleLowerCase() === needle)
+    if (nested) return { slug: nested.slug, kind: 'skill' }
+  }
   const suffix = catalog.find(item => item.slug.toLocaleLowerCase().endsWith(`-${needle}`))
   if (suffix) return { slug: suffix.slug, kind: 'skill' }
   const parent = parentSlug?.trim().toLocaleLowerCase()
   if (!parent) return null
   const parentMatch = catalog.find(item => item.slug.toLocaleLowerCase() === parent)
-  return parentMatch ? { slug: parentMatch.slug, kind: 'plugin-skill' } : null
+  if (parentMatch) {
+    const nestedUnderParent = parentMatch.childSkills?.find(child =>
+      child.slug.toLocaleLowerCase().endsWith(`/${needle}`)
+      || child.name.toLocaleLowerCase() === needle)
+    if (nestedUnderParent) return { slug: nestedUnderParent.slug, kind: 'skill' }
+    return { slug: parentMatch.slug, kind: 'plugin-skill' }
+  }
+  return null
 }
 
 export const permissionLabel = (permission: { type?: string; description?: string }) => ({
@@ -142,10 +199,18 @@ export const isEnabled = (plugin: Plugin) => plugin.installState === 'installed'
 export const isProtectedBuiltin = (plugin: Plugin) => isBuiltinPlugin(plugin);
 
 export const pluginKindLabel = (plugin: Plugin) => {
-  const manifest = metadataOf(plugin);
   if (isProtectedBuiltin(plugin)) return t('plugins.kindBuiltin');
+  // `agentic` records how the bundle was created; `scope` is what the user owns.
+  // A prompt-created plugin is therefore personal, not a separate catalog kind.
+  if (plugin.scope === 'personal') return t('plugins.kindPersonal');
+  const manifest = metadataOf(plugin);
   if (manifest.agentic) return t('plugins.kindAgentic');
   return t('plugins.kindPersonal');
+};
+
+export const pluginMentionId = (plugin: Plugin) => {
+  const slug = metadataOf(plugin).slug?.trim();
+  return plugin.scope === 'personal' && slug ? slug : plugin.id;
 };
 
 export const nextPatchVersion = (version: string) => {

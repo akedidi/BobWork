@@ -40,6 +40,9 @@ pub struct OAuthTokenBundle {
     /// Bob Work app (or legacy device-flow client) that obtained it.
     #[serde(default)]
     pub client_id: Option<String>,
+    /// How the token was obtained: oauth, token (PAT), or ssh.
+    #[serde(default)]
+    pub auth_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,7 +154,7 @@ impl IntegrationOAuthService {
 
     /// Returns a configured OAuth client, registering a Monday MCP public
     /// client on the fly (Dynamic Client Registration) when none exists —
-    /// same zero-config path ChatGPT uses against mcp.monday.com.
+    /// zero-config path against mcp.monday.com.
     /// Async: must not use reqwest::blocking inside Tauri async commands.
     pub async fn ensure_client_config(&self, provider: &str) -> AppResult<OAuthClientConfig> {
         if let Some(config) = self.get_client_config(provider)? {
@@ -315,26 +318,47 @@ impl IntegrationOAuthService {
             .map(|value| self.oauth_provider_ready(value))
             .unwrap_or(false);
         let device_flow_available = provider.map(Self::device_flow_available).unwrap_or(false);
-        let tokens = provider.and_then(|value| self.load_tokens(value).ok().flatten());
+        let tokens = provider
+            .and_then(|value| self.load_tokens(value).ok().flatten())
+            .filter(|bundle| !bundle.access_token.trim().is_empty());
         let scope_satisfied = tokens
             .as_ref()
             .map(|bundle| Self::scopes_cover_integration(integration_id, bundle))
             .unwrap_or(true);
-        let connected = legacy_secret_exists || (tokens.is_some() && scope_satisfied);
+        // An expired OAuth entry is only a usable connection when Bob Work can
+        // actually refresh it. Older releases stored Microsoft refresh tokens
+        // without the issuing client ID, which made the UI say "connected"
+        // forever even though every Graph call failed.
+        let token_usable = tokens.as_ref().is_some_and(|bundle| {
+            !Self::token_expired(bundle)
+                || (bundle
+                    .refresh_token
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && provider.is_some_and(|provider| {
+                        self.client_config_for_refresh(provider, bundle).is_ok()
+                    }))
+        });
+        let connected = legacy_secret_exists || (token_usable && scope_satisfied);
         IntegrationConnectionStatus {
             integration_id: integration_id.to_string(),
             connected,
             auth_method: if tokens.is_some() {
-                if tokens
+                tokens
                     .as_ref()
-                    .and_then(|bundle| bundle.refresh_token.as_ref())
-                    .filter(|value| !value.is_empty())
-                    .is_some()
-                {
-                    Some("oauth".into())
-                } else {
-                    Some("token".into())
-                }
+                    .and_then(|bundle| bundle.auth_mode.clone())
+                    .or_else(|| {
+                        if tokens
+                            .as_ref()
+                            .and_then(|bundle| bundle.refresh_token.as_ref())
+                            .filter(|value| !value.is_empty())
+                            .is_some()
+                        {
+                            Some("oauth".into())
+                        } else {
+                            Some("token".into())
+                        }
+                    })
             } else if legacy_secret_exists {
                 Some("token".into())
             } else {
@@ -385,6 +409,7 @@ impl IntegrationOAuthService {
                 expires_at: None,
                 account_label: account_label.map(str::to_string),
                 client_id: None,
+                auth_mode: Some("oauth".into()),
             },
         )
     }
@@ -393,6 +418,9 @@ impl IntegrationOAuthService {
         let Some(mut bundle) = self.load_tokens(provider)? else {
             return Ok(None);
         };
+        if bundle.access_token.trim().is_empty() {
+            return Ok(None);
+        }
         if Self::token_expired(&bundle) {
             if bundle.refresh_token.is_some() {
                 bundle = self.refresh_tokens(provider, &bundle)?;
@@ -425,6 +453,37 @@ impl IntegrationOAuthService {
                 expires_at: None,
                 account_label: account_label.map(str::to_string),
                 client_id: None,
+                auth_mode: Some("token".into()),
+            },
+        )
+    }
+
+    /// Stores GitHub credentials obtained via SSH + GitHub CLI.
+    pub fn store_github_ssh_connection(
+        &self,
+        username: &str,
+        gh_token: &str,
+        account_label: Option<&str>,
+    ) -> AppResult<()> {
+        if gh_token.trim().is_empty() {
+            return Err(AppError::ValidationFailed(
+                "Le jeton GitHub CLI ne peut pas être vide.".into(),
+            ));
+        }
+        let label = account_label
+            .map(str::to_string)
+            .or_else(|| Some(format!("{username} (SSH)")));
+        self.store_tokens(
+            "github",
+            &OAuthTokenBundle {
+                access_token: gh_token.trim().to_string(),
+                refresh_token: None,
+                token_type: Some("Bearer".into()),
+                scope: None,
+                expires_at: None,
+                account_label: label,
+                client_id: None,
+                auth_mode: Some("ssh".into()),
             },
         )
     }
@@ -482,7 +541,7 @@ impl IntegrationOAuthService {
             Some(self.microsoft_scope_request(integration_id))
         } else if provider == "monday" {
             // Hosted Monday MCP authorize does not use classic app scopes —
-            // ChatGPT only sends resource + PKCE.
+            // Connector sends resource + PKCE.
             Some(String::new())
         } else {
             None
@@ -809,6 +868,9 @@ impl IntegrationOAuthService {
             Ok(value) => bundle.account_label = value,
             Err(error) => warn!("Unable to fetch OAuth profile for {}: {}", provider, error),
         }
+        if bundle.auth_mode.is_none() {
+            bundle.auth_mode = Some("oauth".into());
+        }
         Ok(bundle)
     }
 }
@@ -851,8 +913,8 @@ fn build_authorize_url(
     };
 
     let declared = integration_scopes(integration_id);
-    // Slack (ChatGPT connector style): small bot `scope` + rich `user_scope`
-    // (space-separated like ChatGPT). Monday MCP omits classic scopes.
+    // Slack connector: small bot `scope` + rich `user_scope`
+    // (space-separated). Monday MCP omits classic scopes.
     let scope = match (scope_override, &declared) {
         (Some(value), _) => value.to_string(),
         (None, Some(spec)) if provider == "slack" => spec.scopes.join(","),
@@ -873,7 +935,7 @@ fn build_authorize_url(
         query.append_pair("response_type", "code");
         query.append_pair("client_id", client_id);
         query.append_pair("redirect_uri", OAUTH_REDIRECT_URI);
-        // Monday MCP (ChatGPT-style): omit classic scopes; resource selects the MCP server.
+        // Monday MCP: omit classic scopes; resource selects the MCP server.
         if provider != "monday" {
             query.append_pair("scope", &scope);
         }
@@ -885,7 +947,7 @@ fn build_authorize_url(
         query.append_pair("code_challenge", code_challenge);
         query.append_pair("code_challenge_method", "S256");
         if provider == "microsoft" {
-            // ChatGPT-style authorize: authorization code + PKCE on a public client.
+            // authorize: authorization code + PKCE on a public client.
             query.append_pair("response_mode", "query");
             query.append_pair("prompt", "consent");
         }
@@ -893,7 +955,7 @@ fn build_authorize_url(
             query.append_pair("resource", MONDAY_MCP_RESOURCE);
             query.append_pair("ui_locales", "fr-FR");
         }
-        // Slack MCP (ChatGPT connector style): same authorize host + resource.
+        // Slack MCP: same authorize host + resource.
         if provider == "slack" {
             query.append_pair("resource", SLACK_MCP_RESOURCE);
             query.append_pair("ui_locales", "fr-FR");
@@ -910,7 +972,7 @@ async fn exchange_code(
 ) -> AppResult<OAuthTokenBundle> {
     let (token_url, extra) = match provider {
         "github" => ("https://github.com/login/oauth/access_token", vec![]),
-        // Same host as ChatGPT; `resource` binds the grant to mcp.slack.com.
+        // `resource` binds the grant to mcp.slack.com.
         "slack" => (
             "https://slack.com/api/oauth.v2.access",
             vec![("resource", SLACK_MCP_RESOURCE.to_string())],
@@ -1022,6 +1084,7 @@ fn parse_token_response(provider: &str, body: &serde_json::Value) -> AppResult<O
             expires_at,
             account_label: team,
             client_id: None,
+            auth_mode: None,
         });
     }
 
@@ -1033,6 +1096,7 @@ fn parse_token_response(provider: &str, body: &serde_json::Value) -> AppResult<O
         expires_at,
         account_label: None,
         client_id: None,
+        auth_mode: None,
     })
 }
 
@@ -1337,6 +1401,57 @@ mod tests {
     }
 
     #[test]
+    fn empty_access_token_is_not_reported_as_connected() {
+        let root = tempfile::tempdir().expect("vault root");
+        crate::services::keychain::init_secret_vault(root.path());
+        let service = IntegrationOAuthService::new();
+        service
+            .store_tokens(
+                "github",
+                &OAuthTokenBundle {
+                    access_token: "".into(),
+                    refresh_token: None,
+                    token_type: Some("Bearer".into()),
+                    scope: Some("repo,read:org".into()),
+                    expires_at: None,
+                    account_label: None,
+                    client_id: None,
+                    auth_mode: None,
+                },
+            )
+            .expect("store malformed legacy token");
+
+        assert!(!service.connection_status("github", false).connected);
+        assert_eq!(service.access_token_for_provider("github").unwrap(), None);
+    }
+
+    #[test]
+    fn expired_microsoft_token_without_issuing_client_is_not_reported_as_connected() {
+        let root = tempfile::tempdir().expect("vault root");
+        crate::services::keychain::init_secret_vault(root.path());
+        let service = IntegrationOAuthService::new();
+        service
+            .store_tokens(
+                "microsoft",
+                &OAuthTokenBundle {
+                    access_token: "expired-token".into(),
+                    refresh_token: Some("refresh-token".into()),
+                    token_type: Some("Bearer".into()),
+                    scope: Some("openid profile User.Read Mail.ReadWrite Mail.Send".into()),
+                    expires_at: Some("2020-01-01T00:00:00Z".into()),
+                    account_label: None,
+                    client_id: None,
+                    auth_mode: Some("oauth".into()),
+                },
+            )
+            .expect("store legacy Microsoft token");
+
+        let status = service.connection_status("outlook-mail", false);
+        assert!(!status.connected);
+        assert!(!status.oauth_client_configured);
+    }
+
+    #[test]
     fn builds_authorize_urls_with_pkce() {
         let url = build_authorize_url(
             "github",
@@ -1356,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn slack_authorize_url_matches_chatgpt_connector_shape() {
+    fn slack_authorize_url_matches_connector_shape() {
         let url = build_authorize_url(
             "slack",
             "slack",
@@ -1369,7 +1484,7 @@ mod tests {
         assert!(url.starts_with("https://slack.com/oauth/v2/authorize?"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("client_id=11843774967.9267274492546"));
-        // Localhost PKCE: empty bot scope; ChatGPT-style user_scope + MCP resource.
+        // Localhost PKCE: empty bot scope; user_scope + MCP resource.
         assert!(
             url.contains("scope=&")
                 || url.contains("&scope=&")
@@ -1429,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn monday_authorize_url_matches_chatgpt_mcp_pkce_shape() {
+    fn monday_authorize_url_matches_mcp_pkce_shape() {
         let url = build_authorize_url(
             "monday",
             "monday",
@@ -1460,6 +1575,7 @@ mod tests {
             expires_at: None,
             account_label: None,
             client_id: None,
+            auth_mode: None,
         };
         assert!(IntegrationOAuthService::scopes_cover_integration(
             "outlook-mail",
@@ -1485,6 +1601,7 @@ mod tests {
             expires_at: None,
             account_label: None,
             client_id: None,
+            auth_mode: Some("token".into()),
         };
         assert!(IntegrationOAuthService::scopes_cover_integration(
             "teams",

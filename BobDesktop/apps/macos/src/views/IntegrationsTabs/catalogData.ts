@@ -1,3 +1,5 @@
+export type IntegrationAuthMode = 'oauth' | 'ssh' | 'token'
+
 export interface IntegrationDef {
   id: string
   name: string
@@ -8,7 +10,32 @@ export interface IntegrationDef {
   tokenHintKey: string
   permissionKeys: string[]
   shortKey: string
+  /** OAuth-only integrations (e.g. Slack hosted MCP). */
   webOnly?: boolean
+  /** Personal API token only — no OAuth connect flow. */
+  tokenOnly?: boolean
+  /** Supported auth modes shown in the connect panel (GitHub: oauth | ssh). */
+  authModes?: IntegrationAuthMode[]
+  /** Temporarily hidden from UI pickers; backend and OAuth flows stay available. */
+  hidden?: boolean
+}
+
+export function isIntegrationVisible(item: IntegrationDef): boolean {
+  return !item.hidden
+}
+
+export function isIntegrationVisibleById(integrationId: string): boolean {
+  const item = CATALOG.find(entry => entry.id === integrationId)
+  return item ? isIntegrationVisible(item) : true
+}
+
+export function visibleCatalog(): IntegrationDef[] {
+  return CATALOG.filter(isIntegrationVisible)
+}
+
+export function visibleIntegrationGroups(): IntegrationDef['group'][] {
+  const groups = new Set(visibleCatalog().map(item => item.group))
+  return [...groups]
 }
 
 export const CATALOG: IntegrationDef[] = [
@@ -19,6 +46,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['github_list_repos', 'github_search_issues', 'github_get_pull_request'],
     tokenHintKey: 'integrations.githubTokenHint',
     permissionKeys: ['integrations.githubPermRepo', 'integrations.githubPermProfile', 'integrations.githubPermOrg'],
+    authModes: ['oauth', 'ssh'],
   },
   {
     id: 'slack', name: 'Slack', oauthProvider: 'slack', group: 'developer',
@@ -33,6 +61,7 @@ export const CATALOG: IntegrationDef[] = [
       'integrations.slackPermUsers',
     ],
     webOnly: true,
+    hidden: true,
   },
   {
     id: 'monday', name: 'Monday.com', oauthProvider: 'monday', group: 'developer',
@@ -41,7 +70,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['monday_list_boards', 'monday_search_items', 'monday_create_update'],
     tokenHintKey: 'integrations.mondayTokenHint',
     permissionKeys: ['integrations.mondayPermBoards', 'integrations.mondayPermUpdates', 'integrations.mondayPermAccount'],
-    webOnly: true,
+    tokenOnly: true,
   },
   {
     id: 'outlook-mail', name: 'Outlook', oauthProvider: 'microsoft', group: 'microsoft',
@@ -50,6 +79,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['graph_search_mail'],
     tokenHintKey: 'integrations.outlookTokenHint',
     permissionKeys: ['integrations.outlookPermMail', 'integrations.outlookPermSend'],
+    hidden: true,
   },
   {
     id: 'teams', name: 'Microsoft Teams', oauthProvider: 'microsoft', group: 'microsoft',
@@ -58,6 +88,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['graph_list_teams'],
     tokenHintKey: 'integrations.microsoftGraphTokenHint',
     permissionKeys: ['integrations.teamsPermTeams', 'integrations.teamsPermMessages'],
+    hidden: true,
   },
   {
     id: 'outlook-calendar', name: 'Outlook Calendar', oauthProvider: 'microsoft', group: 'microsoft',
@@ -66,6 +97,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['graph_list_calendar_events'],
     tokenHintKey: 'integrations.microsoftGraphTokenHint',
     permissionKeys: ['integrations.calendarPerm'],
+    hidden: true,
   },
   {
     id: 'onedrive', name: 'OneDrive', oauthProvider: 'microsoft', group: 'microsoft',
@@ -74,6 +106,7 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['graph_search_onedrive'],
     tokenHintKey: 'integrations.microsoftGraphTokenHint',
     permissionKeys: ['integrations.onedrivePerm'],
+    hidden: true,
   },
   {
     id: 'onenote', name: 'OneNote', oauthProvider: 'microsoft', group: 'microsoft',
@@ -82,5 +115,6 @@ export const CATALOG: IntegrationDef[] = [
     tools: ['graph_onenote'],
     tokenHintKey: 'integrations.microsoftGraphTokenHint',
     permissionKeys: ['integrations.onenotePerm'],
+    hidden: true,
   },
 ]

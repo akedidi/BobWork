@@ -1,44 +1,50 @@
 ---
 name: accessibility-audit
-description: "Auditer l’accessibilité contre WCAG 2.2 et les critères IBM/Carbon applicables."
+description: "Audit accessibility against WCAG 2.2 and applicable IBM/Carbon criteria."
 icon: designer
 ---
 
 # accessibility-audit
 
-Utiliser ce skill pour auditer l’accessibilité contre WCAG 2.2 et les critères IBM/Carbon applicables.
+Use this skill to audit accessibility against WCAG 2.2 and applicable IBM/Carbon criteria.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir niveau cible, plateformes, technologies et échantillon.
-2. Tester clavier, focus, zoom, contraste, structure, noms accessibles, erreurs et médias.
-3. Combiner contrôles automatiques et vérifications manuelles avec technologies d’assistance.
-4. Mapper chaque anomalie à un critère, une preuve et une correction testable.
+1. Define target level, platforms, technologies, and sample.
+2. Test keyboard, focus, zoom, contrast, structure, accessible names, errors, and media.
+3. Combine automated checks and manual verification with assistive technologies.
+4. Map each anomaly to a criterion, evidence, and testable fix.
 
-## Livrable
+## Deliverable
 
-Rapport WCAG avec critère, niveau, sévérité, preuve, correctif et re-test.
+WCAG report with criterion, level, severity, evidence, fix, and re-test.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Ne jamais conclure à la conformité sur automatisation seule.
-- Inclure étapes de reproduction et résultat attendu.
-- Protéger les données personnelles des participants.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Never conclude compliance from automation alone.
+- Include reproduction steps and expected result.
+- Protect participants' personal data.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

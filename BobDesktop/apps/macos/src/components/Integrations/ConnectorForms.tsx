@@ -39,13 +39,6 @@ export function AddPublicApiForm({ publicApiForm, setPublicApiForm, persistPubli
       <label style={fieldLabelStyle}>{t('common.name')}
         <input value={publicApiForm.name} onChange={event => setPublicApiForm((value: any) => ({ ...value, name: slugifyName(event.target.value) }))} placeholder="stooq-public" style={fieldInputStyle} />
       </label>
-      <label style={fieldLabelStyle}>{t('integrations.transport')}
-        <select value={publicApiForm.transport} onChange={event => setPublicApiForm((value: any) => ({ ...value, transport: event.target.value }))} style={fieldInputStyle}>
-          <option value="streamable-http">streamable-http</option>
-          <option value="sse">SSE</option>
-          <option value="http">HTTP</option>
-        </select>
-      </label>
       <label style={fieldLabelStyle}>{t('integrations.httpsUrl')}
         <input value={publicApiForm.url} onChange={event => setPublicApiForm((value: any) => ({ ...value, url: event.target.value }))} placeholder="https://…" style={fieldInputStyle} />
       </label>
@@ -63,13 +56,6 @@ export function AddApiKeyForm({ apiKeyForm, setApiKeyForm, persistApiKey, cancel
     <>
       <label style={fieldLabelStyle}>{t('common.name')}
         <input value={apiKeyForm.name} onChange={event => setApiKeyForm((value: any) => ({ ...value, name: slugifyName(event.target.value) }))} placeholder="tmdb" style={fieldInputStyle} />
-      </label>
-      <label style={fieldLabelStyle}>{t('integrations.transport')}
-        <select value={apiKeyForm.transport} onChange={event => setApiKeyForm((value: any) => ({ ...value, transport: event.target.value }))} style={fieldInputStyle}>
-          <option value="http">HTTP</option>
-          <option value="streamable-http">streamable-http</option>
-          <option value="sse">SSE</option>
-        </select>
       </label>
       <label style={fieldLabelStyle}>{t('integrations.httpsUrl')}
         <input value={apiKeyForm.url} onChange={event => setApiKeyForm((value: any) => ({ ...value, url: event.target.value }))} placeholder="https://api.themoviedb.org/3/configuration" style={fieldInputStyle} />

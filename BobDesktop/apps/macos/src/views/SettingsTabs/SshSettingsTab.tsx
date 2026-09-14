@@ -4,6 +4,7 @@ import { Folder, File, Server, TerminalSquare, RefreshCw, Download, Upload, Tras
 import type { SshRemoteEntry, SshServer } from '@bob-work/shared-types'
 import { browseSshDirectory, deleteSshServer, getSshServers, saveSshServer, sshRead, startSshTerminal, stopSshTerminal, syncSshWorkspace, testSshServer, writeSshTerminal } from '../../lib/ipc'
 import { errorMessage } from '../../lib/errorMessage'
+import { useAppDialog } from '../../components/AppDialog'
 import { Card, Heading } from './SettingsShared'
 import '@xterm/xterm/css/xterm.css'
 
@@ -11,6 +12,7 @@ type FormState = { id?: string; name: string; host: string; port: string; user: 
 const EMPTY: FormState = { name: '', host: '', port: '22', user: '', identityFile: '', remoteRoot: '/home' }
 
 export default function SshSettingsTab({ t }: { t: (key: any, params?: Record<string, string | number>) => string }) {
+  const dialog = useAppDialog()
   const [servers, setServers] = useState<SshServer[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [form, setForm] = useState<FormState>(EMPTY)
@@ -43,7 +45,7 @@ export default function SshSettingsTab({ t }: { t: (key: any, params?: Record<st
       const addon = new fit.FitAddon()
       terminal.loadAddon(addon); terminal.open(terminalHost.current); addon.fit()
       terminalRef.current = terminal; fitRef.current = addon
-      terminal.writeln('Bob Work SSH — OpenSSH sécurisé\r\n')
+      terminal.writeln(`${t('settings.sshTerminalWelcome')}\r\n`)
       let sessionId: string = crypto.randomUUID()
       const unlisten = await listen<{ sessionId: string; data: string; stream: string }>('ssh-terminal-output', event => { if (event.payload.sessionId === sessionId) terminal.write(event.payload.stream === 'stderr' ? `\x1b[31m${event.payload.data}\x1b[0m` : event.payload.data) })
       try { await startSshTerminal(selectedId, sessionId) } catch (error) { sessionId = ''; terminal.writeln(`\x1b[31m${errorMessage(error)}\x1b[0m`) }
@@ -53,7 +55,7 @@ export default function SshSettingsTab({ t }: { t: (key: any, params?: Record<st
       cleanup = async () => { input.dispose(); resize.disconnect(); unlisten(); if (sessionId) await stopSshTerminal(sessionId).catch(()=>undefined); terminal.dispose(); terminalRef.current = null }
     })
     return () => { disposed = true; void cleanup() }
-  }, [selectedId, selected])
+  }, [selectedId, selected, t])
 
   const browse = async (nextPath = path) => {
     if (!selectedId) return
@@ -92,7 +94,22 @@ export default function SshSettingsTab({ t }: { t: (key: any, params?: Record<st
       {servers.length === 0 && !editing && <p className="settings-note">{t('settings.sshEmpty')}</p>}
       <div className="ssh-server-list">{servers.map(item => <div key={item.id} role="button" tabIndex={0} className={`ssh-server-row ${selectedId === item.id ? 'selected' : ''}`} onClick={() => setSelectedId(item.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(item.id) }}>
         <Server size={17}/><span><strong>{item.name}</strong><small>{item.user}@{item.host}:{item.port} · {item.remoteRoot}</small></span>
-        <span className="ssh-row-actions"><button type="button" onClick={event => { event.stopPropagation(); void runTest(item.id) }}>{busy === `test:${item.id}` ? '…' : t('common.test')}</button><button type="button" aria-label={t('common.edit')} onClick={event => { event.stopPropagation(); setForm({ id:item.id,name:item.name,host:item.host,port:String(item.port),user:item.user,identityFile:item.identityFile ?? '',remoteRoot:item.remoteRoot }); setEditing(true) }}>✎</button><button type="button" aria-label={t('common.delete')} onClick={event => { event.stopPropagation(); if (window.confirm(t('settings.sshDeleteConfirm'))) void deleteSshServer(item.id).then(load).catch(error => setStatus(errorMessage(error))) }}><Trash2 size={13}/></button></span>
+        <span className="ssh-row-actions"><button type="button" onClick={event => { event.stopPropagation(); void runTest(item.id) }}>{busy === `test:${item.id}` ? '…' : t('common.test')}</button><button type="button" aria-label={t('common.edit')} onClick={event => { event.stopPropagation(); setForm({ id:item.id,name:item.name,host:item.host,port:String(item.port),user:item.user,identityFile:item.identityFile ?? '',remoteRoot:item.remoteRoot }); setEditing(true) }}>✎</button><button type="button" aria-label={t('common.delete')} onClick={event => {
+          event.stopPropagation()
+          void (async () => {
+            if (!await dialog.confirm({
+              message: t('settings.sshDeleteConfirm'),
+              confirmLabel: t('common.delete'),
+              destructive: true,
+            })) return
+            try {
+              await deleteSshServer(item.id)
+              await load()
+            } catch (error) {
+              setStatus(errorMessage(error))
+            }
+          })()
+        }}><Trash2 size={13}/></button></span>
       </div>)}</div>
       {editing && <form className="ssh-form" onSubmit={submit}>
         <label>{t('settings.sshName')}<input required value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>

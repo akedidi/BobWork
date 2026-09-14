@@ -125,6 +125,22 @@ function parseStep(value: unknown, index: number): ExecutionPlanStep | undefined
 export function executionPlanFromActivities(activities: PlanActivity[] | undefined): ExecutionPlan | null {
   let latest: ExecutionPlan | null = null
   for (const activity of activities ?? []) {
+    // Bob Shell can finish successfully before emitting one last todo snapshot.
+    // A successful terminal event is authoritative: the response has finished,
+    // so stale running/pending statuses from the previous snapshot are complete.
+    if (latest && ['run_finished', 'session_completed'].includes(activity.eventType ?? '')) {
+      const completedPlan: ExecutionPlan = latest
+      latest = {
+        ...completedPlan,
+        steps: completedPlan.steps.map(step => (
+          step.status === 'pending' || step.status === 'running'
+            ? { ...step, status: 'completed' }
+            : step
+        )),
+        updatedAt: activity.receivedAt || activity.createdAt,
+      }
+      continue
+    }
     const toolName = planToolName(activity)
     const resultText = activity.content
       || (typeof activity.payload?.output === 'string' ? activity.payload.output : '')

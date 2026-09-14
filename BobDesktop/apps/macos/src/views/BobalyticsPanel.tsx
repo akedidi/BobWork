@@ -67,10 +67,10 @@ export default function BobalyticsPanel() {
   }
 
   return (
-    <section className="bobalytics-panel settings-card" aria-label="Bobalytics">
+    <section className="bobalytics-panel settings-card" aria-label={t('bobalytics.title')}>
       <header className="bobalytics-head">
         <div className="bobalytics-title-row">
-          <h2>Bobalytics</h2>
+          <h2>{t('bobalytics.title')}</h2>
           <button type="button" className="secondary-btn compact" onClick={() => void exportCsv()}>
             <Download size={13} aria-hidden="true" /> {t('bobalytics.export')}
           </button>
@@ -181,7 +181,7 @@ function TodayView({ report, t }: { report: BobalyticsReport; t: Translate }) {
         </div>
         <div className="bobalytics-radar-wrap">
           <p className="bobalytics-kpi-label">{t('bobalytics.weeklyRhythm')}</p>
-          <RadarChart points={report.today.weeklyRhythm} peak={peak} />
+          <RadarChart points={report.today.weeklyRhythm} peak={peak} label={t('bobalytics.weeklyRhythm')} />
         </div>
       </div>
       <div className="bobalytics-kpis">
@@ -322,7 +322,7 @@ function ScatterCard({
         <small>{teams.length} {t('bobalytics.teamsShown')}</small>
       </div>
       <p className="bobalytics-card-help">{t('bobalytics.scatterHelp')}</p>
-      <ScatterPlot teams={teams} selectedId={selectedTeam?.id ?? null} onSelect={onSelectTeam} />
+      <ScatterPlot teams={teams} selectedId={selectedTeam?.id ?? null} onSelect={onSelectTeam} t={t} />
       {selectedTeam && (
         <p className="bobalytics-card-foot">
           <strong>{selectedTeam.name}</strong>
@@ -336,7 +336,7 @@ function ScatterCard({
   )
 }
 
-function RadarChart({ points, peak }: { points: BobalyticsReport['today']['weeklyRhythm']; peak?: BobalyticsReport['today']['peakDay'] }) {
+function RadarChart({ points, peak, label }: { points: BobalyticsReport['today']['weeklyRhythm']; peak?: BobalyticsReport['today']['peakDay']; label: string }) {
   const size = 180
   const cx = size / 2
   const cy = size / 2
@@ -350,7 +350,7 @@ function RadarChart({ points, peak }: { points: BobalyticsReport['today']['weekl
   const polygon = points.map((point, index) => coord(index, point.value).join(',')).join(' ')
   const peakIndex = peak ? points.findIndex(point => point.day === peak.day && point.value === peak.value) : -1
   return (
-    <svg className="bobalytics-radar" viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Weekly rhythm">
+    <svg className="bobalytics-radar" viewBox={`0 0 ${size} ${size}`} role="img" aria-label={label}>
       {[0.35, 0.7, 1].map(scale => (
         <polygon
           key={scale}
@@ -386,11 +386,12 @@ function RadarChart({ points, peak }: { points: BobalyticsReport['today']['weekl
 }
 
 function ScatterPlot({
-  teams, selectedId, onSelect,
+  teams, selectedId, onSelect, t,
 }: {
   teams: BobalyticsTeamPoint[]
   selectedId: string | null
   onSelect: (id: string) => void
+  t: Translate
 }) {
   const width = 280
   const height = 180
@@ -400,7 +401,7 @@ function ScatterPlot({
   const x = (value: number) => pad + (Math.min(100, value) / 100) * (width - pad * 2)
   const y = (value: number) => height - pad - (Math.min(100, value) / 100) * (height - pad * 2)
   return (
-    <svg className="bobalytics-scatter" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Teams scatter">
+    <svg className="bobalytics-scatter" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={t('bobalytics.teamsScatter')}>
       <line className="bobalytics-scatter-guide" x1={x(avgX)} y1={pad} x2={x(avgX)} y2={height - pad} strokeDasharray="4 4" />
       <line className="bobalytics-scatter-guide" x1={pad} y1={y(avgY)} x2={width - pad} y2={y(avgY)} strokeDasharray="4 4" />
       {teams.map(team => (
@@ -415,8 +416,8 @@ function ScatterPlot({
           onClick={() => onSelect(team.id)}
         />
       ))}
-      <text x={width / 2} y={height - 4} textAnchor="middle">{'BOB USERS ACTIVE →'}</text>
-      <text x={10} y={height / 2} transform={`rotate(-90 10 ${height / 2})`} textAnchor="middle">{'COMMITTED BOB-WRITTEN →'}</text>
+      <text x={width / 2} y={height - 4} textAnchor="middle">{t('bobalytics.activeUsersAxis')}</text>
+      <text x={10} y={height / 2} transform={`rotate(-90 10 ${height / 2})`} textAnchor="middle">{t('bobalytics.committedAxis')}</text>
     </svg>
   )
 }

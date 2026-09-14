@@ -16,7 +16,7 @@ use cron::Schedule as CronSchedule;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -548,7 +548,6 @@ impl SchedulerService {
         integration_ids.dedup();
         let integrations = integration_context(bob, &integration_ids);
         let visible_chrome_requested = settings.chrome_control_enabled
-            && !settings.sandbox_mode
             && (crate::services::bob::explicitly_requests_visible_chrome(&schedule.instructions)
                 || scheduled_plugin.as_ref().is_some_and(|plugin| {
                     plugin.id.to_lowercase().contains("chrome")
@@ -557,7 +556,7 @@ impl SchedulerService {
         let prompt = [
             (!settings.global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", settings.global_instructions.trim())),
             project.as_ref().and_then(|p| p.custom_instructions.as_ref()).filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
-            (!settings.web_enabled || settings.sandbox_mode).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette tâche.".to_string()),
+            (!settings.web_enabled).then(|| "Politique locale Bob Work : n’utilise aucun accès web ou réseau pour cette tâche.".to_string()),
             settings.sandbox_mode.then(crate::services::permission_governance::sandbox_guidance),
             (!integrations.is_empty()).then(|| format!("Intégrations locales disponibles, sans jamais afficher leurs secrets :\n{}", integrations.join("\n"))),
             plugin_invocation,
@@ -565,7 +564,18 @@ impl SchedulerService {
             Some(format!("Tâche planifiée « {} » :\n{}", schedule.name, schedule.instructions)),
         ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
 
-        let workspace = project.and_then(|p| p.local_path);
+        // Same as interactive chat: project folder if set, otherwise a
+        // per-conversation workspace under app data (required for sandbox).
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        let workspace_root = crate::services::attachment_staging::resolve_workspace_root(
+            project.as_ref().and_then(|value| value.local_path.as_deref()),
+            &app_data_dir,
+            &conversation.id,
+        )?;
+        let workspace = Some(workspace_root.to_string_lossy().to_string());
         let risk = crate::services::permission_governance::RiskContext {
             computer_use: settings.computer_use_enabled,
             chrome: visible_chrome_requested,
@@ -637,6 +647,9 @@ impl SchedulerService {
                 trust_workspace,
                 allow_visible_chrome: visible_chrome_requested,
                 db_environment: std::collections::HashMap::new(),
+                task_approval: Default::default(),
+                enforce_composer_permissions: false,
+                disable_tool_groups: vec![],
             },
         ) {
             let _ = db.connection().execute(

@@ -3,18 +3,21 @@
 // Navigation principale + données réelles via IPC
 // ============================================================
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { listen } from '@tauri-apps/api/event'
 import { Archive, CalendarClock, FolderTree } from 'lucide-react'
 import { useAppStore } from '../../stores/appStore'
 import { useUsageUpdated, useBobSessionDone, useConversationUpdated, useTaskUpdated } from '../../hooks/useTauriEvents'
-import { createConversation, getProjects, getConversation, getConversations, getTasks, detectBob, getBobAuthSnapshot, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus } from '../../lib/ipc'
+import { createConversation, getProjects, getConversation, getConversations, getTasks, detectBob, getBobAuthSnapshot, searchWorkspace, updateConversation, updateTaskPinned, getUsageStatus, getAppInfo } from '../../lib/ipc'
 import { errorMessage } from '../../lib/errorMessage'
-import { useT } from '../../i18n'
+import { localeToBcp47, useI18n } from '../../i18n'
 import type { Conversation, SearchResult, UsageStatus } from '@bob-work/shared-types'
+import { formatMessageTimestamp } from '../../lib/messageTimestamp'
+import { ContextMeter } from '../UsageMeter/ContextMeter'
 import { UsageMeter } from '../UsageMeter/UsageMeter'
+import { UpdateButton } from '../UpdateButton'
 import { activeTasksByConversationId, conversationActivity } from '../../lib/activeTasks'
 import { ModalOverlay, ModalPanel } from '../ModalOverlay'
 
@@ -39,6 +42,13 @@ export function clampConversationMenuPosition(
 }
 const TASK_SPINNER_PERIOD_MS = 750
 export const USAGE_REFRESH_INTERVAL_MS = 60_000
+export const BOB_STATUS_POLL_INTERVAL_MS = 5_000
+
+function bobStatusFromSnapshot(snapshot: { found: boolean; authenticated: boolean }) {
+  if (!snapshot.found) return 'not_found' as const
+  if (!snapshot.authenticated) return 'unauthenticated' as const
+  return 'ready' as const
+}
 
 export function synchronizedSpinnerDelay(now: number) {
   return -(now % TASK_SPINNER_PERIOD_MS)
@@ -69,9 +79,10 @@ function SynchronizedTaskSpinner() {
 /** Place the menu near the cursor without overflowing the viewport. */
 
 export default function Sidebar() {
-  const t = useT()
+  const { t, locale } = useI18n()
   const navigate = useNavigate()
   const location = useLocation()
+  const [appName, setAppName] = useState('Bob Work')
   const searchEntityLabel = (entityType: string) => {
     const key = `search.${entityType}`
     const translated = t(key)
@@ -85,7 +96,7 @@ export default function Sidebar() {
     bobStatus, setBobStatus, setBobInfo,
     notifications, notificationsOpen, setNotificationsOpen,
     markNotificationsRead, clearNotifications,
-    unreadConversationIds, markConversationRead,
+    unreadConversationIds, markConversationRead, markAllCompletedTasksRead,
   } = useAppStore()
   const unreadCount = notifications.filter(item => !item.read).length
 
@@ -163,8 +174,31 @@ export default function Sidebar() {
   }
 
   const refreshUsage = (force = false) => {
+    if (bobStatus !== 'ready') {
+      setUsage(null)
+      return
+    }
     getUsageStatus(force).then(setUsage).catch(() => setUsage(null))
   }
+
+  const refreshBobStatus = useCallback(() => {
+    getBobAuthSnapshot()
+      .then((snapshot) => {
+        setBobInfo({
+          found: snapshot.found,
+          path: snapshot.path,
+          version: snapshot.version,
+          authenticated: snapshot.authenticated,
+        })
+        setBobStatus(bobStatusFromSnapshot(snapshot))
+      })
+      .catch(() => detectBob()
+        .then((result) => {
+          setBobInfo(result)
+          setBobStatus(bobStatusFromSnapshot(result))
+        })
+        .catch(() => setBobStatus('error')))
+  }, [setBobInfo, setBobStatus])
 
   useEffect(() => {
     refreshUsage()
@@ -173,14 +207,18 @@ export default function Sidebar() {
   useEffect(() => {
     const timer = window.setInterval(() => refreshUsage(true), USAGE_REFRESH_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [])
-
-  // Retry usage once Bob is ready (API key / binary detected).
-  useEffect(() => {
-    if (bobStatus === 'ready' || bobStatus === 'unauthenticated') {
-      refreshUsage()
-    }
   }, [bobStatus])
+
+  useEffect(() => {
+    if (bobStatus === 'ready') refreshUsage(true)
+    else setUsage(null)
+  }, [bobStatus])
+
+  useEffect(() => {
+    refreshBobStatus()
+    const timer = window.setInterval(refreshBobStatus, BOB_STATUS_POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [refreshBobStatus])
 
   useEffect(() => {
     let disposed = false
@@ -302,26 +340,7 @@ export default function Sidebar() {
       setSidebarLoadError(errorMessage(error, 'Impossible de charger la barre latérale.'))
     }
 
-    // Detect Bob without installing or mutating the user's machine.
-    getBobAuthSnapshot()
-      .then((snapshot) => {
-        setBobInfo({
-          found: snapshot.found,
-          path: snapshot.path,
-          version: snapshot.version,
-          authenticated: snapshot.authenticated,
-        })
-        setBobStatus(!snapshot.found ? 'not_found' : !snapshot.authenticated ? 'unauthenticated' : 'ready')
-      })
-      .catch(() => detectBob()
-        .then((result) => {
-          setBobInfo(result)
-          setBobStatus(!result.found ? 'not_found' : !result.authenticated ? 'unauthenticated' : 'ready')
-        })
-        .catch(error => {
-          setBobStatus('error')
-          noteFailure(error)
-        }))
+    refreshBobStatus()
 
     // Load projects
     getProjects()
@@ -448,6 +467,7 @@ export default function Sidebar() {
     setConversations(conversations.map(c => c.id === conversationId ? { ...c, archived: true } : c))
     try {
       await updateConversation(conversationId, { archived: true })
+      markConversationRead(conversationId)
     } catch (error) {
       setSidebarLoadError(errorMessage(error, 'Impossible d’archiver la conversation.'))
       getConversations().then(setConversations).catch(() => {})
@@ -518,11 +538,19 @@ export default function Sidebar() {
     navigate(path)
   }
 
+  useEffect(() => {
+    getAppInfo()
+      .then(info => {
+        if (info.appName.trim()) setAppName(info.appName.trim())
+      })
+      .catch(() => {})
+  }, [])
+
   return (
     <div className="sidebar" style={{ backdropFilter: 'blur(30px)' }}>
-      {/* Header: Bob Work + search/notifications on one row (ChatGPT Work style) */}
+      {/* Header: release product name + search/notifications on one row */}
       <div className="sidebar-header titlebar-drag" data-tauri-drag-region>
-        <span className="sidebar-brand titlebar-no-drag">Bob Work</span>
+        <span className="sidebar-brand titlebar-no-drag">{appName}</span>
         <div className="sidebar-header-spacer" data-tauri-drag-region />
         <button
           ref={searchTriggerRef}
@@ -556,6 +584,7 @@ export default function Sidebar() {
             }
             setNotificationsOpen(true)
             markNotificationsRead()
+            markAllCompletedTasksRead()
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -849,7 +878,8 @@ export default function Sidebar() {
 
       {/* Footer / User Profile */}
       <div className="sidebar-footer" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0, marginBottom: 8 }}>
-        {(bobStatus === 'ready' || usage?.available) && (
+        <ContextMeter />
+        {bobStatus === 'ready' && usage?.available && (
           <UsageMeter
             usage={usage}
             compact
@@ -865,35 +895,30 @@ export default function Sidebar() {
             {usage.instanceName ? ` - ${usage.instanceName}` : ''}
           </div>
         )}
-        {bobStatus === 'ready' || bobStatus === 'unauthenticated' ? (
-          <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '6px 14px 6px 8px', borderRadius: 6, flex: 1, width: '100%', minWidth: 0, boxSizing: 'border-box' }} onClick={() => navigate('/settings', { state: { tab: 'bob' } })} className="hover:bg-[var(--bg-hover)]" aria-label={t('nav.settings')} role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate('/settings', { state: { tab: 'bob' } }) } }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{t('nav.settings')}</span>
-                {bobStatus === 'unauthenticated' && (
-                  <span style={{ fontSize: 11, color: 'var(--warning, #c47b1a)' }}>{t('nav.authRequired')}</span>
-                )}
-              </div>
+        <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '6px 14px 6px 8px', borderRadius: 6, flex: 1, minWidth: 0, boxSizing: 'border-box' }} onClick={() => navigate('/settings', { state: { tab: 'bob' } })} className="hover:bg-[var(--bg-hover)]" aria-label={t('nav.settings')} role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate('/settings', { state: { tab: 'bob' } }) } }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{t('nav.settings')}</span>
+              {bobStatus === 'not_found' && (
+                <span style={{ fontSize: 11, color: 'var(--danger, #da1e28)' }}>{t('nav.bobInstallRequired')}</span>
+              )}
+              {bobStatus === 'unauthenticated' && (
+                <span style={{ fontSize: 11, color: 'var(--warning, #c47b1a)' }}>{t('nav.authRequired')}</span>
+              )}
+              {bobStatus === 'detecting' && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('settings.checking')}</span>
+              )}
+              {bobStatus === 'incompatible' && (
+                <span style={{ fontSize: 11, color: 'var(--danger, #da1e28)' }}>{t('nav.bobIncompatible')}</span>
+              )}
+              {bobStatus === 'error' && (
+                <span style={{ fontSize: 11, color: 'var(--danger, #da1e28)' }}>{t('nav.bobCheckFailed')}</span>
+              )}
             </div>
           </div>
-        ) : bobStatus === 'not_found' || bobStatus === 'error' || bobStatus === 'detecting' || bobStatus === 'incompatible' ? (
-          <button
-            type="button"
-            style={{ width: '100%', padding: '10px 12px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '8px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-            onClick={() => navigate('/settings', { state: { tab: 'bob' } })}
-          >
-            {t('nav.configureBob')}
-          </button>
-        ) : (
-          <button
-            type="button"
-            style={{ width: '100%', padding: '10px 12px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '8px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-            onClick={() => navigate('/onboarding')}
-          >
-            {t('nav.configureBob')}
-          </button>
-        )}
+          <UpdateButton />
+        </div>
       </div>
 
       {searchOpen && createPortal(
@@ -949,7 +974,17 @@ export default function Sidebar() {
                   {!searchError && searchResults.length === 0 && <p>{t('search.noResults')}</p>}
                   {searchResults.map(result => (
                     <button key={`${result.entityType}-${result.entityId}-${result.snippet}`} type="button" onClick={() => openSearchResult(result)}>
-                      <div><strong>{result.title}</strong><span>{searchEntityLabel(result.entityType)}</span></div>
+                      <div>
+                        <strong>{result.title}</strong>
+                        <span className="search-result-meta">
+                          <span>{searchEntityLabel(result.entityType)}</span>
+                          {result.entityType === 'message' && result.messageCreatedAt ? (
+                            <time dateTime={result.messageCreatedAt}>
+                              {formatMessageTimestamp(result.messageCreatedAt, localeToBcp47(locale))}
+                            </time>
+                          ) : null}
+                        </span>
+                      </div>
                       <small>{result.snippet.replace(/<\/?mark>/g, '')}</small>
                     </button>
                   ))}

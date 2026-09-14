@@ -5,7 +5,7 @@ import * as Device from 'expo-device'
 import React, { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 import EventSource, { type EventSourceListener } from 'react-native-sse'
-import { ApiError, BobApi, CONNECTION_TIMEOUT_MS, parseConnectionLink } from '../api'
+import { ApiError, BobApi, CONNECTION_TIMEOUT_MS, isConnectionFailure, mergeConnectionFromRemote, parseConnectionLink, refreshConnectionFromServer } from '../api'
 import { deviceLanguage, Language, translate, TranslationKey } from '../i18n'
 import type { Approval, Bootstrap, Connection, LiveEnvelope, SyncSnapshot, UsageStatus } from '../types'
 
@@ -82,6 +82,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const syncing = useRef(false)
   const pushToken = useRef<string | null>(null)
   const activeConversationId = useRef<string | null>(null)
+  const connectionRef = useRef<Connection | null>(null)
+  const refreshInFlight = useRef(false)
+  connectionRef.current = connection
 
   useEffect(() => {
     void Promise.all([SecureStore.getItemAsync(CONNECTION_KEY), SecureStore.getItemAsync(LANGUAGE_KEY), SecureStore.getItemAsync(UNREAD_KEY)]).then(async ([storedConnection, storedLanguage, storedUnread]) => {
@@ -89,8 +92,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         try { setUnreadConversationIds(JSON.parse(storedUnread) as string[]) } catch { /* ignore stale local state */ }
       }
       if (storedConnection && !DEV_FORCE_CONNECTION) {
+        let restored: Connection | null = null
         try {
-          const restored = JSON.parse(storedConnection) as Connection
+          restored = JSON.parse(storedConnection) as Connection
           setConnection(restored)
           const restoredApi = new BobApi(restored)
           const { bootstrap: remote, history: snapshot, usage: remoteUsage } = await verifyConnection(restoredApi)
@@ -103,9 +107,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             setLanguageState(remote.settings.language)
           }
         } catch {
-          // Never display an old in-memory snapshot as if it still represented
-          // the Mac. A Cloudflare quick-tunnel URL changes when Bob Work is
-          // restarted, so the saved link may legitimately need replacing.
+          const refreshed = restored
+            ? await refreshConnectionFromServer(restored, CONNECTION_TIMEOUT_MS).catch(() => null)
+            : null
+          if (refreshed) {
+            const refreshedApi = new BobApi(refreshed)
+            try {
+              const { bootstrap: remote, history: snapshot, usage: remoteUsage } = await verifyConnection(refreshedApi)
+              await SecureStore.setItemAsync(CONNECTION_KEY, JSON.stringify(refreshed))
+              setConnection(refreshed)
+              setBootstrap(remote)
+              setUsage(remoteUsage)
+              setHistory(snapshot)
+              setApiConnected(true)
+              setHistoryError(false)
+              if (!storedLanguage && (remote.settings.language === 'fr' || remote.settings.language === 'en' || remote.settings.language === 'es')) {
+                setLanguageState(remote.settings.language)
+              }
+              return
+            } catch { /* fall through to disconnected state */ }
+          }
           setHistory(null)
           setApiConnected(false)
           setHistoryError(true)
@@ -143,7 +164,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (ready) void SecureStore.setItemAsync(UNREAD_KEY, JSON.stringify(unreadConversationIds))
   }, [ready, unreadConversationIds])
 
-  const api = useMemo(() => connection ? new BobApi(connection) : null, [connection])
+  const applyConnectionUpdate = useCallback(async (next: Connection) => {
+    const current = connectionRef.current
+    if (!current || next.accessToken !== current.accessToken) return
+    if (next.serverUrl === current.serverUrl && next.accessToken === current.accessToken) return
+    await SecureStore.setItemAsync(CONNECTION_KEY, JSON.stringify(next))
+    setConnection(next)
+    setApiConnected(true)
+    setHistoryError(false)
+  }, [])
+
+  const attemptConnectionRefresh = useCallback(async (current: Connection) => {
+    if (refreshInFlight.current) return null
+    refreshInFlight.current = true
+    try {
+      const refreshed = await refreshConnectionFromServer(current, CONNECTION_TIMEOUT_MS)
+      if (refreshed.serverUrl !== current.serverUrl) await applyConnectionUpdate(refreshed)
+      return refreshed
+    } catch {
+      return null
+    } finally {
+      refreshInFlight.current = false
+    }
+  }, [applyConnectionUpdate])
+
+  const api = useMemo(() => {
+    if (!connection) return null
+    return new BobApi(connection, error => {
+      if (isConnectionFailure(error) && connectionRef.current) {
+        void attemptConnectionRefresh(connectionRef.current)
+      }
+    })
+  }, [connection, attemptConnectionRefresh])
   const t = useCallback((key: TranslationKey, params?: Record<string, string | number>) => translate(language, key, params), [language])
 
   const refreshHistory = useCallback(async () => {
@@ -153,6 +205,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const [health, snapshot] = await Promise.all([api.health(), api.sync()])
       if (health.status !== 'ok') throw new ApiError('api-unavailable')
+      if (health.remoteControl && connectionRef.current) {
+        const merged = mergeConnectionFromRemote(connectionRef.current, health.remoteControl)
+        if (merged.serverUrl !== connectionRef.current.serverUrl) await applyConnectionUpdate(merged)
+      }
       setHistory(snapshot)
       setHistoryError(false)
       setApiConnected(true)
@@ -168,7 +224,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       syncing.current = false
       setHistoryLoading(false)
     }
-  }, [api])
+  }, [api, applyConnectionUpdate])
+
+  useEffect(() => {
+    if (!connection || apiConnected) return
+    let cancelled = false
+    let delay = 2000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const tick = async () => {
+      if (cancelled || !connectionRef.current) return
+      await attemptConnectionRefresh(connectionRef.current).catch(() => null)
+      if (cancelled) return
+      delay = Math.min(Math.round(delay * 1.5), 15000)
+      timer = setTimeout(tick, delay)
+    }
+    timer = setTimeout(tick, delay)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [connection, apiConnected, attemptConnectionRefresh])
 
   useEffect(() => {
     if (!api) return
@@ -266,6 +341,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setLiveEvents(current => [envelope, ...current].slice(0, 160))
         const payload = envelope.payload && typeof envelope.payload === 'object' ? envelope.payload as Record<string, unknown> : {}
         if (envelope.type === 'connected') setLiveConnected(true)
+        if (envelope.type === 'connection-url-changed' && connectionRef.current) {
+          const connectionUrl = typeof payload.connectionUrl === 'string' ? payload.connectionUrl : null
+          if (connectionUrl) {
+            try {
+              const parsed = parseConnectionLink(connectionUrl)
+              if (parsed.accessToken === connectionRef.current.accessToken) void applyConnectionUpdate(parsed)
+            } catch { /* ignore malformed tunnel updates */ }
+          }
+        }
         if (['task-updated', 'bob-session-done', 'conversation-updated', 'conversation-messages-changed', 'project-updated', 'artifacts-updated', 'schedule-updated'].includes(envelope.type)) {
           void refreshHistory()
         }
@@ -304,7 +388,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       events.close()
       setLiveConnected(false)
     }
-  }, [api, connection?.accessToken, language, refreshApprovals, refreshHistory])
+  }, [api, connection?.accessToken, language, refreshApprovals, refreshHistory, applyConnectionUpdate])
 
   useEffect(() => {
     const response = Notifications.addNotificationResponseReceivedListener(event => {

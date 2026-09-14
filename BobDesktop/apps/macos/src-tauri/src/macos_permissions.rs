@@ -25,11 +25,79 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> Bool;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> Bool;
     static kAXTrustedCheckOptionPrompt: *const c_void;
+    /// Official Automation TCC registration API. Sending NSAppleScript alone
+    /// can attribute events incorrectly when two apps share the same Mach-O
+    /// basename (`bob-work`); this call pins consent to the running bundle.
+    fn AEDeterminePermissionToAutomateTarget(
+        target: *const AEDesc,
+        type_: u32,
+        id: u32,
+        ask_user_if_needed: u8,
+    ) -> i32;
+    fn AECreateDesc(desc_type: u32, data_ptr: *const c_void, data_size: isize, result: *mut AEDesc)
+        -> i32;
+    fn AEDisposeDesc(desc: *mut AEDesc) -> i32;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFBooleanTrue: *const c_void;
+}
+
+#[repr(C)]
+struct AEDesc {
+    descriptor_type: u32,
+    data_handle: *mut c_void,
+}
+
+const TYPE_APPLICATION_BUNDLE_ID: u32 = u32::from_be_bytes(*b"bund");
+const TYPE_WILDCARD: u32 = u32::from_be_bytes(*b"****");
+const NO_ERR: i32 = 0;
+const ERR_AE_EVENT_NOT_PERMITTED: i32 = -1743;
+const ERR_AE_EVENT_WOULD_REQUIRE_USER_CONSENT: i32 = -1744;
+const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
+
+/// Ask macOS to record / prompt Automation for this process → Google Chrome.
+/// Returns Ok(()) when already allowed, Err with a classified message otherwise.
+pub fn request_chrome_automation_consent(ask_user: bool) -> Result<(), String> {
+    if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
+        return Err("Google Chrome n’est pas installé.".into());
+    }
+    let mut target = AEDesc {
+        descriptor_type: 0,
+        data_handle: std::ptr::null_mut(),
+    };
+    let status = unsafe {
+        let create = AECreateDesc(
+            TYPE_APPLICATION_BUNDLE_ID,
+            CHROME_BUNDLE_ID.as_ptr() as *const c_void,
+            CHROME_BUNDLE_ID.len() as isize,
+            &mut target,
+        );
+        if create != NO_ERR {
+            return Err(format!(
+                "Impossible de cibler Google Chrome pour Automatisation (AECreateDesc {create})."
+            ));
+        }
+        let status = AEDeterminePermissionToAutomateTarget(
+            &target,
+            TYPE_WILDCARD,
+            TYPE_WILDCARD,
+            if ask_user { 1 } else { 0 },
+        );
+        AEDisposeDesc(&mut target);
+        status
+    };
+    match status {
+        NO_ERR => Ok(()),
+        ERR_AE_EVENT_NOT_PERMITTED => Err("not authorized to send Apple events to Google Chrome (-1743)".into()),
+        ERR_AE_EVENT_WOULD_REQUIRE_USER_CONSENT => {
+            Err("Automation would require user consent for Google Chrome (-1744)".into())
+        }
+        other => Err(format!(
+            "Automatisation Google Chrome indisponible (statut {other})."
+        )),
+    }
 }
 
 pub fn accessibility_trusted() -> bool {
@@ -224,30 +292,41 @@ pub fn run_applescript(source: &str) -> Result<String, String> {
     Ok(text.map(|s| s.to_string()).unwrap_or_default())
 }
 
-/// Sends an Apple Event from Bob Work → Google Chrome so Automation lists
-/// **Bob Work** (not osascript / python3).
-pub fn request_chrome_automation() -> Result<(), String> {
-    if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
-        return Err("Google Chrome n’est pas installé.".into());
-    }
-    let script = r#"tell application "Google Chrome"
+pub const CHROME_AUTOMATION_SCRIPT: &str = r#"tell application "Google Chrome"
   if (count of windows) = 0 then return "NO_WINDOW"
   return title of active tab of front window
 end tell"#;
-    run_applescript(script).map(|_| ())
+
+/// Sends an Apple Event from this process → Google Chrome so Automation lists
+/// the running app (Bob Work or Bob Work-test), never osascript / python3.
+pub fn request_chrome_automation() -> Result<(), String> {
+    // Register/prompt via the Automation API first so System Settings lists this
+    // bundle (Bob Work-test must not be conflated with release Bob Work).
+    request_chrome_automation_consent(true)?;
+    run_applescript(CHROME_AUTOMATION_SCRIPT).map(|_| ())
 }
 
 pub fn probe_chrome_automation_in_process() -> (String, String) {
+    probe_chrome_automation_in_process_for_app(&crate::app_identity::app_display_name())
+}
+
+pub fn probe_chrome_automation_in_process_for_app(app_name: &str) -> (String, String) {
     if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
         return (
             "chrome_missing".into(),
             "Installez Google Chrome pour utiliser le contrôle navigateur.".into(),
         );
     }
-    match request_chrome_automation() {
+    classify_chrome_automation(app_name, request_chrome_automation())
+}
+
+pub fn classify_chrome_automation(app_name: &str, result: Result<(), String>) -> (String, String) {
+    match result {
         Ok(()) => (
             "granted".into(),
-            "Automatisation accordée à Bob Work pour Google Chrome (actions via Bob Work).".into(),
+            format!(
+                "Automatisation accordée à {app_name} pour Google Chrome (actions via {app_name})."
+            ),
         ),
         Err(message) => {
             let lower = message.to_ascii_lowercase();
@@ -256,10 +335,7 @@ pub fn probe_chrome_automation_in_process() -> (String, String) {
                 || lower.contains("(-1743)")
                 || lower.contains("not allowed")
             {
-                (
-                    "denied".into(),
-                    "Autorisez Bob Work → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation.".into(),
-                )
+                ("denied".into(), automation_denied_message(app_name))
             } else {
                 (
                     "unknown".into(),
@@ -270,16 +346,40 @@ pub fn probe_chrome_automation_in_process() -> (String, String) {
     }
 }
 
+pub fn automation_denied_message(app_name: &str) -> String {
+    format!("Autorisez {app_name} → Google Chrome dans Automatisation, puis cliquez « Revérifier ».")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::automation_denied_message;
+
+    #[test]
+    fn automation_denied_message_stays_short() {
+        let message = automation_denied_message("Bob Work-test");
+        assert!(message.contains("Bob Work-test"));
+        assert!(!message.contains("Demander Automatisation"));
+        assert!(message.len() < 160);
+    }
+}
+
 pub fn accessibility_status_for_app() -> (String, String) {
+    accessibility_status_for_named_app(&crate::app_identity::app_display_name())
+}
+
+pub fn accessibility_status_for_named_app(app_name: &str) -> (String, String) {
     if accessibility_trusted() {
         (
             "granted".into(),
-            "Bob Work est autorisé dans Accessibilité (actions UI via Bob Work).".into(),
+            format!("{app_name} est autorisé dans Accessibilité (Computer Use / actions UI)."),
         )
     } else {
         (
             "denied".into(),
-            "Autorisez Bob Work dans Réglages Système → Confidentialité et sécurité → Accessibilité.".into(),
+            format!(
+                "Autorisez {app_name} dans Réglages Système → Confidentialité et sécurité → Accessibilité. \
+Requis pour Computer Use uniquement — pas pour le contrôle Chrome."
+            ),
         )
     }
 }

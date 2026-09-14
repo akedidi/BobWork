@@ -37,7 +37,7 @@ impl ArtifactGeneratorService {
         input: CreateArtifactInput,
         artifacts_dir: &PathBuf,
     ) -> AppResult<Artifact> {
-        self.generate_with_python(db, input, artifacts_dir, None)
+        self.generate_with_python(db, input, artifacts_dir, None, &[])
     }
 
     /// Platform entrypoint used by the Artifact Runtime. `python` must be a
@@ -48,6 +48,7 @@ impl ArtifactGeneratorService {
         input: CreateArtifactInput,
         artifacts_dir: &PathBuf,
         python: Option<&Path>,
+        python_env: &[(&str, &str)],
     ) -> AppResult<Artifact> {
         std::fs::create_dir_all(artifacts_dir)?;
 
@@ -56,7 +57,14 @@ impl ArtifactGeneratorService {
 
         let (file_path, validation_status, validation_notes) = match input.artifact_type.as_str() {
             "pptx" => {
-                self.generate_pptx(&id, &input.title, &input.content, artifacts_dir, python)?
+                self.generate_pptx(
+                    &id,
+                    &input.title,
+                    &input.content,
+                    artifacts_dir,
+                    python,
+                    python_env,
+                )?
             }
             "docx" => self.generate_docx(&id, &input.title, &input.content, artifacts_dir)?,
             "xlsx" => self.generate_xlsx(&id, &input.title, &input.content, artifacts_dir)?,
@@ -138,6 +146,7 @@ impl ArtifactGeneratorService {
         content: &str,
         dir: &PathBuf,
         python: Option<&Path>,
+        python_env: &[(&str, &str)],
     ) -> AppResult<(PathBuf, String, Option<String>)> {
         let path = dir.join(format!("{}.pptx", id));
 
@@ -191,10 +200,11 @@ print("OK:" + output_path)
             output_path = path.to_string_lossy(),
         );
 
-        let result = std::process::Command::new(python.unwrap_or_else(|| Path::new("python3")))
-            .arg("-c")
-            .arg(&python_script)
-            .output();
+        let mut command = std::process::Command::new(python.unwrap_or_else(|| Path::new("python3")));
+        for (key, value) in python_env {
+            command.env(key, value);
+        }
+        let result = command.arg("-c").arg(&python_script).output();
 
         match result {
             Ok(o) if o.status.success() => {
@@ -214,10 +224,13 @@ print("OK:" + output_path)
                     "from pptx import Presentation; p=Presentation(); p.save(r'{}')",
                     path.to_string_lossy()
                 );
-                let _ = std::process::Command::new(python.unwrap_or_else(|| Path::new("python3")))
-                    .arg("-c")
-                    .arg(&fallback_script)
-                    .output();
+                let mut fallback = std::process::Command::new(
+                    python.unwrap_or_else(|| Path::new("python3")),
+                );
+                for (key, value) in python_env {
+                    fallback.env(key, value);
+                }
+                let _ = fallback.arg("-c").arg(&fallback_script).output();
                 Ok((
                     path,
                     "warning".to_string(),

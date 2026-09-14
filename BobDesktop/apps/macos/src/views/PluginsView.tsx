@@ -12,8 +12,9 @@ import { usePluginsData, usePluginFilter, usePluginEditor } from '../hooks/usePl
 import { useTransientStatus } from '../hooks/useTransientStatus'
 import { PluginEditorModal } from '../components/Plugins/PluginEditorModal'
 import PluginDetail from '../components/Plugins/PluginDetail'
+import { useAppDialog } from '../components/AppDialog'
 
-type PluginsLocationState = { selectPluginId?: string; openCommissioning?: boolean }
+type PluginsLocationState = { selectPluginId?: string }
 type OpenIntegrationsOpts = { tab?: string; highlight?: string; provider?: string }
 
 function Empty({ text }: { text: string }) {
@@ -71,6 +72,7 @@ function PluginListRow({
 
 export default function PluginsView() {
   const t = useT()
+  const dialog = useAppDialog()
   const navigate = useNavigate()
   const location = useLocation()
   const locationState = (location.state ?? null) as PluginsLocationState | null
@@ -167,6 +169,11 @@ export default function PluginsView() {
   }
 
   const removePlugin = async (plugin: Plugin) => {
+    if (!await dialog.confirm({
+      message: t('plugins.deleteConfirm', { name: plugin.name }),
+      confirmLabel: t('common.delete'),
+      destructive: true,
+    })) return
     try {
       await deletePlugin(plugin.id)
       setSelectedId(null)
@@ -255,7 +262,6 @@ export default function PluginsView() {
               plugin={selected}
               mcpRevision={mcpRevision}
               toggling={togglingId === selected.id}
-              openCommissioning={Boolean(locationState?.openCommissioning && locationState.selectPluginId === selected.id)}
               onClose={() => setSelectedId(null)}
               onToggle={enabled => void changeEnabled(selected, enabled)}
               onEdit={() => openEditor(selected)}

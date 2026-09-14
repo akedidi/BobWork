@@ -1,9 +1,15 @@
 ---
 name: design-brief
-description: "Transformer une demande en brief produit et conception structuré."
+description: "Turn a request into a structured product and design brief."
 icon: designer
 ---
 
 # Design brief
 
-Identifier l’objectif utilisateur, l’audience, la plateforme, les actions principales, le contenu, les contraintes de marque et les critères de réussite. Avancer avec des hypothèses explicites quand elles ne changent pas matériellement le résultat. Produire un brief compact qui peut alimenter le Design IR.
+Identify the user goal, audience, platform, primary actions, content, brand constraints, and success criteria. Proceed with explicit assumptions when they do not materially change the outcome. Produce a compact brief that can feed the Design IR.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

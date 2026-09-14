@@ -30,7 +30,7 @@
 ### Visual Identity
 
 **Principles**:
-- Original, not a ChatGPT copy
+- Distinct visual identity
 - Professional and premium
 - Clean and uncluttered
 - Functional over decorative

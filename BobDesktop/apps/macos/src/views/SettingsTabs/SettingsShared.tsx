@@ -1,6 +1,7 @@
 
 import React from 'react'
 import type { AppSettings, MacosChromeControlStatus, MacosComputerUseStatus } from '@bob-work/shared-types'
+import { useT, type MessageKey } from '../../i18n'
 
 export function Heading({ title, description }: { title: string; description: string }) { return <header className="settings-heading"><h1>{title}</h1><p>{description}</p></header> }
 export function Card({ title, children }: { title?: string; children: React.ReactNode }) { return <section className="settings-card">{title && <h2>{title}</h2>}{children}</section> }
@@ -32,15 +33,17 @@ export function SettingsFields({
 }
 export function RowText({ title, description }: { title: string; description?: string }) { return <div><strong>{title}</strong>{description && <small>{description}</small>}</div> }
 export function ToggleRow({ title, description, value, onChange, disabled }: { title: string; description?: string; value: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
+  const t = useT()
+  const actionLabel = value ? t('common.disable') : t('common.enable')
   return (
     <div className={`settings-row${disabled ? ' is-disabled' : ''}`} aria-disabled={disabled || undefined}>
       <RowText title={title} description={description} />
-      <label className="skill-switch settings-switch" title={value ? 'Désactiver' : 'Activer'}>
+      <label className="skill-switch settings-switch" title={actionLabel}>
         <input
           type="checkbox"
           checked={value}
           disabled={disabled}
-          aria-label={`${value ? 'Désactiver' : 'Activer'} ${title}`}
+          aria-label={`${actionLabel} ${title}`}
           onChange={event => onChange(event.target.checked)}
         />
         <span aria-hidden="true" />
@@ -65,19 +68,21 @@ export function StatusRow({ title, value, ok, loading }: { title: string; value:
     </div>
   )
 }
-export function authenticationLabel(method: string) {
+type SettingsTranslator = (key: MessageKey, params?: Record<string, string | number>) => string
+
+export function authenticationLabel(method: string, t: SettingsTranslator) {
   return ({
-    api_key_session: 'Clé enregistrée dans le coffre',
-    api_key_environment: 'Clé fournie par l’environnement',
-    sso_session_detected: 'Session IBM Bob Shell détectée',
-    required: 'Authentification requise',
+    api_key_session: t('settings.authVaultKey'),
+    api_key_environment: t('settings.authEnvironmentKey'),
+    sso_session_detected: t('settings.authSsoSession'),
+    required: t('settings.authRequired'),
   }[method] ?? method)
 }
-export function chromeAutomationLabel(automation: MacosChromeControlStatus['automation']) {
-  return ({ granted: 'Accordée', denied: 'Refusée', chrome_missing: 'Chrome absent', unavailable: 'Indisponible', unknown: 'Inconnue' }[automation] ?? automation)
+export function chromeAutomationLabel(automation: MacosChromeControlStatus['automation'], t: SettingsTranslator) {
+  return ({ granted: t('settings.statusGranted'), denied: t('settings.statusDenied'), chrome_missing: t('settings.statusChromeMissing'), unavailable: t('settings.statusUnavailable'), unknown: t('settings.statusUnknown') }[automation] ?? automation)
 }
-export function computerUseAccessibilityLabel(accessibility: MacosComputerUseStatus['accessibility']) {
-  return ({ granted: 'Accordée', denied: 'Refusée', unavailable: 'Indisponible', unknown: 'Inconnue' }[accessibility] ?? accessibility)
+export function computerUseAccessibilityLabel(accessibility: MacosComputerUseStatus['accessibility'], t: SettingsTranslator) {
+  return ({ granted: t('settings.statusGranted'), denied: t('settings.statusDenied'), unavailable: t('settings.statusUnavailable'), unknown: t('settings.statusUnknown') }[accessibility] ?? accessibility)
 }
 export function applyTheme(theme: string) { const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches); document.documentElement.classList.toggle('dark', dark) }
 export function normalizeSettingsSearch(value: string) { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().trim() }

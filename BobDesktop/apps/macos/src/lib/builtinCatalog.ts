@@ -39,12 +39,21 @@ export const BUILTIN_SKILL_SLUGS = new Set([
   'bob-rh-recruiting',
   'hr-recruiting',
   'redacteur-juridique',
+  'orca-cli',
+  'computer-use',
+  'find-skills',
+  'orchestration',
+  'skill-creator',
+  'plugin-creator',
+  'agent-review',
 ])
 
 export function isBuiltinSkill(skill: Pick<WorkspaceSkill, 'slug' | 'builtin'>): boolean {
-  // Product rule: every installed skill is managed by Bob Work. CTO
-  // Investissements is the sole user-owned exception.
-  return skill.slug !== 'bob-work-cto-invest'
+  // The backend derives ownership from deployment markers on disk. Keep the
+  // slug catalog only as a compatibility fallback for older payloads that did
+  // not expose `builtin` yet.
+  if (typeof skill.builtin === 'boolean') return skill.builtin
+  return BUILTIN_SKILL_SLUGS.has(skill.slug)
 }
 
 export function isBuiltinPlugin(plugin: Pick<Plugin, 'id' | 'manifest'>): boolean {

@@ -4,9 +4,9 @@
   "agentic": true,
   "name": "Designer",
   "slug": "ibm-agentic-designer",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "Bob Work",
-  "description": "Crée des expériences UX/UI structurées avec Design IR, aperçu interactif desktop/mobile, itérations conversationnelles et exports ouverts.",
+  "description": "Design structured UX/UI experiences with responsive preview and open exports including Sketch.",
   "category": "recipe",
   "icon": "designer",
   "permissions": [
@@ -35,97 +35,97 @@
     {
       "name": "ux-research",
       "displayName": "ux-research",
-      "description": "Planifier et synthétiser une recherche UX traçable.",
+      "description": "Plan and synthesize traceable UX research.",
       "path": "skills/ux-research/SKILL.md"
     },
     {
       "name": "user-journey",
       "displayName": "user-journey",
-      "description": "Cartographier l’expérience de bout en bout et ses moments critiques.",
+      "description": "Map the end-to-end experience and its critical moments.",
       "path": "skills/user-journey/SKILL.md"
     },
     {
       "name": "information-architecture",
       "displayName": "information-architecture",
-      "description": "Structurer contenus, navigation et taxonomie autour des modèles mentaux.",
+      "description": "Structure content, navigation, and taxonomy around mental models.",
       "path": "skills/information-architecture/SKILL.md"
     },
     {
       "name": "product-design",
       "displayName": "product-design",
-      "description": "Passer du problème validé à une solution testable et mesurable.",
+      "description": "Move from a validated problem to a testable, measurable solution.",
       "path": "skills/product-design/SKILL.md"
     },
     {
       "name": "ui-design",
       "displayName": "ui-design",
-      "description": "Produire une interface cohérente, responsive et prête à construire.",
+      "description": "Produce a coherent, responsive interface ready to build.",
       "path": "skills/ui-design/SKILL.md"
     },
     {
       "name": "design-system",
       "displayName": "design-system",
-      "description": "Gouverner composants, tokens et patterns comme un produit partagé.",
+      "description": "Govern components, tokens, and patterns as a shared product.",
       "path": "skills/design-system/SKILL.md"
     },
     {
       "name": "design-review",
       "displayName": "design-review",
-      "description": "Conduire une revue de conception factuelle avant construction ou release.",
+      "description": "Conduct a factual design review before build or release.",
       "path": "skills/design-review/SKILL.md"
     },
     {
       "name": "ux-heuristics",
       "displayName": "ux-heuristics",
-      "description": "Évaluer rapidement une interface avec des heuristiques explicites.",
+      "description": "Quickly evaluate an interface with explicit heuristics.",
       "path": "skills/ux-heuristics/SKILL.md"
     },
     {
       "name": "accessibility-audit",
       "displayName": "accessibility-audit",
-      "description": "Auditer l’accessibilité contre WCAG 2.2 et les critères IBM/Carbon applicables.",
+      "description": "Audit accessibility against WCAG 2.2 and applicable IBM/Carbon criteria.",
       "path": "skills/accessibility-audit/SKILL.md"
     },
     {
       "name": "developer-handoff",
       "displayName": "developer-handoff",
-      "description": "Transmettre une conception sans ambiguïté et accompagner son implémentation.",
+      "description": "Hand off a design unambiguously and support its implementation.",
       "path": "skills/developer-handoff/SKILL.md"
     },
     {
       "name": "design-brief",
       "displayName": "design-brief",
-      "description": "Transforme une demande en brief de conception structuré et actionnable.",
+      "description": "Turn a request into a structured product and design brief.",
       "path": "skills/design-brief/SKILL.md"
     },
     {
       "name": "wireframe",
       "displayName": "wireframe",
-      "description": "Crée des wireframes évolutifs directement dans le Design IR.",
+      "description": "Create a structured, evolvable wireframe.",
       "path": "skills/wireframe/SKILL.md"
     },
     {
       "name": "responsive-design",
       "displayName": "responsive-design",
-      "description": "Définit les adaptations desktop, tablette et mobile sans simple mise à l’échelle.",
+      "description": "Adapt a design for desktop, tablet, and mobile.",
       "path": "skills/responsive-design/SKILL.md"
     },
     {
       "name": "interaction-design",
       "displayName": "interaction-design",
-      "description": "Décrit les états et interactions dans le Design IR.",
+      "description": "Define interface behaviors and states.",
       "path": "skills/interaction-design/SKILL.md"
     },
     {
       "name": "design-refactor",
       "displayName": "design-refactor",
-      "description": "Applique une modification localisée à un nœud du Design IR.",
+      "description": "Apply a precise fix to an existing Design IR.",
       "path": "skills/design-refactor/SKILL.md"
     },
     {
       "name": "export-design",
       "displayName": "export-design",
-      "description": "Exporte le Design IR, les tokens, SVG et HTML/CSS de manière traçable.",
+      "description": "Export a design from Design IR.",
       "path": "skills/export-design/SKILL.md"
     }
   ],
@@ -169,8 +169,8 @@
   ],
   "specializedMode": {
     "label": "Designer",
-    "description": "Designer agentique avec Design IR persistant, aperçu interactif et responsive dans les conversations desktop/mobile, puis exports structurés.",
-    "workflow": "Brief → IA/flux → wireframe → design system → UI → Design IR → aperçu → review → patch → exports",
+    "description": "Design structured UX/UI experiences with responsive preview and open exports including Sketch.",
+    "workflow": "brief → architecture/flows → wireframe → design system → UI → Design IR → preview → review → patch → export",
     "allowedSkills": [
       "ux-research",
       "user-journey",
@@ -192,6 +192,7 @@
     "allowedTools": [
       "read_file",
       "write_file",
+      "execute_command",
       "web_fetch",
       "web_search",
       "generate_artifact"
@@ -229,6 +230,6 @@
     ],
     "sandbox": "enterprise-advisory"
   },
-  "instructions": "# Designer\n\nTu es le Designer agentique de Bob Work. Le Design IR (JSON versionné) est la source de vérité : ni image, ni HTML, ni export ne le remplace. Pour une nouvelle interface, produis brief → architecture/flux → wireframe → système de tokens/composants → UI dans le Design IR → aperçu HTML local et isolé → revue → patch ciblé.\n\n## Règles d’exécution\n\n- Chaque nœud a un identifiant stable. Une demande ciblée (ex. « réduis la barre latérale ») applique un patch au nœud, sans régénérer le reste.\n- Utilise les layouts FREE/HORIZONTAL/VERTICAL/GRID, les tokens sémantiques et les règles desktop/tablette/mobile. Ne réduis pas mécaniquement le desktop pour le mobile : adapte navigation, densité, ordre et interactions tactiles.\n- Génère l’aperçu HTML uniquement depuis le Design IR ; il est affiché inline dans la conversation sur desktop et mobile. Aucun JavaScript arbitraire ou CDN.\n- Utilise Visualize seulement pour graphiques/diagrammes/3D et ses runtimes partagés ; Designer ne duplique aucun moteur.\n- Exporte Design IR JSON, tokens JSON, SVG et HTML/CSS. Propose Sketch comme échange structuré lorsque l’adaptateur est disponible ; ne génère jamais de .fig.\n- L’aperçu est sandboxé, sans secrets ni réseau par défaut. Respecte accessibilité, contraste, focus, libellés et mouvements réduits.\n\n## Skills\n\nRoutage courant : `design-brief`, `information-architecture`, `user-journey`, `wireframe`, `ui-design`, `design-system`, `responsive-design`, `interaction-design`, `accessibility-audit`, `design-review`, `design-refactor`, `developer-handoff`, `export-design`. Lis le skill concerné avant de l’employer.\n\n## Définition de terminé\n\nUn résultat prêt est un Design IR valide, un aperçu utilisable desktop/mobile, une revue des limites et les exports ouverts demandés.",
-  "releaseNotes": "2.0.0 — Design IR versionné, aperçu HTML isolé desktop/mobile, patchs ciblés, workflow responsive et exports ouverts."
+  "instructions": "# Designer\n\nDesigner turns a brief into professional, editable UX/UI:\n\n`brief → architecture/flows → wireframe → design system → UI → Design IR → preview → review → patch → export`\n\n## Design IR contract\n\nVersioned Design IR JSON is the source of truth. Each node has a stable ID, semantics, layout, and when needed responsive/interaction rules. Previews and exports are derived from this document; no image, HTML, or proprietary export replaces it.\n\n- use `FREE`, `HORIZONTAL`, `VERTICAL`, and `GRID`; prefer Flex/Grid over absolute positioning;\n- create and reuse tokens and components;\n- for a targeted change, patch only the affected node;\n- produce a local, self-contained, sandboxed HTML preview so it renders in conversation on desktop and mobile;\n- for charts, diagrams, or 3D, delegate to the shared Visualize runtime;\n- never include arbitrary JavaScript or load a CDN in a preview.\n\n## Responsive and accessibility\n\nDefine desktop, tablet, and mobile explicitly. On mobile, adapt navigation, order, density, and touch interactions; do not simply shrink the layout. Plan contrast, accessible labels, focus, touch targets, and reduced motion.\n\n## Exports\n\nExport from the same Design IR: `.design.json` source, JSON tokens, SVG, HTML/CSS, and when the user asks for Sketch / `.sketch` a real ZIP package via `python3 ~/.bob/skills/ibm-agentic-designer/scripts/export_sketch.py <design.json> -o <name>.sketch`. Never generate `.fig`. Never substitute `.sketch-handoff.json` or claim Sketch is unavailable.\n\n## Language\n\n- **Skill files** in this plugin are authored in English.\n- **Deliverables** (briefs, reviews, handoff notes, user-facing copy in exports) must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.\n- When the prompt language is ambiguous, use the language of the prompt's main request sentence.\n- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.\n\nSee also `references/deliverable-contract.md`.\n\n## Skills\n\nFor a new journey: `design-brief` → `information-architecture`/`user-journey` → `wireframe` → `ui-design`/`design-system` → `responsive-design`/`interaction-design` → `design-review` → `export-design`.\n\nFor a fix: use `design-refactor`, preserve out-of-scope elements, and refresh the preview.",
+  "releaseNotes": "2.0.1 — Real `.sketch` export from Design IR via scripts/export_sketch.py; stop substituting handoff JSON when Sketch is requested."
 }

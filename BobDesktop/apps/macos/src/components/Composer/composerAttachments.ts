@@ -53,11 +53,25 @@ export function getFileVisualKind(path: string, isDirectory = false): FileVisual
   return 'generic'
 }
 
-export function getFileTypeLabel(path: string, isDirectory = false): string {
-  if (isDirectory) return 'DOSSIER'
+export function getFileTypeLabel(path: string): string {
   const ext = getFileExtension(path)
-  if (!ext) return 'FICHIER'
-  return ext.toUpperCase()
+  return ext ? ext.toUpperCase() : ''
+}
+
+export interface ComposerAttachment {
+  path: string
+  isDirectory: boolean
+}
+
+export function mergeAttachmentPaths(current: ComposerAttachment[], incoming: ComposerAttachment[]): ComposerAttachment[] {
+  const seen = new Set(current.map(item => item.path))
+  const out = [...current]
+  for (const item of incoming) {
+    if (seen.has(item.path)) continue
+    seen.add(item.path)
+    out.push(item)
+  }
+  return out
 }
 
 export function formatFileSize(bytes: number): string {
@@ -65,10 +79,6 @@ export function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} Ko`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(bytes < 10_485_760 ? 1 : 0)} Mo`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} Go`
-}
-
-export function mergeAttachmentPaths(current: string[], incoming: string[]): string[] {
-  return Array.from(new Set([...current, ...incoming]))
 }
 
 const EXTENSION_TO_BUILTIN_PLUGIN: Record<string, string> = {
@@ -81,7 +91,6 @@ const EXTENSION_TO_BUILTIN_PLUGIN: Record<string, string> = {
   tsv: 'builtin-excel',
   ppt: 'builtin-powerpoint',
   pptx: 'builtin-powerpoint',
-  pdf: 'builtin-documents',
   png: 'builtin-docling',
   jpg: 'builtin-docling',
   jpeg: 'builtin-docling',
@@ -89,18 +98,26 @@ const EXTENSION_TO_BUILTIN_PLUGIN: Record<string, string> = {
   tif: 'builtin-docling',
   webp: 'builtin-docling',
   bmp: 'builtin-docling',
-  rtf: 'builtin-documents',
-  odt: 'builtin-documents',
-  md: 'builtin-documents',
-  markdown: 'builtin-documents',
-  txt: 'builtin-documents',
   one: 'builtin-onenote',
   onetoc2: 'builtin-onenote',
 }
 
+/** Document types handled by the built-in Documents plugin without an explicit @plugin mention. */
+const DEFAULT_DOCUMENTS_PLUGIN_EXTENSIONS = new Set([
+  'pdf', 'rtf', 'odt', 'md', 'markdown', 'txt',
+])
+
 export function getSuggestedBuiltinPluginId(path: string): string | null {
   const ext = getFileExtension(path)
   return EXTENSION_TO_BUILTIN_PLUGIN[ext] ?? null
+}
+
+export function usesDefaultDocumentsPlugin(path: string): boolean {
+  return DEFAULT_DOCUMENTS_PLUGIN_EXTENSIONS.has(getFileExtension(path))
+}
+
+export function attachmentsUseDefaultDocumentsPlugin(paths: readonly string[]): boolean {
+  return paths.some(usesDefaultDocumentsPlugin)
 }
 
 export interface ComposerMentionCatalog {

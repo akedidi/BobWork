@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useContextDraftStore } from '../../stores/contextDraftStore'
 import { useNavigate } from 'react-router-dom'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   allowComposerAttachments,
@@ -27,10 +28,10 @@ import type { BobMode, BobSlashCommand, DbConnection, McpServer, Plugin, Project
 import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from '../../lib/builtinCatalog'
 import { pluginMentionId } from '../../lib/pluginUtils'
 import { engineMeta } from '../../lib/dbEngines'
-import { CATALOG } from '../../views/IntegrationsTabs/catalogData'
+import { CATALOG, isIntegrationVisibleById } from '../../views/IntegrationsTabs/catalogData'
 import { PluginIcon, resolveSkillIcon, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
-import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, type ComposerMentionCatalog } from './composerAttachments'
+import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, attachmentsUseDefaultDocumentsPlugin, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, type ComposerAttachment, type ComposerMentionCatalog } from './composerAttachments'
 import { errorMessage } from '../../lib/errorMessage'
 import {
   applyAutocompleteInsert,
@@ -43,6 +44,11 @@ import {
 import { useT } from '../../i18n'
 import { useAppDialog } from '../AppDialog'
 import { isApiServer } from '../../hooks/useMcpServers'
+import { isPluginManagedMcp } from '../../lib/mcpVisibility'
+import ComposerPermissionsMenu from './ComposerPermissionsMenu'
+import { forbiddenTaskPermissionIds, getVisibleTaskPermissions } from '../../lib/taskPermissions'
+import { useTaskPermissionStore } from '../../stores/taskPermissionStore'
+import { useAppStore } from '../../stores/appStore'
 
 type SpeechRecognitionLike = {
   lang: string
@@ -67,7 +73,11 @@ const INTEGRATION_PICKER = [
   { id: 'outlook-calendar', skillSlug: 'bob-work-outlook-calendar', mcpName: 'bob-work-microsoft' },
   { id: 'onedrive', skillSlug: 'bob-work-onedrive', mcpName: 'bob-work-microsoft' },
   { id: 'onenote', skillSlug: 'bob-work-microsoft-onenote', mcpName: 'bob-work-microsoft' },
-] as const
+].filter(integration => isIntegrationVisibleById(integration.id)) as Array<{
+  id: string
+  skillSlug: string
+  mcpName: string
+}>
 
 const COMPOSER_MIN_TEXTAREA_HEIGHT = 52
 const COMPOSER_MAX_TEXTAREA_HEIGHT = 240
@@ -113,15 +123,29 @@ type McpPickerItem = {
   kind: 'integration' | 'api' | 'mcp'
 }
 
+export interface ComposerDraftRequest {
+  key: string
+  text: string
+  mode?: string
+  attachmentPaths?: string[]
+  projectId?: string
+}
+
 interface Props {
   placeholder?: string
   showProjectPill?: boolean
   showModePill?: boolean
+  showPermissionsPill?: boolean
   onSend?: (text: string, mode: string, attachmentPaths: string[], projectId?: string) => void
   onStop?: () => void
   disabled?: boolean
   busy?: boolean
   queueCount?: number
+  /** When true, Enter/Send updates a queued prompt instead of enqueueing/sending. */
+  queueEditActive?: boolean
+  /** Bump to force a clean remount of the right toolbar (WKWebView paint bugs). */
+  toolbarEpoch?: string | number
+  draftRequest?: ComposerDraftRequest | null
   initialProjectId?: string
   initialMode?: string
   onProjectChange?: (projectId?: string) => void
@@ -130,20 +154,24 @@ interface Props {
 }
 
 const BUILTIN_MODES: BobMode[] = [
-  { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'fallback' },
+  { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: ['read', 'edit', 'execute', 'mcp', 'skill', 'todo', 'subtask', 'subagent', 'mode'], builtin: true, source: 'fallback' },
   { slug: 'plan', name: 'Plan', description: 'Préparer un plan', groups: [], builtin: true, source: 'fallback' },
   { slug: 'ask', name: 'Ask', description: 'Répondre sans modifier', groups: [], builtin: true, source: 'fallback' },
 ]
 
 async function registerAttachmentPaths(
   incoming: string[],
-  setAttachments: React.Dispatch<React.SetStateAction<string[]>>,
+  setAttachments: React.Dispatch<React.SetStateAction<ComposerAttachment[]>>,
 ) {
   if (incoming.length === 0) return
   try {
     const allowed = await allowComposerAttachments(incoming)
     if (allowed.length === 0) return
-    setAttachments(prev => mergeAttachmentPaths(prev, allowed))
+    const items: ComposerAttachment[] = allowed.map(grant => ({
+      path: grant.path,
+      isDirectory: grant.isDirectory,
+    }))
+    setAttachments(prev => mergeAttachmentPaths(prev, items))
   } catch {
     // Ignore rejected paths (sensitive locations, missing files, etc.)
   }
@@ -159,8 +187,9 @@ function formatRecordingDuration(totalSeconds: number) {
 }
 
 export default function Composer({
-  placeholder, showProjectPill, showModePill,
-  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId, initialMode, onProjectChange, onModeChange, focusRequestKey,
+  placeholder, showProjectPill, showModePill, showPermissionsPill = true,
+  onSend, onStop, disabled, busy = false, queueCount = 0, queueEditActive = false,
+  toolbarEpoch, draftRequest, initialProjectId, initialMode, onProjectChange, onModeChange, focusRequestKey,
 }: Props) {
   const t = useT()
   const dialog = useAppDialog()
@@ -184,12 +213,14 @@ export default function Composer({
   const [autocompleteIndex, setAutocompleteIndex] = useState(0)
   const [autocompleteDismissed, setAutocompleteDismissed] = useState<string | null>(null)
   const [caretIndex, setCaretIndex] = useState(0)
-  const [attachments, setAttachments] = useState<string[]>([])
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
   const [attachSearch, setAttachSearch] = useState('')
   const [modeMenu, setModeMenu] = useState(false)
   const [modeSearch, setModeSearch] = useState('')
+  const [permissionsMenu, setPermissionsMenu] = useState(false)
   const [projectMenu, setProjectMenu] = useState(false)
+  const [runtimeSettings, setRuntimeSettings] = useState({ mcpEnabled: true, subagentsEnabled: true })
   const [listening, setListening] = useState(false)
   const [dictationBusy, setDictationBusy] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -202,12 +233,16 @@ export default function Composer({
   const attachSearchRef = useRef<HTMLInputElement>(null)
   const projectButtonRef = useRef<HTMLButtonElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
+  const permissionsButtonRef = useRef<HTMLButtonElement>(null)
+  const applyVisiblePermissions = useTaskPermissionStore(state => state.applyVisiblePermissions)
   const recordingRef = useRef(false)
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const recordingActionRef = useRef(false)
   const recordingStartedAtRef = useRef(0)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
+  const bobStatus = useAppStore(state => state.bobStatus)
+  const apiKeyRequired = bobStatus === 'unauthenticated'
   const [isDragging, setIsDragging] = useState(false)
   const dragDepthRef = useRef(0)
 
@@ -225,6 +260,38 @@ export default function Composer({
     if (!focusRequestKey || disabled) return
     taRef.current?.focus()
   }, [disabled, focusRequestKey])
+
+  useEffect(() => {
+    if (!draftRequest) return
+    setText(draftRequest.text)
+    if (draftRequest.mode) {
+      setMode(draftRequest.mode)
+      onModeChange?.(draftRequest.mode)
+    }
+    if (draftRequest.projectId !== undefined) {
+      setProjectId(draftRequest.projectId)
+      onProjectChange?.(draftRequest.projectId)
+    }
+    setAttachments([])
+    setAttachMenu(false)
+    setProjectMenu(false)
+    setModeMenu(false)
+    setPermissionsMenu(false)
+    setAttachSearch('')
+    setModeSearch('')
+    if (draftRequest.attachmentPaths?.length) {
+      void registerAttachmentPaths(draftRequest.attachmentPaths, setAttachments)
+    }
+    window.requestAnimationFrame(() => {
+      const ta = taRef.current
+      if (!ta) return
+      ta.focus()
+      const end = draftRequest.text.length
+      ta.setSelectionRange(end, end)
+    })
+  // Intentionally keyed by draftRequest.key only — callers bump key to reload.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftRequest?.key])
 
   useLayoutEffect(() => {
     if (!attachMenu) return
@@ -382,6 +449,12 @@ export default function Composer({
         if (settings?.defaultMode && initialMode === undefined) {
           setMode(current => current === 'agent' ? settings.defaultMode : current)
         }
+        if (settings) {
+          setRuntimeSettings({
+            mcpEnabled: settings.mcpEnabled,
+            subagentsEnabled: settings.subagentsEnabled,
+          })
+        }
         const errors: string[] = []
         if (skillsResult.ok) {
           setSkills(skillsResult.items.filter(skill => skill.enabled))
@@ -402,7 +475,16 @@ export default function Composer({
     refreshMcpIntegrations()
     const onModes = () => { void getBobModes().then(items => { if (items.length) setModes(items) }).catch(() => {}) }
     window.addEventListener('bob-modes-updated', onModes)
-    return () => window.removeEventListener('bob-modes-updated', onModes)
+    let unlistenPlugins: (() => void) | undefined
+    void listen<number>('plugins-refreshed', () => {
+      void getPlugins()
+        .then(items => setPlugins(items.filter(plugin => plugin.installState === 'installed')))
+        .catch(() => {})
+    }).then(fn => { unlistenPlugins = fn }).catch(() => {})
+    return () => {
+      window.removeEventListener('bob-modes-updated', onModes)
+      unlistenPlugins?.()
+    }
   }, [refreshMcpIntegrations])
 
   useEffect(() => {
@@ -440,6 +522,7 @@ export default function Composer({
     setProjectMenu(false)
     setModeMenu(false)
     setModeSearch('')
+    setPermissionsMenu(false)
   }, [])
 
   useEffect(() => {
@@ -460,23 +543,30 @@ export default function Composer({
     }
   }, [closeMenus])
 
-  const toggleMenu = (target: 'attach' | 'project' | 'mode') => {
-    const shouldOpen = target === 'attach' ? !attachMenu : target === 'project' ? !projectMenu : !modeMenu
+  const toggleMenu = (target: 'attach' | 'project' | 'mode' | 'permissions') => {
+    const shouldOpen = target === 'attach'
+      ? !attachMenu
+      : target === 'project'
+        ? !projectMenu
+        : target === 'permissions'
+          ? !permissionsMenu
+          : !modeMenu
     setAttachMenu(target === 'attach' && shouldOpen)
     setProjectMenu(target === 'project' && shouldOpen)
     setModeMenu(target === 'mode' && shouldOpen)
+    setPermissionsMenu(target === 'permissions' && shouldOpen)
     if (target !== 'mode' || !shouldOpen) setModeSearch('')
     if (target !== 'attach' || !shouldOpen) setAttachSearch('')
     if (target === 'attach' && shouldOpen) refreshMcpIntegrations()
   }
 
   const handleSend = () => {
-    if (!text.trim() || disabled || recording || recordingBusy) return
+    if (!text.trim() || disabled || recording || recordingBusy || apiKeyRequired) return
     const prompt = normalizeComposerCapabilityMentions(text, mentionCatalog)
     if (onSend) {
-      onSend(prompt, mode, attachments, projectId)
+      onSend(prompt, mode, attachments.map(item => item.path), projectId)
     } else {
-      navigate('/chat', { state: { initialPrompt: prompt, mode, attachmentPaths: attachments, projectId } })
+      navigate('/chat', { state: { initialPrompt: prompt, mode, attachmentPaths: attachments.map(item => item.path), projectId } })
     }
     setText('')
     setAttachments([])
@@ -633,6 +723,7 @@ export default function Composer({
         .map(integration => integration.mcpName),
     )
     for (const server of mcpServers) {
+      if (isPluginManagedMcp(server)) continue
       if (coveredMcp.has(server.name)) continue
       if (integrationFilter.length > 0 && !integrationFilter.includes(`mcp:${server.name}`)) continue
       if ((server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_CREDENTIAL_ONLY === '1') continue
@@ -762,6 +853,18 @@ export default function Composer({
     return modes.filter(item => item.name.toLowerCase().includes(query) || item.slug.includes(query) || item.description?.toLowerCase().includes(query))
   }, [modeSearch, modes])
   const selectedMode = modes.find(item => item.slug === mode) ?? BUILTIN_MODES[0]
+  const visiblePermissionIds = useMemo(
+    () => getVisibleTaskPermissions(
+      selectedMode,
+      forbiddenTaskPermissionIds(runtimeSettings),
+    ).map(permission => permission.id),
+    [runtimeSettings, selectedMode],
+  )
+
+  useEffect(() => {
+    applyVisiblePermissions(visiblePermissionIds)
+  }, [applyVisiblePermissions, visiblePermissionIds])
+
   const mentionChips = useMemo(() => {
     type Chip = {
       key: string
@@ -947,11 +1050,21 @@ export default function Composer({
           </div>
         )}
         {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map(path => (
-              <AttachmentPreview key={path} path={path} onRemove={() => setAttachments(items => items.filter(item => item !== path))} />
-            ))}
-          </div>
+          <>
+            <div className="composer-attachments">
+              {attachments.map(item => (
+                <AttachmentPreview
+                  key={item.path}
+                  path={item.path}
+                  isDirectory={item.isDirectory}
+                  onRemove={() => setAttachments(items => items.filter(entry => entry.path !== item.path))}
+                />
+              ))}
+            </div>
+            {attachmentsUseDefaultDocumentsPlugin(attachments.map(item => item.path)) && (
+              <p className="settings-note composer-documents-hint">{t('composer.documentsDefaultPluginHint')}</p>
+            )}
+          </>
         )}
         {recordingError && <p className="composer-recording-error" role="alert">{recordingError}</p>}
 
@@ -1005,6 +1118,7 @@ export default function Composer({
         />
 
         <div className="composer-toolbar">
+          <div className="composer-toolbar-start">
           <div>
             <button ref={attachButtonRef} className="icon-btn" title={t('composer.attachFileOrFolder')} aria-haspopup="menu" aria-expanded={attachMenu} onClick={() => toggleMenu('attach')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -1212,11 +1326,44 @@ export default function Composer({
               )}
             </div>
           )}
+          </div>
 
-          <div style={{ flex: 1 }} />
+          <div className="composer-toolbar-end" key={toolbarEpoch ?? 'composer-toolbar-end'}>
+          {showPermissionsPill && showModePill && (
+            <div className="composer-toolbar-control">
+              <button
+                ref={permissionsButtonRef}
+                className="composer-pill composer-permissions-pill"
+                aria-haspopup="menu"
+                aria-expanded={permissionsMenu}
+                aria-label={t('composer.permissions.title')}
+                onClick={() => toggleMenu('permissions')}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                  <path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z" />
+                </svg>
+                {t('composer.permissions.pill')}
+                <span aria-hidden="true">⌄</span>
+              </button>
+              {permissionsMenu && (
+                <ComposerPopover
+                  anchorRef={permissionsButtonRef}
+                  align="end"
+                  ariaLabel={t('composer.permissions.title')}
+                  className="permissions-popover-shell"
+                >
+                  <ComposerPermissionsMenu
+                    selectedMode={selectedMode}
+                    mcpEnabled={runtimeSettings.mcpEnabled}
+                    subagentsEnabled={runtimeSettings.subagentsEnabled}
+                  />
+                </ComposerPopover>
+              )}
+            </div>
+          )}
 
           {showModePill && (
-            <div>
+            <div className="composer-toolbar-control">
               <button ref={modeButtonRef} className="composer-pill" aria-label={`Mode Bob : ${selectedMode.name}`} aria-haspopup="menu" aria-expanded={modeMenu} onClick={() => toggleMenu('mode')}>{selectedMode.name}<span aria-hidden="true">⌄</span></button>
               {modeMenu && (
                 <ComposerPopover anchorRef={modeButtonRef} align="end" ariaLabel="Modes Bob" className="mode-popover">
@@ -1239,20 +1386,47 @@ export default function Composer({
             <button className="composer-stop-btn" onClick={onStop} title={t('composer.stopActive')} aria-label={t('composer.stopActive')}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
           )}
           <button
-            className={`send-btn ${busy ? 'queue-send-btn' : ''}`}
-            disabled={!text.trim() || !!disabled || recording || recordingBusy}
+            className={`send-btn ${busy && !queueEditActive ? 'queue-send-btn' : ''}`}
+            disabled={!text.trim() || !!disabled || recording || recordingBusy || apiKeyRequired}
             onClick={handleSend}
-            title={busy ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}` : 'Envoyer'}
-            aria-label={busy ? 'Ajouter le prompt à la file' : t('composer.send')}
+            title={
+              queueEditActive
+                ? t('composer.updateQueuedPrompt')
+                : busy
+                  ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}`
+                  : 'Envoyer'
+            }
+            aria-label={
+              queueEditActive
+                ? t('composer.updateQueuedPrompt')
+                : busy
+                  ? 'Ajouter le prompt à la file'
+                  : t('composer.send')
+            }
           >
-            {busy ? (
+            {queueEditActive ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            ) : busy ? (
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M4 6h10M4 12h7M4 18h5"/><path d="M17 11v8M13 15h8"/></svg>
             ) : (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             )}
           </button>
+          </div>
         </div>
       </div>
+      {apiKeyRequired && (
+        <p className="composer-auth-hint" role="alert">
+          {t('composer.apiKeyRequired')}{' '}
+          <button
+            type="button"
+            className="composer-auth-hint-link"
+            onClick={() => navigate('/settings', { state: { tab: 'bob' } })}
+          >
+            {t('composer.apiKeyRequiredLink')}
+          </button>
+        </p>
+      )}
     </div>
   )
 }

@@ -35,10 +35,46 @@ if [[ "$MODE" == "prepare" ]]; then
   exit 0
 fi
 
-if [[ "$MODE" == "app" ]]; then
-  pnpm exec tauri build --bundles app
-else
-  pnpm exec tauri build
+SIGN_ID="${APPLE_SIGNING_IDENTITY:-${BOB_WORK_SIGN_IDENTITY:-}}"
+if [[ -z "$SIGN_ID" ]]; then
+  SIGN_ID="$(
+    security find-identity -v -p codesigning 2>/dev/null \
+      | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
+      | head -1
+  )"
+fi
+if [[ -z "$SIGN_ID" ]]; then
+  SIGN_ID="$(
+    security find-identity -v -p codesigning 2>/dev/null \
+      | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' \
+      | head -1
+  )"
 fi
 
-node "$SCRIPT_DIR/verify-release-bundle.mjs" "$TARGET_DIR/release/bundle/macos/Bob Work.app"
+TAURI_CONFIG_ARGS=()
+if [[ -n "$SIGN_ID" ]]; then
+  SIGNING_CONFIG="$TARGET_DIR/release/tauri.local-signing.conf.json"
+  mkdir -p "$(dirname "$SIGNING_CONFIG")"
+  node -e 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], `${JSON.stringify({ bundle: { macOS: { signingIdentity: process.argv[2] } } }, null, 2)}\n`)' "$SIGNING_CONFIG" "$SIGN_ID"
+  TAURI_CONFIG_ARGS=(--config "$SIGNING_CONFIG")
+elif [[ "$MODE" == "dmg" ]]; then
+  echo "A stable Apple Development or Developer ID signing identity is required to package a DMG." >&2
+  exit 1
+fi
+
+if [[ "$MODE" == "app" ]]; then
+  pnpm exec tauri build --bundles app --features custom-protocol "${TAURI_CONFIG_ARGS[@]}"
+else
+  pnpm exec tauri build --features custom-protocol "${TAURI_CONFIG_ARGS[@]}"
+fi
+
+RELEASE_APP="$TARGET_DIR/release/bundle/macos/Bob Work.app"
+
+# Tauri's ad-hoc signature uses the executable cdhash as its designated
+# requirement. That identity changes after every build, so macOS keeps showing
+# Bob Work as enabled in Privacy & Security while AXIsProcessTrusted rejects the
+# new executable. Re-sign every local Release with a stable Apple Development
+# identity (or the stable local fallback used by development builds).
+bash "$SCRIPT_DIR/ensure-dev-app.sh" release >/dev/null
+
+node "$SCRIPT_DIR/verify-release-bundle.mjs" "$RELEASE_APP"

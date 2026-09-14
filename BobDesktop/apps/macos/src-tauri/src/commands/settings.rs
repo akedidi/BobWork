@@ -71,8 +71,12 @@ pub async fn update_settings(
         }
         #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         if settings.chrome_control_enabled {
-            // Register Bob Work under Automation (Bob Work → Google Chrome).
-            let _ = crate::macos_permissions::request_chrome_automation();
+            // Register this running app under Automation (this app → Google Chrome).
+            let app = app_handle.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::macos_applescript_bridge::request_chrome_automation_on_main_thread(&app)
+            })
+            .await;
         }
     }
     if previous.computer_use_enabled != settings.computer_use_enabled {
@@ -87,3 +91,4 @@ pub async fn update_settings(
     }
     Ok(())
 }
+

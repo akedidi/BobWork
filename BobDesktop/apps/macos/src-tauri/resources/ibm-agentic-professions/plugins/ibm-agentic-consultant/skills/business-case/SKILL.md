@@ -1,44 +1,52 @@
 ---
 name: business-case
-description: "Évaluer valeur, coût, risque et faisabilité d’une décision."
+description: "Assess value, cost, risk, and feasibility of a decision."
 icon: consultant
 ---
 
 # business-case
 
-Utiliser ce skill pour évaluer valeur, coût, risque et faisabilité d’une décision.
+Use this skill to assess value, cost, risk, and feasibility of a decision.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir scénario de référence et options comparables.
-2. Modéliser bénéfices, coûts complets, délais, capacité et hypothèses.
-3. Calculer métriques pertinentes et sensibilités sans fausse précision.
-4. Intégrer risques, impacts non financiers et conditions de réalisation.
+1. Define a reference scenario and comparable options.
+2. Model benefits, full costs, timelines, capacity, and assumptions.
+3. Calculate relevant metrics and sensitivities without false precision.
+4. Integrate risks, non-financial impacts, and conditions for realization.
 
-## Livrable
+## Deliverable
 
-Business case, modèle d’hypothèses, scénarios et recommandation.
+Business case, assumptions model, scenarios, and recommendation.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Baseline explicite.
-- Bénéfices non doublonnés et propriétaires identifiés.
-- Sensibilités sur hypothèses dominantes.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Explicit baseline.
+- Benefits not double-counted and owners identified.
+- Sensitivities on dominant assumptions.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

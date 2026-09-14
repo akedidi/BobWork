@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the Bob Work main window (prod + test bundle).",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -9,10 +9,49 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
-    "opener:default",
-    "dialog:allow-open",
-    "dialog:allow-save",
+    "core:window:allow-set-badge-count",
+
+    "dialog:default",
     "notification:default",
-    "shell:allow-open"
+    "opener:default",
+    "os:default",
+    "process:default",
+    "shell:allow-open",
+
+    "fs:default",
+    "fs:allow-appdata-meta-recursive",
+    "fs:allow-applocaldata-meta-recursive",
+    "fs:allow-appcache-meta-recursive",
+    "fs:allow-temp-meta-recursive",
+    "fs:allow-desktop-meta-recursive",
+    "fs:allow-document-meta-recursive",
+    "fs:allow-download-meta-recursive",
+    "fs:allow-stat",
+    "fs:allow-exists",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$APPDATA" },
+        { "path": "$APPDATA/**" },
+        { "path": "$APPLOCALDATA" },
+        { "path": "$APPLOCALDATA/**" },
+        { "path": "$APPCACHE" },
+        { "path": "$APPCACHE/**" },
+        { "path": "$TEMP" },
+        { "path": "$TEMP/**" },
+        { "path": "$DESKTOP" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$HOME/.bob" },
+        { "path": "$HOME/.bob/**" },
+        { "path": "$HOME/Library/Application Support/com.bobwork.desktop" },
+        { "path": "$HOME/Library/Application Support/com.bobwork.desktop/**" },
+        { "path": "$HOME/Library/Application Support/com.bobwork.desktop.test" },
+        { "path": "$HOME/Library/Application Support/com.bobwork.desktop.test/**" }
+      ]
+    }
   ]
 }

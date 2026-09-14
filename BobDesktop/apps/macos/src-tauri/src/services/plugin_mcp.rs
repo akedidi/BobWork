@@ -133,6 +133,17 @@ impl PluginMcpService {
         bundle_dir: &Path,
         plugin_enabled: bool,
     ) -> AppResult<Vec<String>> {
+        if plugin_id == "builtin-docling" {
+            // Retire the legacy MCP name from the former `agentic-docling`
+            // alias. Keeping it starts a second server with its obsolete cwd
+            // and can surface its venv/PATH errors instead of the built-in.
+            if configured_names().contains("bw-docling-docling") {
+                let _ = run_bob(
+                    bob_path,
+                    &["mcp", "remove", "bw-docling-docling", "--scope", "global"],
+                );
+            }
+        }
         let servers = self.prepare(plugin_id, manifest, bundle_dir)?;
         let mut installed: Vec<String> = vec![];
         for server in servers {
@@ -299,7 +310,7 @@ impl PluginMcpService {
         let servers = self.prepare(plugin_id, manifest, bundle_dir)?;
         Ok(servers
             .into_iter()
-            .map(|server| probe_prepared_server(&server))
+            .map(|server| probe_prepared_server(&server, None))
             .collect())
     }
 
@@ -446,7 +457,10 @@ fn run_bob(bob_path: &str, args: &[&str]) -> AppResult<()> {
     }))
 }
 
-fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::PluginMcpTestResult {
+fn probe_prepared_server(
+    server: &PreparedServer,
+    probe: Option<(&str, &Value)>,
+) -> crate::models::plugin::PluginMcpTestResult {
     let fail = |message: String| crate::models::plugin::PluginMcpTestResult {
         id: server.id.clone(),
         name: server.display_name.clone(),
@@ -535,13 +549,10 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
         .and_then(Value::as_str)
         .map(Path::new)
         .unwrap_or_else(|| Path::new("."));
-    let mut child = match Command::new(command)
-        .args(&args)
-        .current_dir(cwd)
-        .envs(server_env(&server.config))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", dirs::home_dir().unwrap_or_default())
+    let mut process = Command::new(command);
+    process.args(&args).current_dir(cwd);
+    configure_server_environment(&mut process, &server.config);
+    let mut child = match process
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -569,6 +580,18 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
     {
         let _ = child.kill();
         return fail("Écriture JSON-RPC vers le serveur MCP impossible.".into());
+    }
+    if let Some((tool, arguments)) = probe {
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        });
+        if writeln!(stdin, "{tool_call}").is_err() {
+            let _ = child.kill();
+            return fail("Écriture du test authentifié MCP impossible.".into());
+        }
     }
     drop(stdin);
 
@@ -605,6 +628,7 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
 
     let mut saw_initialize = false;
     let mut tools = Vec::new();
+    let mut authenticated_probe_ok = probe.is_none();
     for line in &lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -630,6 +654,25 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
                 ));
             }
         }
+        if value.get("id").and_then(Value::as_u64) == Some(3) {
+            if value.get("error").is_some()
+                || value.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+            {
+                let message = value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        value
+                            .pointer("/result/content/0/text")
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or("appel authentifié refusé");
+                return fail(format!("Test authentifié MCP en échec : {message}"));
+            }
+            if value.get("result").is_some() {
+                authenticated_probe_ok = true;
+            }
+        }
     }
 
     if !saw_initialize {
@@ -639,12 +682,21 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
             .unwrap_or_else(|| "aucune sortie".into());
         return fail(format!("Pas de réponse initialize valide ({preview})."));
     }
+    if !authenticated_probe_ok {
+        return fail("Le serveur MCP n’a pas répondu au test authentifié.".into());
+    }
 
     crate::models::plugin::PluginMcpTestResult {
         id: server.id.clone(),
         name: server.display_name.clone(),
         ok: true,
-        message: if tools.is_empty() {
+        message: if probe.is_some() {
+            format!(
+                "Connexion MCP authentifiée OK — {} outil(s) : {}.",
+                tools.len(),
+                tools.join(", ")
+            )
+        } else if tools.is_empty() {
             "Connexion MCP OK (initialize).".into()
         } else {
             format!(
@@ -658,18 +710,54 @@ fn probe_prepared_server(server: &PreparedServer) -> crate::models::plugin::Plug
     }
 }
 
-fn server_env(config: &Value) -> Vec<(String, String)> {
+fn server_env_with_lookup(
+    config: &Value,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
     config
         .get("env")
         .and_then(Value::as_object)
         .map(|env| {
             env.iter()
                 .filter_map(|(key, value)| {
-                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                    let text = value.as_str()?;
+                    if let Some(variable) = text
+                        .strip_prefix("${")
+                        .and_then(|value| value.strip_suffix('}'))
+                    {
+                        // Bob Shell uses `${env:NAME}`; Bob Work probes historically
+                        // used `${NAME}`. Accept both so placeholders resolve.
+                        let lookup_name = variable
+                            .strip_prefix("env:")
+                            .unwrap_or(variable);
+                        return lookup(lookup_name).map(|resolved| (key.clone(), resolved));
+                    }
+                    Some((key.clone(), text.to_string()))
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn server_env(config: &Value) -> Vec<(String, String)> {
+    server_env_with_lookup(config, |name| std::env::var(name).ok())
+}
+
+fn configure_server_environment(command: &mut Command, config: &Value) {
+    // Clear the inherited environment first, then add the small allowlist and
+    // connector credentials. Calling env_clear after envs silently deleted all
+    // OAuth tokens before the MCP child started.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", dirs::home_dir().unwrap_or_default())
+        .envs(server_env(config));
+    #[cfg(target_os = "macos")]
+    {
+        for (key, value) in crate::macos_applescript_bridge::identity_env_pairs() {
+            command.env(key, value);
+        }
+    }
 }
 
 fn configured_names() -> std::collections::HashSet<String> {
@@ -725,7 +813,45 @@ pub fn test_workspace_server(
         enabled: server.enabled,
         config: Value::Object(config),
     };
-    probe_prepared_server(&prepared)
+    probe_prepared_server(&prepared, None)
+}
+
+/// Probe a configured workspace MCP and execute one known read-only tool call.
+pub fn test_workspace_server_with_probe(
+    server: &crate::models::workspace::McpServer,
+    tool: &str,
+    arguments: &Value,
+) -> crate::models::plugin::PluginMcpTestResult {
+    let mut config = if let Some(object) = server.raw.as_object() {
+        object.clone()
+    } else {
+        Map::new()
+    };
+    config
+        .entry("command".to_string())
+        .or_insert_with(|| Value::String(server.command_or_url.clone()));
+    if !server.args.is_empty() {
+        config.insert(
+            "args".to_string(),
+            Value::Array(server.args.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    let prepared = PreparedServer {
+        id: server.name.clone(),
+        qualified_name: server.name.clone(),
+        display_name: server.name.clone(),
+        description: None,
+        transport: if server.transport.is_empty() {
+            "stdio".into()
+        } else {
+            server.transport.clone()
+        },
+        tools: vec![],
+        required: false,
+        enabled: server.enabled,
+        config: Value::Object(config),
+    };
+    probe_prepared_server(&prepared, Some((tool, arguments)))
 }
 
 fn resolve_bundle_directory(bundle_dir: &Path, relative: &str) -> AppResult<std::path::PathBuf> {
@@ -954,6 +1080,36 @@ mod tests {
         manifest["mcpServers"]["architecture"]["env"] =
             serde_json::json!({"API_TOKEN": "${CLOUD_API_TOKEN}"});
         assert!(PluginMcpService::validate_schema(&manifest).is_empty());
+    }
+
+    #[test]
+    fn resolves_mcp_environment_placeholders_without_passing_unresolved_literals() {
+        let config = serde_json::json!({
+            "env": {
+                "TOKEN": "${CONNECTED_TOKEN}",
+                "MISSING": "${MISSING_TOKEN}",
+                "MODE": "readonly"
+            }
+        });
+        let env = server_env_with_lookup(&config, |name| {
+            (name == "CONNECTED_TOKEN").then(|| "secret-from-vault".to_string())
+        });
+        assert!(env.contains(&("TOKEN".into(), "secret-from-vault".into())));
+        assert!(env.contains(&("MODE".into(), "readonly".into())));
+        assert!(!env.iter().any(|(key, _)| key == "MISSING"));
+        assert!(!env.iter().any(|(_, value)| value.starts_with("${")));
+    }
+
+    #[test]
+    fn connector_environment_survives_child_process_isolation() {
+        let config = serde_json::json!({"env": {"BOB_WORK_TEST_TOKEN": "present"}});
+        let mut command = Command::new("/usr/bin/env");
+        configure_server_environment(&mut command, &config);
+        let output = command.output().expect("isolated child environment");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout
+            .lines()
+            .any(|line| line == "BOB_WORK_TEST_TOKEN=present"));
     }
 
     #[test]

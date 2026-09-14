@@ -102,6 +102,96 @@ describe('RuntimeStorageCard', () => {
     await waitFor(() => expect(mocks.getRuntimeStorage.mock.calls.length).toBeGreaterThan(refreshCount))
   })
 
+  it('shows a spinning loader while a CLI runtime is installing', async () => {
+    let resolveInstall: (value: unknown) => void = () => {}
+    mocks.installExternalRuntime.mockImplementation(() => new Promise(resolve => {
+      resolveInstall = resolve
+    }))
+    render(<AppDialogProvider><RuntimeStorageCard setStatus={vi.fn()} /></AppDialogProvider>)
+
+    const row = (await screen.findByText('Qiskit Runtime')).closest('.settings-list-row') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Installer le runtime' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Installer le runtime' }))
+
+    await waitFor(() => {
+      expect(within(row).getByRole('status')).toHaveTextContent('Installation du runtime en cours')
+    })
+    expect(row.querySelectorAll('.task-spinner').length).toBeGreaterThan(0)
+    expect(within(row).getByRole('button', { name: 'Installation en cours' })).toBeDisabled()
+    expect(row).toHaveAttribute('aria-busy', 'true')
+
+    resolveInstall({ runtimeId: 'external.qiskit' })
+    await waitFor(() => expect(within(row).queryByRole('status')).not.toBeInTheDocument())
+  })
+
+  it('shows the spinning loader when the backend reports an in-progress install', async () => {
+    const report = await mocks.getRuntimeStorage()
+    mocks.getRuntimeStorage.mockResolvedValue({
+      ...report,
+      runtimes: [{ ...report.runtimes[0], status: 'installing', error: undefined }],
+    })
+    render(<RuntimeStorageCard setStatus={vi.fn()} />)
+
+    const row = (await screen.findByText('Qiskit Runtime')).closest('.settings-list-row') as HTMLElement
+    expect(await within(row).findByRole('status')).toHaveTextContent('Installation du runtime en cours')
+    expect(row.querySelector('.task-spinner')).not.toBeNull()
+    expect(within(row).getByRole('button', { name: 'Installation en cours' })).toBeDisabled()
+  })
+
+  it('does not mark non-installed runtimes with the installed status badge', async () => {
+    render(<RuntimeStorageCard setStatus={vi.fn()} />)
+
+    const row = (await screen.findByText('Qiskit Runtime')).closest('.settings-list-row') as HTMLElement
+    expect(within(row).getByText('Attention requise')).toHaveClass('runtime-status--broken')
+    expect(row.querySelector('.runtime-status--installed')).toBeNull()
+  })
+
+  it('marks only the Installed label green, not the whole row', async () => {
+    const report = await mocks.getRuntimeStorage()
+    mocks.getRuntimeStorage.mockResolvedValue({
+      ...report,
+      runtimes: [{ ...report.runtimes[0], status: 'installed', installedVersion: '2.5.2', error: undefined }],
+    })
+    render(<RuntimeStorageCard setStatus={vi.fn()} />)
+
+    const row = (await screen.findByText('Qiskit Runtime')).closest('.settings-list-row') as HTMLElement
+    expect(row).not.toHaveClass('settings-list-row--installed')
+    expect(within(row).getByText('Installé')).toHaveClass('runtime-status--installed')
+  })
+
+  it('filters the runtime list from the search field', async () => {
+    const report = await mocks.getRuntimeStorage()
+    mocks.getRuntimeStorage.mockResolvedValue({
+      ...report,
+      runtimes: [
+        report.runtimes[0],
+        {
+          ...report.runtimes[0],
+          runtimeId: 'external.docling-cli',
+          name: 'Docling CLI',
+          status: 'installed',
+          installedVersion: '2.123.0',
+          error: undefined,
+        },
+      ],
+    })
+    render(<RuntimeStorageCard setStatus={vi.fn()} />)
+
+    await screen.findByText('Qiskit Runtime')
+    expect(screen.getByText('Docling CLI')).toBeInTheDocument()
+    fireEvent.change(
+      screen.getByRole('searchbox', { name: 'Rechercher un runtime (nom, id, plugin…)' }),
+      { target: { value: 'docling' } },
+    )
+    expect(screen.getByText('Docling CLI')).toBeInTheDocument()
+    expect(screen.queryByText('Qiskit Runtime')).not.toBeInTheDocument()
+    fireEvent.change(
+      screen.getByRole('searchbox', { name: 'Rechercher un runtime (nom, id, plugin…)' }),
+      { target: { value: 'zzz-no-match' } },
+    )
+    expect(screen.getByText('Aucun runtime ne correspond à cette recherche.')).toBeInTheDocument()
+  })
+
   it('removes an installed removable runtime after confirmation', async () => {
     const report = await mocks.getRuntimeStorage()
     mocks.getRuntimeStorage.mockResolvedValue({

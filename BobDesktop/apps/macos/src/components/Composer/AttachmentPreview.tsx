@@ -13,14 +13,19 @@ import { useT } from '../../i18n'
 
 interface Props {
   path: string
+  isDirectory?: boolean
   onRemove: () => void
 }
 
-export default function AttachmentPreview({ path, onRemove }: Props) {
+export default function AttachmentPreview({ path, isDirectory = false, onRemove }: Props) {
   const t = useT()
-  const [isDir, setIsDir] = useState(false)
+  const [isDir, setIsDir] = useState(isDirectory)
   const [size, setSize] = useState<number | null>(null)
   const [previewFailed, setPreviewFailed] = useState(false)
+
+  useEffect(() => {
+    setIsDir(isDirectory)
+  }, [path, isDirectory])
 
   useEffect(() => {
     let cancelled = false
@@ -39,7 +44,7 @@ export default function AttachmentPreview({ path, onRemove }: Props) {
   const name = getFileName(path)
   const kind = getFileVisualKind(path, isDir)
   const isImage = kind === 'image' && !previewFailed
-  const extLabel = getFileTypeLabel(path, isDir)
+  const extLabel = getFileTypeLabel(path) || t('composer.file').toUpperCase()
 
   return (
     <div

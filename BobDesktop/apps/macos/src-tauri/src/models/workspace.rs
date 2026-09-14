@@ -9,6 +9,8 @@ pub struct SearchResult {
     pub title: String,
     pub snippet: String,
     pub score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,15 @@ pub struct Skill {
     /// Filesystem mtime of `SKILL.md`.
     #[serde(default)]
     pub updated_at: String,
+    /// Parent pack slug when this skill lives under `skills/<slug>/SKILL.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_slug: Option<String>,
+    /// Path relative to the parent pack root (e.g. `skills/compliance/SKILL.md`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relative_path: String,
+    /// Nested skills discovered under `skills/*/SKILL.md` (nested skill packs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_skills: Vec<Skill>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +90,21 @@ pub struct SaveMcpServerInput {
     pub env_remove: Vec<String>,
     #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveApiConnectionInput {
+    #[serde(default)]
+    pub original_name: Option<String>,
+    pub name: String,
+    pub url: String,
+    pub auth_mode: String,
+    #[serde(default)]
+    pub auth_name: String,
+    #[serde(default)]
+    pub secret: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

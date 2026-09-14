@@ -4,7 +4,7 @@
 
 **Status:** functional local desktop application for macOS
 
-**Last updated:** 2026-09-07
+**Last updated:** 2026-09-10
 
 Bob Work is a native desktop application that makes **IBM Bob** capabilities available without requiring users to operate the CLI directly. It uses **Bob Shell 2** as its local agent engine for conversations, projects, tasks, schedules, plugins, skills, MCP integrations, and artifacts.
 
@@ -127,6 +127,27 @@ pnpm mac:release
 pnpm mac:dmg
 ```
 
+### Side-by-side test application (Bob Work-test)
+
+Use this when you want a signed Release build that macOS treats as a **different app** from production Bob Work (bundle id, executable name, icons, TCC strings, Automation socket, and data directory are all distinct):
+
+| Field | Bob Work | Bob Work-test |
+|---|---|---|
+| Bundle id | `com.bobwork.desktop` | `com.bobwork.desktop.test` |
+| Executable | `bob-work` | `bob-work-test` |
+| Icons / Info.plist | release set | `icons/test/` + `Info.test.plist` |
+| App data | `…/com.bobwork.desktop/` | `…/com.bobwork.desktop.test/` |
+
+```bash
+pnpm mac:install:test    # incremental rebuild + install + launch (local iteration)
+pnpm mac:release:test    # clean certified Release + install
+pnpm --filter macos run open:test-app
+```
+
+`pnpm mac:install:test` keeps Cargo Release artifacts and only recompiles what changed (typically 1–3 min after a warm cache). `pnpm mac:release:test` still does a clean certified build.
+
+The clean command runs `apps/macos/scripts/release-build-test.sh` (Tauri config `tauri.test.conf.json` with `mainBinaryName: bob-work-test`), then `ensure-test-app.sh` to normalize/sign and copy the bundle into `/Applications`. It is the supported way to certify the latest local changes without overwriting `Bob Work.app`. Identity constants are centralized in `apps/macos/scripts/app-identity.sh` and `apps/macos/src-tauri/src/app_identity.rs`.
+
 Both commands go through `apps/macos/scripts/release-build.sh`. The pipeline:
 
 1. Rejects development and E2E environment flags.
@@ -137,7 +158,7 @@ Both commands go through `apps/macos/scripts/release-build.sh`. The pipeline:
 6. Rejects source maps, debug libraries, E2E symbols, and stale development assets.
 7. Generates `src-tauri/target/release/bob-work-release-manifest.json` with SHA-256 hashes.
 
-Local builds use ad-hoc signing. GitHub releases use Developer ID signing, Apple notarization, and signed updater artifacts when repository secrets are configured. See [docs/release-macos.md](docs/release-macos.md).
+Local Release builds use a stable Apple Development identity when one is available, falling back to Developer ID when configured. The release verifier rejects ad-hoc designated requirements because their changing code identity breaks persisted macOS TCC permissions. GitHub releases use Developer ID signing, Apple notarization, and signed updater artifacts when repository secrets are configured. See [docs/release-macos.md](docs/release-macos.md).
 
 ## Architecture
 
@@ -221,6 +242,8 @@ Sandbox mode restricts terminal and filesystem operations to the authorized work
 ## Plugins, tools, and runtimes
 
 A **plugin** packages a user-facing capability, allowed tools, and operational instructions. A **skill** defines a reusable working method. An **MCP server** exposes callable operations. A **runtime** provides the executables and libraries required to execute those operations.
+
+Built-in ownership is explicit. Native plugin deployments write built-in markers; personal plugins and standalone personal skills remain removable and appear under the personal sections of the UI. A personal plugin may declare one or more companion skills in its manifest. Its prompt mention uses the manifest slug, for example `@plugin:bonjour-simple`; legacy internal identifiers such as `agentic-bonjour-simple` remain accepted so existing conversations keep working. A standalone personal skill consists of a `SKILL.md` under `~/.bob/skills/<slug>/` and does not require a plugin manifest.
 
 ```text
 ┌──────────────┐   capability selection   ┌────────────────────┐
@@ -483,6 +506,7 @@ See [docs/security-model.md](docs/security-model.md), [docs/keychain-security.md
 | [docs/terminal-sandbox.md](docs/architecture/terminal-sandbox.md) | Terminal isolation model |
 | [docs/computer-use-autonomous.md](docs/architecture/computer-use-autonomous.md) | Autonomous Computer Use loop |
 | [docs/persistent-memory-feature.md](docs/architecture/persistent-memory-feature.md) | Persistent memory design |
+| [docs/shared-document-runtimes.md](docs/shared-document-runtimes.md) | Shared LaTeX, Pandoc, and PDF preview runtimes |
 | [docs/release-macos.md](docs/release-macos.md) | Signing, notarization, and updates |
 | [docs/test-report.md](docs/test-report.md) | Test report |
 | [docs/limitations.md](docs/limitations.md) | Current guarantees and limitations |
@@ -490,7 +514,7 @@ See [docs/security-model.md](docs/security-model.md), [docs/keychain-security.md
 ## Known limitations
 
 - The packaged desktop application currently targets macOS, with Apple Silicon DMG as the primary distribution.
-- Local builds use ad-hoc signing; GitHub releases require configured Apple signing and notarization secrets.
+- Local Release builds require a stable Apple Development or Developer ID identity for persistent macOS permissions; public GitHub releases additionally require Developer ID signing and notarization secrets.
 - Web, Computer Use, Chrome, and remote capabilities depend on Bob Shell, connector availability, and macOS permissions.
 - Closing the main window does not quit the application; the tray keeps the scheduler running.
 - Sandbox mode restricts local filesystem/process scope but does not isolate the network.
@@ -514,3 +538,4 @@ To be defined. This prototype and IBM Bob integration must be used according to 
 | 0.1.4 | 2026-08-11 | Platform, installation, architecture, stack, tests, and CI refresh |
 | Unified repository | 2026-09-06 | Moved under `BobDesktop/` and documented runtime and execution boundaries |
 | English documentation | 2026-09-07 | Standardized every GitHub README in English |
+| Personal capabilities and native documents | 2026-09-10 | Documented personal plugin/skill identity, stable local signing, and shared LaTeX, Pandoc, and PDF runtimes |

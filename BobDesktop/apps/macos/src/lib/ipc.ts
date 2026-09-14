@@ -30,6 +30,7 @@ import type {
   AppSettings,
   MacosChromeControlStatus,
   MacosComputerUseStatus,
+  OrcaCliStatus,
   BobDetectionResult,
   CapabilityInfo,
   BobAuthSnapshot,
@@ -45,6 +46,7 @@ import type {
   SaveSkillInput,
   McpServer,
   SaveMcpServerInput,
+  SaveApiConnectionInput,
   PermissionGrant,
   UsageStatus,
   BobalyticsReport,
@@ -101,6 +103,7 @@ export const sendMessage = (params: {
   attachmentPaths?: string[];
   resumeTaskId?: string;
   approvedPluginIds?: string[];
+  taskApproval?: import('@bob-work/shared-types').TaskApprovalSettings;
 }) => invoke<{ sessionId: string; taskId: string; userMessageId: string; awaitingApproval?: boolean; contextCondensed?: boolean }>('send_message', {
   conversationId: params.conversationId,
   message: params.message,
@@ -109,6 +112,7 @@ export const sendMessage = (params: {
   attachmentPaths: params.attachmentPaths,
   resumeTaskId: params.resumeTaskId,
   approvedPluginIds: params.approvedPluginIds,
+  taskApproval: params.taskApproval,
 });
 
 export const stopTask = (sessionId: string) =>
@@ -136,13 +140,16 @@ export const archiveProject = (id: string, archived: boolean) =>
 export const getConversations = (projectId?: string) =>
   invoke<Conversation[]>('get_conversations', { projectId });
 
+export const getArchivedConversations = (projectId?: string) =>
+  invoke<Conversation[]>('get_archived_conversations', { projectId });
+
 export const getConversation = (id: string) =>
   invoke<Conversation | null>('get_conversation', { id });
 
 export const createConversation = (input: CreateConversationInput) =>
   invoke<Conversation>('create_conversation', { input });
 
-export const updateConversation = (id: string, params: { title?: string; pinned?: boolean; archived?: boolean; projectId?: string }) =>
+export const updateConversation = (id: string, params: { title?: string; pinned?: boolean; archived?: boolean; projectId?: string; bobMode?: string }) =>
   invoke<void>('update_conversation', { id, ...params });
 
 export const deleteConversation = (id: string) =>
@@ -170,6 +177,9 @@ export const rewindConversationFromMessage = (conversationId: string, messageId:
 
 export const importConversations = (path: string) =>
   invoke<ConversationTransferSummary>('import_conversations', { path });
+
+export const importConversationsFromBackup = (path: string) =>
+  invoke<ConversationTransferSummary>('import_conversations_from_backup', { path });
 
 export type ConversationExportFormat = 'bob-work-export-v1' | 'chatgpt' | 'claude-cowork';
 
@@ -253,6 +263,9 @@ export const getChromeControlStatus = () =>
 
 export const getComputerUseStatus = () =>
   invoke<MacosComputerUseStatus>('get_computer_use_status');
+
+export const getOrcaCliStatus = () =>
+  invoke<OrcaCliStatus>('get_orca_cli_status');
 
 // ── Task Commands ─────────────────────────────────────────────
 
@@ -455,7 +468,7 @@ export const restartRemoteControl = () =>
 // ── System Commands ───────────────────────────────────────────
 
 export const getAppInfo = () =>
-  invoke<{ appVersion: string; tauriVersion: string; os: string; arch: string; dataDir: string; logDir: string }>('get_app_info');
+  invoke<{ appName: string; appVersion: string; tauriVersion: string; os: string; arch: string; dataDir: string; logDir: string }>('get_app_info');
 
 export const openDataDir = () => invoke<void>('open_data_dir');
 
@@ -474,6 +487,9 @@ export const listDatabaseBackups = () =>
 
 export const restoreDatabaseBackup = (name: string) =>
   invoke<void>('restore_database_backup', { name })
+
+export const exportDatabaseBackup = (name: string, destination: string) =>
+  invoke<void>('export_database_backup', { name, destination })
 
 export type CachePurgeResult = {
   freedBytes: number
@@ -600,7 +616,7 @@ export const installBuiltinIntegration = (integrationId: string) =>
 export interface IntegrationConnectionStatus {
   integrationId: string;
   connected: boolean;
-  authMethod?: 'oauth' | 'token' | null;
+  authMethod?: 'oauth' | 'token' | 'ssh' | null;
   accountLabel?: string | null;
   expiresAt?: string | null;
   oauthClientConfigured: boolean;
@@ -654,6 +670,15 @@ export const connectIntegrationToken = (
     accountLabel,
   });
 
+export const connectIntegrationSsh = (
+  integrationId: string,
+  accountLabel?: string,
+) =>
+  invoke<IntegrationConnectionStatus>('connect_integration_ssh', {
+    integrationId,
+    accountLabel,
+  });
+
 export const e2eConnectIntegration = (
   integrationId: string,
   accessToken: string,
@@ -676,6 +701,9 @@ export const testMcpServer = (name: string) =>
 
 export const saveMcpServer = (input: SaveMcpServerInput) =>
   invoke<void>('save_mcp_server', { input });
+
+export const saveApiConnection = (input: SaveApiConnectionInput) =>
+  invoke<void>('save_api_connection', { input });
 
 export const setMcpServerEnabled = (name: string, enabled: boolean) =>
   invoke<void>('set_mcp_server_enabled', { name, enabled });
@@ -754,11 +782,18 @@ export const readHtmlPreview = (path: string) =>
 
 export const prepareFittedHtmlPreview = (sourcePath: string, html: string) =>
   invoke<string>('prepare_fitted_html_preview', { sourcePath, html });
+export const openExternalHtmlPreview = (sourcePath: string, html: string) =>
+  invoke<void>('open_external_html_preview', { sourcePath, html });
 export const getLivePreviewRevision = (path: string) => invoke<string>('get_live_preview_revision', { path });
 export const exportLiveCanvasZip = (sourcePath: string, destination: string) => invoke<void>('export_live_canvas_zip', { sourcePath, destination });
 
+export interface ComposerAttachmentGrant {
+  path: string;
+  isDirectory: boolean;
+}
+
 export const allowComposerAttachments = (paths: string[]) =>
-  invoke<string[]>('allow_composer_attachments', { paths });
+  invoke<ComposerAttachmentGrant[]>('allow_composer_attachments', { paths });
 
 export const startNativeAudioRecording = () =>
   invoke<void>('start_native_audio_recording');
@@ -786,3 +821,7 @@ export const openPreviewResource = (target: string) =>
 
 export const revealInFileManager = (path: string) =>
   invoke<void>('reveal_in_file_manager', { path });
+
+/** Convert through Bob Work's shared LaTeX/Pandoc runtimes. The output must be new. */
+export const convertDocument = (sourcePath: string, outputPath: string): Promise<string> =>
+  invoke('convert_document', { input: { sourcePath, outputPath } })

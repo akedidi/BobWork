@@ -116,15 +116,9 @@ pub async fn get_plugins(
     runtime_manager: State<'_, RuntimeManager>,
 ) -> Result<Vec<Plugin>, AppError> {
     let service = PluginService::new();
-    // Apply any staged built-in package bumps (e.g. 1.0 → 1.1) so the Plugins
-    // screen does not stay stuck on "Prête à être installée".
-    if let Err(error) = service.ensure_builtin_plugins(&db) {
-        tracing::warn!("Unable to refresh built-in plugins: {:?}", error);
-    }
-    service.sync_agentic_bundles(&db)?;
-    // Do not reconcile Bob MCP on list — each `bob mcp add-json` used to block
-    // the Plugins screen for ~1s per plugin (and forever when workspace-scoped
-    // mcp.json was missing). MCP is synced on install / toggle / version switch.
+    // Listing must stay cheap: built-in/agentic sync runs in bob-startup-refresh
+    // and on install/toggle/version switch. Re-running ensure here blocked the
+    // Plugins screen and Composer on every mount.
     let plugins = service.get_all(&db)?;
     for plugin in &plugins {
         register_runtime_requirements(&runtime_manager, &db, plugin)?;
@@ -134,7 +128,7 @@ pub async fn get_plugins(
 
 #[tauri::command]
 pub async fn get_plugin(id: String, db: State<'_, Database>) -> Result<Option<Plugin>, AppError> {
-    PluginService::new().get_by_id(&db, &id)
+    PluginService::new().get_by_reference(&db, &id)
 }
 
 #[tauri::command]
@@ -175,13 +169,17 @@ pub async fn install_plugin_update(
 
 #[tauri::command]
 pub async fn rollback_plugin_version(
-    plugin_id: String,
-    version: String,
-    db: State<'_, Database>,
-    bob_service: State<'_, BobService>,
-    runtime_manager: State<'_, RuntimeManager>,
+    _plugin_id: String,
+    _version: String,
+    _db: State<'_, Database>,
+    _bob_service: State<'_, BobService>,
+    _runtime_manager: State<'_, RuntimeManager>,
 ) -> Result<Plugin, AppError> {
-    switch_plugin_version(&db, &bob_service, &runtime_manager, &plugin_id, &version)
+    Err(AppError::ValidationFailed(
+        "Bob Work ne conserve plus les anciennes versions de plugins. \
+         Seule une mise à jour vers une version plus récente est possible."
+            .into(),
+    ))
 }
 
 #[tauri::command]

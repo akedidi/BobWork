@@ -96,11 +96,16 @@ pub async fn start_integration_oauth(
     app_handle: AppHandle,
     integration_id: String,
 ) -> Result<OAuthStartResult, AppError> {
+    if integration_id == "monday" {
+        return Err(AppError::ValidationFailed(
+            "Monday.com utilise un jeton API personnel. Collez votre Personal API Token depuis la carte d’intégration.".into(),
+        ));
+    }
     let provider = IntegrationOAuthService::provider_for(&integration_id)
         .ok_or_else(|| AppError::ValidationFailed("Intégration OAuth inconnue.".into()))?;
     let oauth = IntegrationOAuthService::new();
 
-    // Prefer web authorize + PKCE (ChatGPT-style). Slack / Microsoft: public
+    // Prefer web authorize + PKCE. Slack / Microsoft: public
     // Client ID. Monday MCP: Dynamic Client Registration + PKCE on
     // mcp.monday.com (no Developer Center secret). GitHub web still needs a secret.
     let web_ready = match oauth.get_client_config(provider)? {
@@ -130,7 +135,7 @@ pub async fn start_integration_oauth(
     // No Bob Work Client ID yet: open the provider console so the user can
     // create the public app once. Slack has no DCR (unlike Monday) — after the
     // app exists, the UI asks for the Client ID once, then every later Connect
-    // opens slack.com/oauth/v2/authorize like ChatGPT.
+    // opens slack.com/oauth/v2/authorize with PKCE.
     if let Some(setup_url) = crate::services::integration_catalog::provider_setup_url(provider) {
         open::that(&setup_url).map_err(|error| AppError::Io(error.to_string()))?;
         return Ok(OAuthStartResult {
@@ -287,6 +292,43 @@ pub async fn disconnect_integration(
         )?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_integration_ssh(
+    app_handle: AppHandle,
+    integration_id: String,
+    account_label: Option<String>,
+    bob_service: State<'_, BobService>,
+) -> Result<IntegrationConnectionStatus, AppError> {
+    if integration_id != "github" {
+        return Err(AppError::ValidationFailed(
+            "La connexion SSH n’est disponible que pour GitHub.".into(),
+        ));
+    }
+    let auth = crate::services::github_ssh::probe_github_ssh_auth()?;
+    let oauth = IntegrationOAuthService::new();
+    oauth.store_github_ssh_connection(
+        &auth.username,
+        &auth.gh_token,
+        account_label.as_deref(),
+    )?;
+    if let Some(secret_id) = legacy_secret_id(&integration_id) {
+        bob_service.set_session_secret(secret_id, auth.gh_token)?;
+    }
+    WorkspaceService::new().install_builtin_integration(&integration_id)?;
+    if let Some(bob_path) = bob_service.get_binary_path() {
+        IntegrationMcpService::new().sync_for_integration(
+            &bob_path,
+            &integration_id,
+            &oauth,
+            false,
+        )?;
+    }
+    let status = oauth.connection_status(&integration_id, false);
+    focus_main_window(&app_handle);
+    let _ = app_handle.emit("integration-oauth-done", &status);
+    Ok(status)
 }
 
 #[tauri::command]

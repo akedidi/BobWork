@@ -401,7 +401,17 @@ impl PluginExtensionService {
                 let (state, message) = if !enabled_in_settings {
                     (
                         "disabled".into(),
-                        "Cette capacité est désactivée dans les réglages de Bob Work.".into(),
+                        match capability.as_str() {
+                            "computer_use" => {
+                                "Réglages → Accès et contrôle : activez « Contrôle de l’ordinateur » (Contrôle bureau macOS) avant toute configuration MCP ou Accessibilité.".into()
+                            }
+                            "chrome" => {
+                                "Réglages → Accès et contrôle : activez « Contrôle Chrome » avant toute configuration MCP ou Automatisation.".into()
+                            }
+                            _ => {
+                                "Cette capacité est désactivée dans Réglages → Accès et contrôle.".into()
+                            }
+                        },
                     )
                 } else if !mcp_ready {
                     (
@@ -538,7 +548,7 @@ impl PluginExtensionService {
             let (state, message, setup_hint) = match kind.as_str() {
                 "api-public" => (
                     "ready".into(),
-                    "Prêt · API publique, aucune clé requise.".into(),
+                    "Ready · Public API, no key required.".into(),
                     None,
                 ),
                 "api-key" => {
@@ -631,7 +641,52 @@ impl PluginExtensionService {
                         ("needs_setup".into(), "MCP à configurer.".into(), None)
                     }
                 }
-                "stdio-cli" | "bundled-bin" | "shell" | "node-cli" => {
+                "bundled-python" => {
+                    let notes = resource.get("notes").and_then(Value::as_str).unwrap_or("");
+                    let script = resource.get("script").and_then(Value::as_str);
+                    if crate::services::plugin_local_runtime::host_runtime_available("python3") {
+                        let message = if !notes.is_empty() {
+                            notes.to_string()
+                        } else if let Some(script) = script {
+                            format!("Bundled Python script: {script}.")
+                        } else {
+                            "Bundled Python script in the plugin.".into()
+                        };
+                        ("ready".into(), message, None)
+                    } else if optional {
+                        (
+                            "inactive".into(),
+                            "Python 3.10+ missing — bundled scripts unavailable.".into(),
+                            Some(
+                                "Install Python 3 (python.org or `brew install python`).".into(),
+                            ),
+                        )
+                    } else {
+                        (
+                            "needs_setup".into(),
+                            "Python 3.10+ required to run bundled scripts.".into(),
+                            Some(
+                                "Install Python 3 (python.org or `brew install python`).".into(),
+                            ),
+                        )
+                    }
+                }
+                "bundled-assets" => {
+                    let notes = resource
+                        .get("notes")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Indexed bundled assets in the plugin.");
+                    ("ready".into(), notes.to_string(), None)
+                }
+                "shared-runtime" => {
+                    let runtime_id = resource
+                        .get("runtimeId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("shared.diagram");
+                    let notes = resource.get("notes").and_then(Value::as_str).unwrap_or("");
+                    shared_runtime_resource_status(db, runtime_id, notes, optional)
+                }
+                "stdio-cli" | "bundled-bin" | "shell" | "node-cli" | "host-cli" => {
                     let plugin_name = manifest
                         .get("name")
                         .and_then(Value::as_str)
@@ -648,14 +703,14 @@ impl PluginExtensionService {
                     if bob_ready {
                         (
                             "always_on".into(),
-                            "Bob Shell détecté — synthèse via le LLM Bob.".into(),
+                            "Bob Shell detected — synthesis via Bob LLM.".into(),
                             None,
                         )
                     } else {
                         (
                             "needs_setup".into(),
-                            "Bob Shell introuvable pour la synthèse.".into(),
-                            Some("Installez / connectez Bob Shell dans Réglages.".into()),
+                            "Bob Shell not found for synthesis.".into(),
+                            Some("Install or connect Bob Shell in Settings.".into()),
                         )
                     }
                 }
@@ -663,20 +718,20 @@ impl PluginExtensionService {
                     if settings.web_enabled {
                         (
                             "ready".into(),
-                            "Accès web activé dans Réglages.".into(),
+                            "Web access enabled in Settings.".into(),
                             None,
                         )
                     } else if optional {
                         (
                             "inactive".into(),
-                            "Accès web désactivé.".into(),
-                            Some("Activez Accès web dans Réglages → Accès et contrôle.".into()),
+                            "Web access disabled.".into(),
+                            Some("Enable Web access in Settings → Access & control.".into()),
                         )
                     } else {
                         (
                             "needs_setup".into(),
-                            "Accès web requis mais désactivé.".into(),
-                            Some("Activez Accès web dans Réglages.".into()),
+                            "Web access required but disabled.".into(),
+                            Some("Enable Web access in Settings.".into()),
                         )
                     }
                 }
@@ -1150,6 +1205,56 @@ fn env_var_present(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn shared_runtime_resource_status(
+    db: &Database,
+    runtime_id: &str,
+    notes: &str,
+    optional: bool,
+) -> (String, String, Option<String>) {
+    let status: Option<String> = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM runtime_registry WHERE runtime_id = ?1",
+            rusqlite::params![runtime_id],
+            |row| row.get(0),
+        )
+        .ok();
+    let detail = if notes.is_empty() {
+        format!("Runtime partagé `{runtime_id}`.")
+    } else {
+        notes.to_string()
+    };
+    let settings_hint = Some(
+        "Installez ou mettez à jour le runtime dans Réglages → Données locales → Runtimes."
+            .into(),
+    );
+    match status.as_deref() {
+        Some("installed") => ("ready".into(), detail, None),
+        Some("installing") | Some("updating") => (
+            "needs_setup".into(),
+            "Installation du runtime partagé en cours.".into(),
+            settings_hint,
+        ),
+        Some("broken") => (
+            "needs_setup".into(),
+            format!("Runtime partagé en erreur — {detail}"),
+            settings_hint,
+        ),
+        _ if optional => (
+            "inactive".into(),
+            format!("Non installé — {detail}"),
+            settings_hint,
+        ),
+        _ => (
+            "needs_setup".into(),
+            format!("Runtime partagé requis non installé — {detail}"),
+            settings_hint,
+        ),
+    }
 }
 
 fn resource_https_url(resource: &Value) -> Option<String> {

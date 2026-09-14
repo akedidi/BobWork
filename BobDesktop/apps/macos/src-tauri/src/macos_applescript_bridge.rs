@@ -8,8 +8,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+static POINTER_POSITION: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+static POINTER_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Hide the ghost pointer only after this many milliseconds without a new action.
+const POINTER_IDLE_HIDE_MS: u64 = 12_000;
+/// Below this distance (logical px), snap instantly — UI micro-adjustments feel immediate.
+const POINTER_SNAP_DISTANCE: f64 = 48.0;
 
 #[derive(Debug, Clone, Deserialize)]
 struct BridgeRequest {
@@ -39,6 +45,11 @@ struct BridgeRequest {
     summary: Option<String>,
     risk_level: Option<String>,
     task_id: Option<String>,
+    preserve_frontmost: Option<bool>,
+    instant: Option<bool>,
+    output_path: Option<String>,
+    window_id: Option<String>,
+    region: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +57,14 @@ struct BridgeResponse {
     ok: bool,
     stdout: String,
     stderr: String,
+}
+
+pub fn socket_file_name_for_bundle(bundle_id: &str) -> &'static str {
+    if bundle_id == crate::app_identity::TEST_IDENTIFIER || bundle_id.ends_with(".test") {
+        "applescript-test.sock"
+    } else {
+        "applescript.sock"
+    }
 }
 
 pub fn socket_path() -> PathBuf {
@@ -56,11 +75,64 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".bob")
         .join("run")
-        .join("applescript.sock")
+        .join(socket_file_name_for_bundle(
+            &crate::app_identity::bundle_identifier(),
+        ))
 }
 
 pub fn socket_path_string() -> String {
     socket_path().to_string_lossy().into_owned()
+}
+
+/// Identity of the running GUI process so MCP children talk to this app's bridge,
+/// not whichever Bob Work last wrote `~/.bob/settings/mcp.json`.
+pub fn identity_env_pairs() -> Vec<(String, String)> {
+    let mut pairs = crate::app_identity::runtime_identity_env();
+    pairs.push((
+        "BOB_WORK_APPLESCRIPT_SOCKET".into(),
+        socket_path_string(),
+    ));
+    pairs
+}
+
+/// Apple Event from this GUI process on the main thread so Automation lists
+/// the running app (Bob Work vs Bob Work-test), not a background helper.
+pub fn request_chrome_automation_on_main_thread(app: &AppHandle) -> Result<(), String> {
+    if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
+        return Err("Google Chrome n’est pas installé.".into());
+    }
+    let (sender, receiver) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let consent = crate::macos_permissions::request_chrome_automation_consent(true);
+        let result = match consent {
+            Ok(()) => crate::macos_permissions::run_applescript(
+                crate::macos_permissions::CHROME_AUTOMATION_SCRIPT,
+            )
+            .map(|_| ()),
+            Err(error) => Err(error),
+        };
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Impossible de planifier Automatisation Chrome : {error}"))?;
+    receiver
+        .recv_timeout(Duration::from_secs(60))
+        .map_err(|_| "Automatisation Chrome n’a pas répondu dans les 60 secondes.".to_string())?
+}
+
+pub fn probe_chrome_automation_on_main_thread(
+    app: &AppHandle,
+    app_name: &str,
+) -> (String, String) {
+    if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
+        return (
+            "chrome_missing".into(),
+            "Installez Google Chrome pour utiliser le contrôle navigateur.".into(),
+        );
+    }
+    crate::macos_permissions::classify_chrome_automation(
+        app_name,
+        request_chrome_automation_on_main_thread(app),
+    )
 }
 
 /// Start the bridge once (idempotent). Safe to call from Tauri setup.
@@ -84,8 +156,9 @@ fn serve_forever(app: AppHandle) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // A second Bob Work instance must never unlink the live bridge owned by the
-    // first one. That left the first process running with an unreachable socket.
+    // A second instance of the *same* app must never unlink the live bridge.
+    // Bob Work and Bob Work-test use distinct sockets so Automation TCC
+    // attaches to the app that actually sent the Apple Event.
     if path.exists() {
         if UnixStream::connect(&path).is_ok() {
             tracing::info!(
@@ -139,8 +212,10 @@ fn handle_client(stream: UnixStream, app: &AppHandle) -> Result<(), String> {
     let request: BridgeRequest = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
     let result = if request.action.as_deref() == Some("authorize") {
         authorize_computer_action(app, &request)
+    } else if request.action.as_deref() == Some("screencapture") {
+        run_screencapture(&request)
     } else if let Some(script) = request.script.clone() {
-        run_applescript_on_main_thread(app, script)
+        run_applescript_on_main_thread(app, script, request.preserve_frontmost.unwrap_or(true))
     } else {
         run_native_input_on_main_thread(app, request)
     };
@@ -287,38 +362,110 @@ fn run_native_input_on_main_thread(
     app: &AppHandle,
     request: BridgeRequest,
 ) -> Result<String, String> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let app_handle = app.clone();
-    app.run_on_main_thread(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_native_input(&app_handle, &request)
-        }))
-        .unwrap_or_else(|_| Err("Le contrôle natif macOS a rencontré une erreur interne.".into()));
-        let _ = sender.send(result);
-    })
-    .map_err(|error| format!("Impossible de planifier l’action native : {error}"))?;
-    receiver
-        .recv_timeout(Duration::from_secs(30))
-        .map_err(|_| "L’action native macOS n’a pas répondu dans les 30 secondes.".to_string())?
+    // Native CGEvent input and pointer animation are safe off the UI thread.
+    // Keeping this work on the bridge worker lets WebKit/macOS repaint every
+    // intermediate pointer position instead of showing only the final frame.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_native_input(app, &request)
+    }))
+    .unwrap_or_else(|_| Err("Le contrôle natif macOS a rencontré une erreur interne.".into()))
 }
 
-fn show_bob_pointer(app: &AppHandle, x: f64, y: f64, click: bool) {
-    let Some(pointer) = app.get_webview_window("bob-pointer") else {
-        return;
-    };
-    let _ = pointer.set_position(tauri::PhysicalPosition::new(
-        (x - 14.0).round() as i32,
-        (y - 12.0).round() as i32,
-    ));
-    let _ = pointer.show();
-    if click {
-        let _ = pointer.eval("window.bobPointerClick && window.bobPointerClick()");
+fn store_pointer_position(x: f64, y: f64) {
+    if let Ok(mut position) = POINTER_POSITION.lock() {
+        *position = Some((x, y));
     }
-    let delayed = pointer.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(if click { 850 } else { 500 }));
-        let _ = delayed.hide();
+}
+
+fn current_pointer_position() -> Option<(f64, f64)> {
+    POINTER_POSITION.lock().ok().and_then(|position| *position)
+}
+
+fn pointer_generation_active(generation: u64) -> bool {
+    POINTER_GENERATION.load(Ordering::SeqCst) == generation
+}
+
+fn update_bob_pointer(app: &AppHandle, x: f64, y: f64, show: bool, click: bool, retarget: bool) {
+    store_pointer_position(x, y);
+    let dispatcher = app.clone();
+    let window_app = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        let Some(pointer) = window_app.get_webview_window("bob-pointer") else {
+            return;
+        };
+        // CGEvent coordinates are expressed in macOS logical points. Using a
+        // logical Tauri position keeps the visible pointer aligned on Retina
+        // and non-Retina displays alike.
+        let _ = pointer.set_position(tauri::LogicalPosition::new(x, y));
+        if show {
+            let _ = pointer.show();
+        }
+        if retarget {
+            let _ = pointer.eval("window.bobPointerRetarget && window.bobPointerRetarget()");
+        }
+        if click {
+            let _ = pointer.eval("window.bobPointerClick && window.bobPointerClick()");
+        }
     });
+}
+
+fn hide_bob_pointer(app: &AppHandle) {
+    let dispatcher = app.clone();
+    let window_app = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        if let Some(pointer) = window_app.get_webview_window("bob-pointer") {
+            let _ = pointer.hide();
+        }
+    });
+}
+
+fn schedule_pointer_idle_hide(app: &AppHandle, generation: u64) {
+    let delayed_app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(POINTER_IDLE_HIDE_MS));
+        if POINTER_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        hide_bob_pointer(&delayed_app);
+    });
+}
+
+fn show_bob_pointer(app: &AppHandle, x: f64, y: f64, click: bool, instant: bool) {
+    if app.get_webview_window("bob-pointer").is_none() {
+        return;
+    }
+    let target = (x - 14.0, y - 12.0);
+    let generation = POINTER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let start = current_pointer_position();
+
+    let distance = start
+        .map(|(sx, sy)| ((target.0 - sx).powi(2) + (target.1 - sy).powi(2)).sqrt())
+        .unwrap_or(f64::INFINITY);
+    let snap = instant || distance <= POINTER_SNAP_DISTANCE;
+
+    if let Some((sx, sy)) = start {
+        if !snap {
+            update_bob_pointer(app, sx, sy, true, false, false);
+            let steps = ((distance / 80.0).ceil() as u32).clamp(2, 7);
+            for step in 1..=steps {
+                if !pointer_generation_active(generation) {
+                    return;
+                }
+                let progress = step as f64 / steps as f64;
+                let eased = 1.0 - (1.0 - progress).powi(3);
+                let current_x = sx + (target.0 - sx) * eased;
+                let current_y = sy + (target.1 - sy) * eased;
+                update_bob_pointer(app, current_x, current_y, true, false, false);
+                thread::sleep(Duration::from_millis(6));
+            }
+        }
+    }
+
+    if !pointer_generation_active(generation) {
+        return;
+    }
+    update_bob_pointer(app, target.0, target.1, true, click, snap);
+    schedule_pointer_idle_hide(app, generation);
 }
 
 fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, String> {
@@ -329,7 +476,8 @@ fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, 
     use core_graphics::geometry::CGPoint;
 
     if !crate::macos_permissions::accessibility_trusted() {
-        return Err("Bob Work n’est pas autorisé dans Accessibilité.".into());
+        let app_name = crate::app_identity::app_display_name();
+        return Err(format!("{app_name} n’est pas autorisé dans Accessibilité."));
     }
     let source = || {
         CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -339,7 +487,7 @@ fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, 
         Some("status") => Ok("accessibility granted".into()),
         Some("click") => {
             let point = CGPoint::new(request.x.unwrap_or(0.0), request.y.unwrap_or(0.0));
-            show_bob_pointer(app, point.x, point.y, true);
+            show_bob_pointer(app, point.x, point.y, true, false);
             thread::sleep(Duration::from_millis(120));
             let right = request.button.as_deref() == Some("right");
             let button = if right {
@@ -374,8 +522,14 @@ fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, 
                 request.x.unwrap_or(0.0),
                 request.y.unwrap_or(0.0),
                 request.clicks.unwrap_or(0) > 0,
+                request.instant.unwrap_or(false),
             );
             Ok("indicated".into())
+        }
+        Some("pointer_hide") => {
+            POINTER_GENERATION.fetch_add(1, Ordering::SeqCst);
+            hide_bob_pointer(app);
+            Ok("pointer hidden".into())
         }
         Some("scroll") => {
             let delta_y = request.delta_y.unwrap_or(0).clamp(-1200, 1200);
@@ -391,20 +545,28 @@ fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, 
             .map_err(|_| "Impossible de créer le défilement macOS.".to_string())?;
             if let (Some(x), Some(y)) = (request.x, request.y) {
                 event.set_location(CGPoint::new(x, y));
-                show_bob_pointer(app, x, y, false);
+                show_bob_pointer(app, x, y, false, false);
             }
             event.post(CGEventTapLocation::HID);
             Ok("scrolled".into())
         }
         Some("type") => {
             let text = request.text.as_deref().unwrap_or("");
-            let down = CGEvent::new_keyboard_event(source()?, 0, true)
-                .map_err(|_| "Impossible de créer la saisie macOS.".to_string())?;
-            down.set_string(text);
-            down.post(CGEventTapLocation::HID);
-            CGEvent::new_keyboard_event(source()?, 0, false)
-                .map_err(|_| "Impossible de terminer la saisie macOS.".to_string())?
-                .post(CGEventTapLocation::HID);
+            // Some native apps (notably Calculator) consume only the first
+            // character when a whole string is attached to one keyboard event.
+            // Emit a complete key-down/key-up pair per Unicode scalar instead.
+            for character in text.chars() {
+                let value = character.to_string();
+                let down = CGEvent::new_keyboard_event(source()?, 0, true)
+                    .map_err(|_| "Impossible de créer la saisie macOS.".to_string())?;
+                down.set_string(&value);
+                down.post(CGEventTapLocation::HID);
+                let up = CGEvent::new_keyboard_event(source()?, 0, false)
+                    .map_err(|_| "Impossible de terminer la saisie macOS.".to_string())?;
+                up.set_string(&value);
+                up.post(CGEventTapLocation::HID);
+                thread::sleep(Duration::from_millis(12));
+            }
             Ok("typed".into())
         }
         Some("key") => {
@@ -436,10 +598,103 @@ fn run_native_input(app: &AppHandle, request: &BridgeRequest) -> Result<String, 
     }
 }
 
-fn run_applescript_on_main_thread(app: &AppHandle, script: String) -> Result<String, String> {
+/// Spawn `/usr/sbin/screencapture` from this GUI process so Screen Recording
+/// TCC lists Bob Work / Bob Work-test, never python3.
+fn run_screencapture(request: &BridgeRequest) -> Result<String, String> {
+    let output = request
+        .output_path
+        .as_deref()
+        .or(request.text.as_deref())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "Chemin de capture manquant.".to_string())?;
+    let executable = "/usr/sbin/screencapture";
+    if !std::path::Path::new(executable).exists() {
+        return Err("screencapture_unavailable".into());
+    }
+    let mut command = std::process::Command::new(executable);
+    command.arg("-x");
+    if let Some(format) = request.operation.as_deref() {
+        if matches!(format, "png" | "jpg" | "jpeg" | "pdf") {
+            command.arg("-t").arg(format);
+        }
+    }
+    if let Some(region) = request.region.as_deref().filter(|value| !value.is_empty()) {
+        command.arg("-o");
+        command.arg(format!("-R{region}"));
+    } else if let Some(window_id) = request
+        .window_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("-l").arg(window_id);
+    }
+    command.arg(output);
+    let completed = command
+        .output()
+        .map_err(|error| format!("screencapture: {error}"))?;
+    if !completed.status.success() {
+        let stderr = String::from_utf8_lossy(&completed.stderr);
+        let stdout = String::from_utf8_lossy(&completed.stdout);
+        let message = stderr.trim();
+        if message.is_empty() {
+            return Err(if stdout.trim().is_empty() {
+                "screen_recording_permission_required".into()
+            } else {
+                stdout.trim().to_string()
+            });
+        }
+        return Err(message.to_string());
+    }
+    if !std::path::Path::new(output).is_file() {
+        return Err("screencapture n’a pas écrit le fichier.".into());
+    }
+    Ok(output.to_string())
+}
+
+/// Apple Event to System Events from the GUI main thread so Accessibility /
+/// Automation lists the running app, not a background helper.
+pub fn probe_system_events_on_main_thread(app: &AppHandle) -> String {
+    let script =
+        r#"tell application "System Events" to get name of first process whose frontmost is true"#
+            .to_string();
+    match run_applescript_on_main_thread(app, script, true) {
+        Ok(_) => "granted".into(),
+        Err(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("not allowed")
+                || lower.contains("not authorized")
+                || lower.contains("autorisation")
+                || lower.contains("(-1719)")
+                || lower.contains("1002")
+            {
+                "denied".into()
+            } else {
+                "unknown".into()
+            }
+        }
+    }
+}
+
+fn run_applescript_on_main_thread(
+    app: &AppHandle,
+    script: String,
+    preserve_frontmost: bool,
+) -> Result<String, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let _ = sender.send(crate::macos_permissions::run_applescript(&script));
+        use objc2_app_kit::{NSApplicationActivationOptions, NSWorkspace};
+
+        let workspace = NSWorkspace::sharedWorkspace();
+        let previous_frontmost = workspace.frontmostApplication();
+        let result = crate::macos_permissions::run_applescript(&script);
+        if preserve_frontmost {
+            if let Some(previous) = previous_frontmost {
+                // NSAppleScript may activate its owner, Bob Work, even for a
+                // read-only AX query. Return focus to the user's target app.
+                let _ = previous.activateWithOptions(NSApplicationActivationOptions::empty());
+            }
+        }
+        let _ = sender.send(result);
     })
     .map_err(|error| format!("Impossible de planifier AppleScript : {error}"))?;
     receiver
@@ -449,7 +704,34 @@ fn run_applescript_on_main_thread(app: &AppHandle, script: String) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::computer_action_requires_approval;
+    use super::{computer_action_requires_approval, identity_env_pairs, socket_file_name_for_bundle};
+
+    #[test]
+    fn test_bundle_does_not_share_production_applescript_socket() {
+        assert_eq!(
+            socket_file_name_for_bundle("com.bobwork.desktop"),
+            "applescript.sock"
+        );
+        assert_eq!(
+            socket_file_name_for_bundle("com.bobwork.desktop.test"),
+            "applescript-test.sock"
+        );
+    }
+
+    #[test]
+    fn identity_env_pairs_name_the_running_app() {
+        let pairs = identity_env_pairs();
+        let keys: Vec<_> = pairs.iter().map(|(key, _)| key.as_str()).collect();
+        assert!(keys.contains(&"BOB_WORK_APPLESCRIPT_SOCKET"));
+        assert!(keys.contains(&"BOB_WORK_APP_NAME"));
+        assert!(keys.contains(&"BOB_WORK_BUNDLE_ID"));
+        let socket = pairs
+            .iter()
+            .find(|(key, _)| key == "BOB_WORK_APPLESCRIPT_SOCKET")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        assert!(socket.contains("applescript.sock"));
+    }
 
     #[test]
     fn computer_action_gate_follows_permission_policy_and_risk() {

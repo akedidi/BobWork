@@ -95,4 +95,17 @@ describe('localFilePaths', () => {
     expect(extractLocalFilePaths(input)).toEqual([])
     expect(linkifyLocalFilePaths(input)).toBe(input)
   })
+
+  it('normalizes file:// citations so HTML previews can resolve', () => {
+    const spaced =
+      'file:///Users/aniskedidi/Library/Application Support/com.bobwork.desktop.test/workspaces/run/revenue_dashboard.html'
+    expect(extractLocalFilePaths(`Preview: ${spaced}`)).toEqual([
+      '/Users/aniskedidi/Library/Application Support/com.bobwork.desktop.test/workspaces/run/revenue_dashboard.html',
+    ])
+    expect(
+      extractLocalFilePaths(
+        'Voir [revenue_dashboard.html](file:///Users/me/Library/Application Support/app/dash.html)',
+      ),
+    ).toEqual(['/Users/me/Library/Application Support/app/dash.html'])
+  })
 })

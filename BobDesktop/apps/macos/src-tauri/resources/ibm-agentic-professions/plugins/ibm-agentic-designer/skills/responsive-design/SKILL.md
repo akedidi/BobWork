@@ -1,9 +1,15 @@
 ---
 name: responsive-design
-description: "Adapter une conception à desktop, tablette et mobile."
+description: "Adapt a design for desktop, tablet, and mobile."
 icon: designer
 ---
 
 # Responsive design
 
-Définir des contraintes par breakpoint dans le Design IR. Sur mobile, privilégier navigation compacte, priorisation du contenu, cibles tactiles et interactions sans survol. Préserver le sens et les états plutôt que de simplement réduire les dimensions.
+Define constraints per breakpoint in the Design IR. On mobile, favor compact navigation, content prioritization, touch targets, and interactions without hover. Preserve meaning and states rather than simply shrinking dimensions.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

@@ -25,11 +25,11 @@ export default function InstructionsSettingsTab(props: any) {
 
   return (
     <>
-      <Heading title="Instructions personnalisées" description="Ajoutées localement au début de chaque demande, avant les instructions propres au projet." />
+      <Heading title={t('settings.customInstructionsHeading')} description={t('settings.customInstructionsDesc')} />
           <Card>
             <SettingsFields settings={settings} error={settingsError} loadingLabel={loadingLabel}>
               {s => (
-                <textarea className="settings-textarea" rows={12} value={s.globalInstructions} onChange={event => change('globalInstructions', event.target.value)} placeholder="Ex. Répondre en français, citer les sources et demander confirmation avant un envoi externe…" />
+                <textarea className="settings-textarea" rows={12} value={s.globalInstructions} onChange={event => change('globalInstructions', event.target.value)} placeholder={t('settings.customInstructionsPlaceholder')} />
               )}
             </SettingsFields>
           </Card>

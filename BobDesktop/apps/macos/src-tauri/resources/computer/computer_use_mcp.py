@@ -5,7 +5,7 @@ Takes control of the local Mac through `open`, AppleScript and System Events.
 AppleScript is preferably executed inside Bob Work (Unix bridge) so Accessibility
 TCC attaches to Bob Work rather than python3/osascript.
 
-Background-first (ChatGPT Work style): do not steal focus unless `bring_to_front`
+Background-first (background-first style): do not steal focus unless `bring_to_front`
 or `activate` is explicitly true. Prefer Accessibility UI actions and scriptable
 app commands that work while Bob Work stays frontmost.
 
@@ -38,7 +38,34 @@ def send_error(request_id, message: str, code: int = -32000):
     )
 
 
+GUIDE_VERSION = "1.0.7"
+
+
+def get_computer_use_guide() -> dict:
+    guide_path = Path(__file__).resolve().parent / "GUIDE.md"
+    if not guide_path.is_file():
+        return {
+            "ok": False,
+            "error": "GUIDE.md missing from Computer Use bundle. Re-enable Computer Control in Settings.",
+            "version": GUIDE_VERSION,
+        }
+    return {
+        "ok": True,
+        "version": GUIDE_VERSION,
+        "server": "bob-work-computer-use",
+        "guide": guide_path.read_text(encoding="utf-8"),
+    }
+
+
 TOOLS = [
+    {
+        "name": "get_computer_use_guide",
+        "description": (
+            "Return the version-matched Bob Work Computer Use guide for this MCP runtime. "
+            "Call before any other computer-use tool; do not guess flags from memory."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     {
         "name": "accessibility_status",
         "description": "Vérifie si le contrôle bureau / Accessibilité macOS est disponible.",
@@ -171,7 +198,7 @@ TOOLS = [
         "name": "capture_screen",
         "description": (
             "Capture l’écran (ou la fenêtre cible si possible) pour observer visuellement "
-            "sans forcer le focus. Maximum 3 captures par tâche."
+            "sans forcer le focus. Maximum 10 captures par tâche."
         ),
         "inputSchema": {
             "type": "object",
@@ -260,7 +287,7 @@ TOOLS = [
 # observation know which app Bob was asked to operate — without forcing focus.
 ACTIVE_TARGET_APP: str | None = None
 CAPTURE_COUNT = 0
-MAX_VISUAL_CAPTURES = 3
+MAX_VISUAL_CAPTURES = 10
 ACTION_COUNT = 0
 MAX_ACTIONS = 20
 OBSERVED_SINCE_ACTION = False
@@ -341,53 +368,75 @@ def require_macos() -> None:
         raise RuntimeError("Computer Use MCP requires macOS")
 
 
-BRIDGE_REQUIRED_ERROR = (
-    "Le pont de contrôle natif de Bob Work est indisponible. Relancez l’app Bob Work, "
-    "puis autorisez **Bob Work** (pas python3, pas Terminal, pas osascript) dans "
-    "Réglages Système → Confidentialité et sécurité → Accessibilité, "
-    "ou Réglages Bob Work → Accès et contrôle → Demander Accessibilité."
-)
+def app_display_name() -> str:
+    return os.environ.get("BOB_WORK_APP_NAME", "").strip() or "Bob Work"
 
 
-def run_osascript(script: str) -> subprocess.CompletedProcess[str]:
-    """Run AppleScript inside Bob Work only — never spawn osascript/python3 TCC."""
-    socket_path = (
-        os.environ.get("BOB_WORK_APPLESCRIPT_SOCKET", "").strip()
-        or str(Path.home() / ".bob" / "run" / "applescript.sock")
+def bridge_required_error() -> str:
+    app = app_display_name()
+    return (
+        f"Le pont de contrôle natif de {app} est indisponible. Relancez l’app {app}, "
+        f"puis autorisez **{app}** (pas python3, pas Terminal, pas osascript) dans "
+        "Réglages Système → Confidentialité et sécurité → Accessibilité, "
+        f"ou Réglages {app} → Accès et contrôle → Demander Accessibilité. "
+        "Bob Work et Bob Work-test sont distincts : cochez l’app réellement lancée."
     )
+
+
+def applescript_socket_path() -> str:
+    env = os.environ.get("BOB_WORK_APPLESCRIPT_SOCKET", "").strip()
+    if env:
+        return env
+    bundle = os.environ.get("BOB_WORK_BUNDLE_ID", "").strip()
+    app = os.environ.get("BOB_WORK_APP_NAME", "").strip().lower()
+    name = (
+        "applescript-test.sock"
+        if bundle.endswith(".test") or "test" in app
+        else "applescript.sock"
+    )
+    return str(Path.home() / ".bob" / "run" / name)
+
+
+def run_osascript(script: str, preserve_frontmost: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run AppleScript inside Bob Work only — never spawn osascript/python3 TCC."""
+    socket_path = applescript_socket_path()
     if not socket_path or not Path(socket_path).exists():
         return subprocess.CompletedProcess(
             args=["bob-work-applescript", socket_path or "missing"],
             returncode=1,
             stdout="",
-            stderr=BRIDGE_REQUIRED_ERROR,
+            stderr=bridge_required_error(),
         )
     try:
-        return _run_osascript_via_bob_work(socket_path, script)
+        return _run_osascript_via_bob_work(socket_path, script, preserve_frontmost)
     except Exception as error:  # noqa: BLE001 — do not fall back to /usr/bin/osascript
         return subprocess.CompletedProcess(
             args=["bob-work-applescript", socket_path],
             returncode=1,
             stdout="",
-            stderr=f"{BRIDGE_REQUIRED_ERROR} ({error})",
+            stderr=f"{bridge_required_error()} ({error})",
         )
 
 
-def _run_osascript_via_bob_work(socket_path: str, script: str) -> subprocess.CompletedProcess[str]:
-    return _run_via_bob_work(socket_path, {"script": script})
+def _run_osascript_via_bob_work(
+    socket_path: str,
+    script: str,
+    preserve_frontmost: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return _run_via_bob_work(
+        socket_path,
+        {"script": script, "preserve_frontmost": preserve_frontmost},
+    )
 
 
 def _run_native_via_bob_work(action: str, **parameters) -> subprocess.CompletedProcess[str]:
-    socket_path = (
-        os.environ.get("BOB_WORK_APPLESCRIPT_SOCKET", "").strip()
-        or str(Path.home() / ".bob" / "run" / "applescript.sock")
-    )
+    socket_path = applescript_socket_path()
     if not Path(socket_path).exists():
         return subprocess.CompletedProcess(
             args=["bob-work-native-input", socket_path],
             returncode=1,
             stdout="",
-            stderr=BRIDGE_REQUIRED_ERROR,
+            stderr=bridge_required_error(),
         )
     try:
         return _run_via_bob_work(socket_path, {"action": action, **parameters})
@@ -396,7 +445,7 @@ def _run_native_via_bob_work(action: str, **parameters) -> subprocess.CompletedP
             args=["bob-work-native-input", socket_path],
             returncode=1,
             stdout="",
-            stderr=f"{BRIDGE_REQUIRED_ERROR} ({error})",
+            stderr=f"{bridge_required_error()} ({error})",
         )
 
 
@@ -435,6 +484,40 @@ def _run_via_bob_work(socket_path: str, request: dict) -> subprocess.CompletedPr
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def _run_screencapture(
+    output_path: str,
+    window_id: str | None = None,
+    region: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    payload: dict = {
+        "action": "screencapture",
+        "output_path": output_path,
+        "text": output_path,
+        "operation": "png",
+    }
+    if window_id:
+        payload["window_id"] = window_id
+    if region:
+        payload["region"] = region
+    socket_path = applescript_socket_path()
+    if not socket_path or not Path(socket_path).exists():
+        return subprocess.CompletedProcess(
+            args=["bob-work-screencapture", socket_path or "missing"],
+            returncode=1,
+            stdout="",
+            stderr=bridge_required_error(),
+        )
+    try:
+        return _run_via_bob_work(socket_path, payload)
+    except Exception as error:  # noqa: BLE001 — do not fall back to python3 screencapture
+        return subprocess.CompletedProcess(
+            args=["bob-work-screencapture", socket_path],
+            returncode=1,
+            stdout="",
+            stderr=f"{bridge_required_error()} ({error})",
+        )
 
 
 def escape_applescript(value: str) -> str:
@@ -652,7 +735,7 @@ delay 0.2
 set frontName to name of first process whose frontmost is true
 return frontName
 end tell'''
-    activated = run_osascript(script)
+    activated = run_osascript(script, preserve_frontmost=False)
     if activated.returncode != 0:
         return {"ok": False, "app": name, **accessibility_hint(activated.stderr)}
     frontmost_app = activated.stdout.strip()
@@ -779,6 +862,7 @@ end tell''')
         if not label:
             continue
         elements.append({"role": role or "unknown", "label": label})
+    _indicate_window_center(escaped, instant=pointer_already_active())
     return {
         "ok": True,
         "app": name,
@@ -792,6 +876,11 @@ end tell''')
             "globale est indispensable. capture_screen sans bring_to_front si l’arbre est pauvre."
         ),
     }
+
+
+def pointer_already_active() -> bool:
+    """True once Bob has started acting — pointer should snap on context changes."""
+    return ACTION_COUNT > 0
 
 
 def _role_query(role: str | None) -> str:
@@ -814,6 +903,91 @@ def _role_query(role: str | None) -> str:
     return mapping.get(key, "UI element")
 
 
+def _parse_locate_result(stdout: str) -> tuple[float, float] | None:
+    """Return screen-center coordinates from a window+element locate script."""
+    try:
+        wx, wy, px, py, width, height = [
+            float(value.strip()) for value in stdout.strip().split(",")
+        ]
+    except (TypeError, ValueError):
+        return None
+    return wx + px + width / 2, wy + py + height / 2
+
+
+def _locate_ui_target_script(escaped_app: str, win: int, target: str) -> str:
+    return f'''tell application "System Events"
+tell process "{escaped_app}"
+  set winPos to position of window {win}
+  tell window {win}
+    set targetElement to {target}
+    set p to position of targetElement
+    set s to size of targetElement
+    return (item 1 of winPos as text) & "," & (item 2 of winPos as text) & "," & (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+  end tell
+end tell
+end tell
+'''
+
+
+def _window_bounds_script(escaped_app: str, win: int) -> str:
+    return f'''tell application "System Events"
+tell process "{escaped_app}"
+  set winPos to position of window {win}
+  set winSize to size of window {win}
+  return (item 1 of winPos as text) & "," & (item 2 of winPos as text) & "," & (item 1 of winSize as text) & "," & (item 2 of winSize as text)
+end tell
+end tell
+'''
+
+
+def _indicate_screen_point(
+    x: float,
+    y: float,
+    *,
+    click: bool = False,
+    instant: bool = False,
+) -> None:
+    payload: dict[str, object] = {"x": x, "y": y, "clicks": 1 if click else 0}
+    if instant:
+        payload["instant"] = True
+    _run_native_via_bob_work("indicate", **payload)
+
+
+def _indicate_window_center(escaped_app: str, win: int = 1, *, instant: bool = False) -> None:
+    located = run_osascript(_window_bounds_script(escaped_app, win))
+    if located.returncode != 0:
+        return
+    try:
+        wx, wy, width, height = [float(value.strip()) for value in located.stdout.strip().split(",")]
+    except (TypeError, ValueError):
+        return
+    _indicate_screen_point(wx + width / 2, wy + height / 2, instant=instant)
+
+
+def _indicate_ui_target(
+    escaped_app: str,
+    win: int,
+    target: str,
+    *,
+    click: bool = True,
+    instant: bool = False,
+) -> None:
+    located = run_osascript(_locate_ui_target_script(escaped_app, win, target))
+    if located.returncode != 0:
+        return
+    center = _parse_locate_result(located.stdout)
+    if not center:
+        return
+    x, y = center
+    _indicate_screen_point(x, y, click=click, instant=instant)
+
+
+def _indicate_ui_target_adaptive(escaped_app: str, win: int, target: str, *, click: bool = True) -> None:
+    """Move to the target, then re-read coordinates in case the UI shifted."""
+    _indicate_ui_target(escaped_app, win, target, click=False, instant=False)
+    _indicate_ui_target(escaped_app, win, target, click=click, instant=True)
+
+
 def ui_click(app: str, label: str, role: str | None = None, window: int = 1) -> dict:
     global ACTIVE_TARGET_APP
     if e2e_mode():
@@ -834,25 +1008,10 @@ def ui_click(app: str, label: str, role: str | None = None, window: int = 1) -> 
             f'first UI element whose (name is "{escaped_label}" or description is "{escaped_label}" '
             f'or title is "{escaped_label}")'
         )
-    locate_script = f'''tell application "System Events"
-tell process "{escaped_app}"
-  tell window {win}
-    set targetElement to {target}
-    set p to position of targetElement
-    set s to size of targetElement
-    return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
-  end tell
-end tell
-end tell
-'''
-    located = run_osascript(locate_script)
+    located = run_osascript(_locate_ui_target_script(escaped_app, win, target))
     if located.returncode != 0:
         return {"ok": False, "app": name, "label": label, **accessibility_hint(located.stderr)}
-    try:
-        px, py, width, height = [float(value.strip()) for value in located.stdout.strip().split(",")]
-        _run_native_via_bob_work("indicate", x=px + width / 2, y=py + height / 2, clicks=1)
-    except (TypeError, ValueError):
-        pass
+    _indicate_ui_target_adaptive(escaped_app, win, target, click=True)
     script = f'''tell application "System Events"
 tell process "{escaped_app}"
   tell window {win}
@@ -892,6 +1051,7 @@ def ui_set_value(app: str, value: str, label: str | None = None, window: int = 1
         )
     else:
         target = "text field 1"
+    _indicate_ui_target_adaptive(escaped_app, win, target, click=False)
     script = f'''tell application "System Events"
 tell process "{escaped_app}"
   tell window {win}
@@ -982,7 +1142,7 @@ def capture_screen(bring_to_front: bool = False) -> dict:
         return tool_result({
             "ok": False,
             "capture_limit_reached": True,
-            "error": "Limite de 3 captures atteinte pour cette tâche.",
+            "error": f"Limite de {MAX_VISUAL_CAPTURES} captures atteinte pour cette tâche.",
             "hint": (
                 "N’ajoutez plus d’images. Utilisez les observations déjà reçues, les actions "
                 "clavier ciblées ou demandez une vérification à l’utilisateur."
@@ -991,33 +1151,24 @@ def capture_screen(bring_to_front: bool = False) -> dict:
     focus_error = _maybe_bring_to_front(bool(bring_to_front))
     if focus_error:
         return tool_result(focus_error)
-    executable = shutil.which("screencapture") or "/usr/sbin/screencapture"
     with tempfile.TemporaryDirectory(prefix="bob-work-screen-") as folder:
         path = str(Path(folder) / "screen.png")
-        cmd = [executable, "-x", "-t", "png"]
         window_id = _window_id_for_app(ACTIVE_TARGET_APP) if ACTIVE_TARGET_APP else None
-        if window_id:
-            cmd.extend(["-l", window_id])
-        cmd.append(path)
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        completed = _run_screencapture(path, window_id=window_id)
         if (completed.returncode != 0 or not Path(path).is_file()) and window_id:
-            # Fallback to full display if window capture failed.
-            completed = subprocess.run(
-                [executable, "-x", "-t", "png", path],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            completed = _run_screencapture(path)
             window_id = None
         if completed.returncode != 0 or not Path(path).is_file():
+            app = app_display_name()
             message = (completed.stderr or completed.stdout or "screen capture failed").strip()
             data = {
                 "ok": False,
                 "screen_recording_required": True,
                 "error": message,
                 "hint": (
-                    "Autorisez Bob Work dans Réglages Système → Confidentialité et sécurité → "
-                    "Enregistrement de l’écran, puis relancez l’application."
+                    f"Autorisez {app} dans Réglages Système → Confidentialité et sécurité → "
+                    "Enregistrement de l’écran, puis relancez l’application. "
+                    "Bob Work et Bob Work-test sont distincts."
                 ),
             }
             return tool_result(data)
@@ -1227,6 +1378,8 @@ def handle_call(name: str, arguments: dict) -> dict:
 
 
 def _handle_call(name: str, arguments: dict) -> dict:
+    if name == "get_computer_use_guide":
+        return tool_result(get_computer_use_guide())
     if name == "accessibility_status":
         return tool_result(accessibility_status())
     if name == "list_apps":

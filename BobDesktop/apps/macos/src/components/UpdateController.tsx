@@ -1,43 +1,23 @@
 import { useEffect } from 'react'
-import { checkForUpdates, installAvailableUpdate } from '../lib/ipc'
-import { errorMessage } from '../lib/errorMessage'
-import { useAppDialog } from './AppDialog'
-import { useT } from '../i18n'
+import { INITIAL_UPDATE_CHECK_DELAY_MS, UPDATE_CHECK_INTERVAL_MS, useUpdateStore } from '../stores/updateStore'
 
-/** Checks once per launch; failures stay silent because local/dev builds have no release channel. */
+/** Polls GitHub Releases for a signed update; local/dev builds stay silent when no channel is configured. */
 export function UpdateController() {
-  const dialog = useAppDialog()
-  const t = useT()
+  const check = useUpdateStore(state => state.check)
 
   useEffect(() => {
     let disposed = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        let installing = false
-        try {
-          const update = await checkForUpdates()
-          if (disposed || !update.available || !update.version) return
-          const accepted = await dialog.confirm({
-            title: t('settings.updatePromptTitle'),
-            message: t('settings.updatePromptMessage', { version: update.version }),
-            confirmLabel: t('settings.installAndRestart'),
-          })
-          if (!accepted || disposed) return
-          installing = true
-          await installAvailableUpdate()
-        } catch (error) {
-          // Only surface installation failures. A missing endpoint is expected in local builds.
-          if (!disposed && installing) {
-            await dialog.alert({ message: errorMessage(error, t('settings.updateInstallFailed')) })
-          }
-        }
-      })()
-    }, 10_000)
+    const run = () => {
+      if (!disposed) void check()
+    }
+    const initial = window.setTimeout(run, INITIAL_UPDATE_CHECK_DELAY_MS)
+    const interval = window.setInterval(run, UPDATE_CHECK_INTERVAL_MS)
     return () => {
       disposed = true
-      window.clearTimeout(timer)
+      window.clearTimeout(initial)
+      window.clearInterval(interval)
     }
-  }, [dialog, t])
+  }, [check])
 
   return null
 }

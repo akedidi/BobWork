@@ -17,6 +17,16 @@ export function hasEnvSecrets(server: McpServer) {
   return hasStoredSecretField(server.raw?.env)
 }
 
+export function isApiServer(server: McpServer) {
+  const env = server.raw?.env as Record<string, unknown> | undefined
+  return env?.BOB_WORK_API_KIND === 'rest'
+}
+
+export function apiServerHasSecret(server: McpServer) {
+  const env = server.raw?.env as Record<string, unknown> | undefined
+  return hasStoredSecretField(env?.BOB_WORK_API_SECRET)
+}
+
 export function isRemoteTransport(transport: string) {
   return ['http', 'sse', 'streamable-http', 'streamable_http'].includes(transport)
 }
@@ -35,6 +45,11 @@ export function useMcpServers({ setStatus }: { setStatus: (s: string) => void })
     const keyedApis: McpServer[] = []
     const protocols: McpServer[] = []
     for (const server of servers) {
+      if (isApiServer(server)) {
+        if (apiServerHasSecret(server)) keyedApis.push(server)
+        else publicApis.push(server)
+        continue
+      }
       if (!isRemoteTransport(server.transport)) {
         protocols.push(server)
         continue

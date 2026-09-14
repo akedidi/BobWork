@@ -1,44 +1,52 @@
 ---
 name: problem-framing
-description: "Définir le vrai problème, la décision et les limites de l’analyse."
+description: "Define the real problem, the decision, and the limits of the analysis."
 icon: consultant
 ---
 
 # problem-framing
 
-Utiliser ce skill pour définir le vrai problème, la décision et les limites de l’analyse.
+Use this skill to define the real problem, the decision, and the limits of the analysis.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Énoncer décision, sponsor, horizon, valeur attendue et contrainte dominante.
-2. Distinguer symptôme, cause, hypothèse et fait établi.
-3. Formuler une question directrice avec critères de succès.
-4. Consigner périmètre, hors-périmètre, dépendances et inconnues.
+1. State decision, sponsor, horizon, expected value, and dominant constraint.
+2. Distinguish symptom, cause, hypothesis, and established fact.
+3. Formulate a guiding question with success criteria.
+4. Record scope, out-of-scope items, dependencies, and unknowns.
 
-## Livrable
+## Deliverable
 
-Problem statement, decision brief, critères de succès et registre d’hypothèses.
+Problem statement, decision brief, success criteria, and assumptions register.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Le problème est orienté décision.
-- Les termes ambigus sont définis.
-- Les hypothèses critiques sont testables.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- The problem is decision-oriented.
+- Ambiguous terms are defined.
+- Critical assumptions are testable.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

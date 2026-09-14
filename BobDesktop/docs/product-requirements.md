@@ -810,7 +810,7 @@ Content from untrusted sources must not be treated as system instructions:
 
 ### UIR-1: Visual Design
 - Original, professional design language
-- Not a pixel-perfect ChatGPT copy
+- Distinct visual identity
 - SF Pro or system font
 - SF Symbols or original icons
 - Light, dark, and system themes

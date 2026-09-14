@@ -8,7 +8,7 @@ Bob Work brings the macOS desktop application and its mobile client together in 
 Git root
 ├── BobDesktop/              macOS application, local backend, and runtimes
 │   ├── apps/macos/          React frontend and Tauri/Rust shell
-│   ├── packages/            shared desktop types and components
+│   ├── packages/            shared desktop types, UI, and chat-display rules
 │   ├── docs/                architecture, security, and operations
 │   └── README.md            complete desktop guide
 ├── BobMobile/               Expo client for iOS and Android
@@ -19,7 +19,9 @@ Git root
 └── README.md                product overview
 ```
 
-The two projects keep separate dependency managers: **pnpm** for BobDesktop and **npm** for BobMobile. They are not a single Node workspace.
+Shared chat display rules (`normalizeAssistantMarkdown`, `formatMessageTimestamp`) live in
+`BobDesktop/packages/chat-display` (`@bob-work/chat-display`). BobMobile consumes that package
+so message formatting stays aligned with Desktop.
 
 ## Product architecture
 
@@ -79,7 +81,7 @@ A plugin describes a product capability; a runtime supplies the executables and 
 
 | Class | Example | Lifecycle |
 |---|---|---|
-| Shared | visualization, diagrams, artifacts, compatible Python | Shared by multiple capabilities; not removable when it belongs to the application core |
+| Shared | visualization, diagrams, LaTeX, Pandoc, PDF.js, compatible Python | Shared by multiple capabilities; not removable when it belongs to the application core |
 | Managed external | isolated Qiskit or CodeGraph | Suggested only when a task needs it; installed, integrity-checked, and removable when the strategy is supported |
 | Plugin private | dependency explicitly bundled by the author of a personal plugin | Deployed with that plugin and isolated from the shared platform |
 
@@ -127,6 +129,7 @@ npm run test:maps
 
 - [BobDesktop architecture and development](BobDesktop/README.md)
 - [BobMobile architecture and development](BobMobile/README.md)
+- [Shared LaTeX, Pandoc, and PDF runtimes](BobDesktop/docs/shared-document-runtimes.md)
 - [Desktop technical documents](BobDesktop/docs/)
 
 ## Security overview

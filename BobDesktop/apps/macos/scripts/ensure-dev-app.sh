@@ -7,12 +7,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=app-identity.sh
+source "$ROOT/scripts/app-identity.sh"
+
 PROFILE="${1:-debug}"
 INSTALL_APPS="${INSTALL_APPS:-0}"
 APP_DIR="$ROOT/src-tauri/target/$PROFILE/bundle/macos"
-APP="$APP_DIR/Bob Work.app"
-IDENTIFIER="com.bobwork.desktop"
-EXECUTABLE="bob-work"
+APP="$APP_DIR/$BOB_WORK_PROD_PRODUCT_NAME.app"
+IDENTIFIER="$BOB_WORK_PROD_IDENTIFIER"
+EXECUTABLE="$BOB_WORK_PROD_EXECUTABLE"
 ENTITLEMENTS="$ROOT/src-tauri/entitlements.plist"
 APP_ICON="$APP/Contents/Resources/icon.icns"
 # A plain ad-hoc signature gets a designated requirement based on its cdhash.

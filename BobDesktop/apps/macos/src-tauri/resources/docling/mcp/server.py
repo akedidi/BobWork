@@ -21,7 +21,7 @@ TOOLS = [
     },
     {
         "name": "docling_ensure_runtime",
-        "description": "Installe ou répare la CLI Docling épinglée (venv ~/.bob/runtimes/docling).",
+        "description": "Installe ou répare la CLI Docling épinglée (Réglages → Runtimes, venv ~/.bob/runtimes/external/docling-cli).",
         "inputSchema": {
             "type": "object",
             "properties": {"force": {"type": "boolean"}},

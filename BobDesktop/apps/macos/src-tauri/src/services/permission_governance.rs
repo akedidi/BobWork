@@ -13,11 +13,22 @@ use rusqlite::params;
 pub const ACTION_SESSION_START: &str = "bob.session_start";
 
 /// Response guidance, not an OS isolation boundary. Shared by chat and scheduler.
-pub fn sandbox_guidance() -> String {
-    "Mode sandbox Bob Work : travaille uniquement dans le workspace fourni. Aucun accès aux chemins extérieurs, au réseau, au bureau macOS ou à Chrome. N’utilise pas --trust. Ces restrictions s’appliquent aussi au terminal, aux scripts, aux sous-processus, aux liens symboliques et aux plugins. Ne retente jamais une opération refusée avec un autre outil pour contourner la limite.\n\
-En cas de refus : nomme l’action et la ressource concernées sans révéler de secret ; explique que la limite protège les fichiers personnels, les identifiants et les réglages de l’ordinateur ; distingue un refus de consigne d’une erreur réellement renvoyée par un outil et ne prétends pas avoir effectué une opération non exécutée.\n\
-Ne conseille jamais de désactiver la sandbox, de passer en accès direct au disque, d’activer l’accès complet à l’ordinateur dans les settings ou les réglages macOS, ni d’élever les privilèges pour débloquer la tâche. Propose plutôt de joindre une copie du fichier nécessaire à la conversation ou de travailler sur une copie explicitement fournie dans le workspace. Pour une action système ou une installation incompatible, explique la limite et fournis seulement les étapes que l’utilisateur peut examiner et effectuer lui-même, sans les exécuter. Si aucune solution dans le workspace ne convient, arrête cette action et demande une entrée compatible."
+/// Folder-scoped work: no host desktop, no privilege
+/// escalation advice. Seatbelt (`sandbox-exec`) enforces the hard FS/process boundary.
+/// French sandbox guidance (legacy default). Prefer `agent_locale::sandbox_guidance`.
+pub fn sandbox_guidance_fr() -> String {
+    "Mode sandbox Bob Work : tu travailles uniquement dans le dossier connecté via Bob Work (workspace) et un HOME/TMP privés de session, détruits à la fin du run — installs et états locaux ne sont pas conservés. Aucun accès aux autres dossiers du Mac (Maison, Bureau, Documents, Downloads, /etc, autres projets) ni au bureau macOS. Computer Use est indisponible. Chrome et les sous-agents restent utilisables s’ils sont activés (Chrome via le bridge hôte Bob Work). Les serveurs MCP locaux configurés restent utilisables. N’utilise pas --trust. Ces limites s’appliquent aussi au terminal, scripts, sous-processus, liens symboliques et plugins. Ne retente jamais une opération refusée avec un autre outil pour contourner la limite.\n\
+$HOME pointe vers un HOME privé de sandbox, pas la maison réelle de l’utilisateur : un succès sur ~/Desktop ou ~/Documents crée/lit seulement ce HOME isolé. Pour prouver une limite hors workspace, utilise un chemin absolu du Mac hôte (par ex. /Users/<user>/Desktop/…) et rapporte explicitement que c’est bloqué par les limitations de la sandbox Bob Work (Operation not permitted) — ne présente pas le HOME isolé comme le Bureau réel.\n\
+Réseau : HTTPS public reste disponible pour l’inférence ; le réseau local, les adresses privées (RFC1918), le link-local et les métadonnées cloud (169.254.169.254) sont interdits. Quotas : durée, CPU, mémoire, taille de fichier et stockage du HOME de session sont plafonnés.\n\
+Runtimes partagés plateforme (LaTeX, Pandoc, diagram/D2, skills) sont exposés via `$HOME/.bob/skills` et `$HOME/.bob/runtimes` (liens vers l’hôte) et via PATH / `$BOB_WORK_D2`. Utilise ces chemins — ne déclare pas le plugin ou D2 absents sans avoir testé `test -f \"$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py\"` et `command -v d2` (ou `$BOB_WORK_D2`). Exception runtime externe : si un plugin ne peut pas s’exécuter parce qu’il dépend d’un runtime externe (`externalRuntimes`, CLI hôte hors runtimes partagés, installation sous ~/.bob/runtimes/external) et que l’échec vient de la sandbox, commence toujours par « Cette action est bloquée par les limitations de la sandbox Bob Work : ce plugin dépend d’un runtime externe » ; nomme le plugin et le runtime ; dis clairement à l’utilisateur de désactiver le mode sandbox dans Réglages → Permissions, puis de relancer hors isolation. Ne simule pas le résultat.\n\
+Pour les résumés courts, préfère une liste à puces Markdown (une ligne par constat) plutôt qu’un tableau.\n\
+En cas de refus : commence toujours par « Cette action est bloquée par les limitations de la sandbox Bob Work : … » ; nomme l’action et la ressource sans révéler de secret ; distingue un refus de consigne d’une erreur réellement renvoyée par un outil et ne prétends pas avoir effectué une opération non exécutée.\n\
+Ne conseille jamais de désactiver la sandbox, de passer en accès direct au disque, d’activer Computer Use ou l’accès complet à l’ordinateur, ni d’élever les privilèges — sauf l’exception runtime externe ci-dessus. Propose plutôt de joindre une copie du fichier nécessaire à la conversation ou de travailler sur une copie explicitement fournie dans le workspace. Pour une action système ou une installation incompatible hors runtime externe, explique la limite sandbox et fournis seulement les étapes que l’utilisateur peut examiner et effectuer lui-même, sans les exécuter. Si aucune solution dans le workspace ne convient, arrête cette action et demande une entrée compatible."
         .to_string()
+}
+
+pub fn sandbox_guidance() -> String {
+    sandbox_guidance_fr()
 }
 /// Persistent default-allow for launching `bob run` (any workspace).
 /// Matches `MIGRATION_011_SESSION_START_DEFAULT_ALLOW` in `db.rs`.
@@ -38,14 +49,15 @@ impl RiskContext {
         self.computer_use || self.chrome
     }
 
-    /// Sandbox mode keeps sessions inside the workspace: no desktop/browser control elevation.
+    /// Sandbox mode: Computer Use is always off. Chrome / MCP / web follow
+    /// the caller's RiskContext (Chrome uses the host AppleScript bridge).
     pub fn with_sandbox(&self, sandbox: bool) -> Self {
         if !sandbox {
             return self.clone();
         }
         Self {
             computer_use: false,
-            chrome: false,
+            chrome: self.chrome,
             mcp: self.mcp,
             web: self.web,
         }
@@ -140,6 +152,156 @@ pub fn normalize_policy(policy: &str) -> &str {
     }
 }
 
+/// Tool groups accepted by `bob run --disable-tool-groups`.
+/// `subtask` is composer-only and maps to `subagent` on the CLI.
+pub const CLI_TOOL_GROUPS: &[&str] = &[
+    "read", "edit", "execute", "mcp", "skill", "todo", "subagent", "mode",
+];
+
+/// Map Bob Shell / Bob Work approval action types to composer permission groups.
+pub fn approval_group(action_type: &str) -> &str {
+    let normalized = action_type.trim();
+    match normalized {
+        "read" | "file.read" | "bob.read" | "bob.execute.read" => "read",
+        "edit" | "file.write" | "file.delete" | "bob.edit" | "bob.execute.edit" => "edit",
+        "execute" | "command.execute" | "bob.execute" | "bob.execute.command" => "execute",
+        "mcp" | "mcp.connect" | "bob.mcp" | "bob.execute.mcp" => "mcp",
+        "skill" | "bob.skill" | "bob.execute.skill" => "skill",
+        "todo" | "bob.todo" | "bob.execute.todo" => "todo",
+        "subtask" | "bob.subtask" | "bob.execute.subtask" => "subtask",
+        "subagent" | "spawn_subagent" | "bob.subagent" | "bob.execute.subagent" => "subagent",
+        "mode" | "mode.switch" | "bob.mode" | "bob.execute.mode" => "mode",
+        other if other.starts_with("bob.execute.") => {
+            other.trim_start_matches("bob.execute.")
+        }
+        other => other,
+    }
+}
+
+pub fn is_composer_permission_group(group: &str) -> bool {
+    matches!(
+        group,
+        "read" | "edit" | "execute" | "mcp" | "skill" | "todo" | "subtask" | "subagent" | "mode"
+    )
+}
+
+pub fn composer_group_label(group: &str) -> &'static str {
+    match group {
+        "read" => "Read",
+        "edit" => "Edit",
+        "execute" => "Execute",
+        "mcp" => "MCP",
+        "skill" => "Skill",
+        "todo" => "Todo",
+        "subtask" => "Subtask",
+        "subagent" => "Subagent",
+        "mode" => "Mode",
+        _ => "Tool",
+    }
+}
+
+/// Backward-compatible alias — permission group names are always English.
+pub fn composer_group_label_fr(group: &str) -> &'static str {
+    composer_group_label(group)
+}
+
+/// Map a Bob Shell tool name to a composer permission group.
+pub fn tool_permission_group(tool_name: &str) -> Option<&'static str> {
+    let short = tool_name
+        .rsplit([':', '/', '.'])
+        .next()
+        .unwrap_or(tool_name);
+    let short = short.rsplit("__").next().unwrap_or(short);
+    match short {
+        "read_file" | "read_xlsx" | "search_files" | "list_files" | "glob" | "grep"
+        | "find_symbol" | "find_referencing_symbols" | "list_code_definition_names"
+        | "read_files" => Some("read"),
+        "write_file" | "write_to_file" | "apply_diff" | "insert_content"
+        | "search_and_replace" | "delete_file" | "remove_file" | "edit_file" => Some("edit"),
+        "execute_command" | "run_command" => Some("execute"),
+        "use_mcp_tool" => Some("mcp"),
+        "update_todo_list" => Some("todo"),
+        "spawn_subagent" => Some("subagent"),
+        "switch_mode" => Some("mode"),
+        name if name.contains("skill") => Some("skill"),
+        // Direct MCP tool ids (`mcp__server__tool`) are not composer task-permission
+        // checklist entries — they must not open an ask-on-use card. Gating stays on
+        // `use_mcp_tool` / explicit `mcp` action types when the MCP checkbox is off.
+        _ => None,
+    }
+}
+
+/// Resolve a Bob Shell / Bob Work action to a composer task-permission group.
+/// Raw tool names (`mcp__…__web_fetch`) map through [`tool_permission_group`].
+pub fn resolve_composer_permission_group(action_type: &str) -> Option<&'static str> {
+    let group = approval_group(action_type);
+    if is_composer_permission_group(group) {
+        return CLI_TOOL_GROUPS.iter().copied().find(|item| *item == group);
+    }
+    // `subtask` is composer-only (not in CLI_TOOL_GROUPS).
+    if group == "subtask" {
+        return Some("subtask");
+    }
+    tool_permission_group(action_type)
+}
+
+pub fn is_task_permission_allowed(action_type: &str, allowed_permissions: &[String]) -> bool {
+    let Some(group) = resolve_composer_permission_group(action_type) else {
+        return false;
+    };
+    allowed_permissions.iter().any(|permission| permission == group)
+}
+
+/// Composer sent an explicit allow-list that does not include this group.
+/// An empty list (scheduler / unspecified) is not treated as a denial.
+pub fn task_group_explicitly_denied(allowed_permissions: &[String], group: &str) -> bool {
+    !allowed_permissions.is_empty() && !allowed_permissions.iter().any(|permission| permission == group)
+}
+
+/// Groups to pass to `bob run --disable-tool-groups`.
+/// Scheduler (`enforce = false`) never disables groups.
+pub fn disabled_tool_groups(allowed_permissions: &[String], enforce: bool) -> Vec<String> {
+    if !enforce {
+        return Vec::new();
+    }
+    let mut allowed: std::collections::HashSet<&str> =
+        allowed_permissions.iter().map(String::as_str).collect();
+    if allowed.contains("subtask") {
+        allowed.insert("subagent");
+    }
+    CLI_TOOL_GROUPS
+        .iter()
+        .copied()
+        // MCP server tools (`mcp__…`) are outside the ask-on-use checklist; keeping
+        // `mcp` disabled here only produced cards for bridge tools like web_fetch.
+        .filter(|group| *group != "mcp" && !allowed.contains(group))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Actions that stay interactive even when they are outside the composer
+/// task-permission checklist (desktop bridge, session start, …).
+pub fn is_always_interactive_permission(action_type: &str) -> bool {
+    matches!(
+        action_type.trim(),
+        "computer.use" | "bob.session_start" | ACTION_SESSION_START
+    )
+}
+
+/// Auto-approve when:
+/// - the action maps to a checked composer task-permission group, or
+/// - the action is outside the task-permission list (unknown / non-composer types).
+/// Sensitive non-composer actions ([`is_always_interactive_permission`]) never auto-approve here.
+pub fn should_auto_approve_task(action_type: &str, allowed_permissions: &[String]) -> bool {
+    if is_always_interactive_permission(action_type) {
+        return false;
+    }
+    match resolve_composer_permission_group(action_type) {
+        Some(group) => allowed_permissions.iter().any(|permission| permission == group),
+        None => true,
+    }
+}
+
 pub fn policy_label(policy: &str) -> &'static str {
     match normalize_policy(policy) {
         "never_ask" => "Ne jamais demander",
@@ -222,16 +384,28 @@ mod tests {
     fn sandbox_refusal_explains_limits_without_suggesting_escalation() {
         let guidance = super::sandbox_guidance();
         for required in [
-            "protège les fichiers personnels",
+            "limitations de la sandbox Bob Work",
             "distingue un refus de consigne",
             "Ne conseille jamais de désactiver la sandbox",
-            "d’activer l’accès complet à l’ordinateur",
+            "Exception runtime externe",
+            "Réglages → Permissions",
+            "Computer Use",
             "joindre une copie du fichier",
             "Ne retente jamais une opération refusée",
             "sous-processus",
+            "169.254.169.254",
         ] {
             assert!(guidance.contains(required), "Missing safeguard: {required}");
         }
+        assert!(
+            guidance.contains("sauf l’exception runtime externe"),
+            "must allow advising sandbox exit only for external runtimes"
+        );
+        assert!(
+            !guidance.contains("ni à Chrome")
+                || guidance.contains("Chrome et les sous-agents restent"),
+            "Chrome must remain usable in sandbox guidance"
+        );
     }
     use super::*;
 
@@ -337,7 +511,53 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_strips_elevated_risk() {
+    fn approval_group_maps_shell_action_types() {
+        assert_eq!(approval_group("file.read"), "read");
+        assert_eq!(approval_group("file.write"), "edit");
+        assert_eq!(approval_group("bob.execute.edit"), "edit");
+        assert_eq!(approval_group("command.execute"), "execute");
+        assert_eq!(approval_group("mcp.connect"), "mcp");
+        assert_eq!(approval_group("spawn_subagent"), "subagent");
+        assert!(should_auto_approve_task("read", &["read".into()]));
+        assert!(!should_auto_approve_task("execute", &["read".into()]));
+        assert!(!is_task_permission_allowed("bob.execute.edit", &["read".into()]));
+        assert!(is_task_permission_allowed("bob.execute.edit", &["edit".into()]));
+        assert!(task_group_explicitly_denied(&["read".into()], "edit"));
+        assert!(!task_group_explicitly_denied(&["read".into(), "edit".into()], "edit"));
+        assert!(!task_group_explicitly_denied(&[], "edit"));
+        assert_eq!(tool_permission_group("write_to_file"), Some("edit"));
+        assert_eq!(tool_permission_group("execute_command"), Some("execute"));
+        assert_eq!(tool_permission_group("use_mcp_tool"), Some("mcp"));
+        assert_eq!(
+            tool_permission_group("mcp__bob-work-chrome-control_6001__web_fetch"),
+            None
+        );
+        assert!(should_auto_approve_task(
+            "mcp__bob-work-chrome-control_6001__web_fetch",
+            &["read".into()]
+        ));
+        assert!(!should_auto_approve_task("use_mcp_tool", &["read".into()]));
+        assert!(should_auto_approve_task("use_mcp_tool", &["mcp".into()]));
+        assert_eq!(
+            disabled_tool_groups(&["read".into()], true),
+            vec![
+                "edit".to_string(),
+                "execute".to_string(),
+                "skill".to_string(),
+                "todo".to_string(),
+                "subagent".to_string(),
+                "mode".to_string(),
+            ]
+        );
+        assert!(disabled_tool_groups(&["read".into()], false).is_empty());
+        assert_eq!(
+            disabled_tool_groups(&[], true).len(),
+            CLI_TOOL_GROUPS.len() - 1
+        );
+    }
+
+    #[test]
+    fn sandbox_strips_computer_use_only() {
         let risk = RiskContext {
             computer_use: true,
             chrome: true,
@@ -345,9 +565,12 @@ mod tests {
             web: true,
         }
         .with_sandbox(true);
-        assert!(!risk.elevated());
+        assert!(!risk.computer_use);
+        assert!(risk.chrome);
         assert!(risk.mcp);
         assert!(risk.web);
+        // Chrome still counts as elevated mid-run risk; Computer Use is gone.
+        assert!(risk.elevated());
     }
 
     #[test]

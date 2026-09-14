@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { open } from '@tauri-apps/plugin-dialog'
 import Composer, { resizeComposerTextarea } from './Composer'
 import { AppDialogProvider } from '../AppDialog'
+import { useAppStore } from '../../stores/appStore'
 
 const mocks = vi.hoisted(() => ({
   getPlugins: vi.fn(),
@@ -70,6 +71,7 @@ async function renderComposer(props: Partial<ComponentProps<typeof Composer>> = 
 describe('Composer popovers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useAppStore.setState({ bobStatus: 'ready' })
     mocks.getPlugins.mockResolvedValue([])
     mocks.getSkills.mockResolvedValue([])
     mocks.getIntegrationStatuses.mockResolvedValue([])
@@ -83,7 +85,9 @@ describe('Composer popovers', () => {
       { name: 'copy', description: 'Copy from conversation history', source: 'fallback' },
       { name: 'init', description: 'Initialize project context', source: 'fallback' },
     ])
-    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
+    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) =>
+      paths.map(path => ({ path, isDirectory: path.endsWith('dossier-projet') })),
+    )
     mocks.startNativeAudioRecording.mockResolvedValue(undefined)
     mocks.stopNativeAudioRecording.mockResolvedValue({
       id: 'meeting-1',
@@ -261,6 +265,8 @@ describe('Composer popovers', () => {
     fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
     fireEvent.click(screen.getByRole('button', { name: /Dossier/ }))
     await waitFor(() => expect(screen.getByText('dossier-projet')).toBeVisible())
+    expect(screen.getByText('Dossier')).toBeVisible()
+    expect(screen.queryByText('FICHIER')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retirer' }))
     expect(screen.queryByText('dossier-projet')).not.toBeInTheDocument()
   })
@@ -410,6 +416,36 @@ describe('Composer popovers', () => {
     expect(screen.getByRole('button', { name: 'Gérer les skills' })).toBeVisible()
     expect(screen.getByText('Aucun plugin activé.')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Gérer les plugins' })).toBeVisible()
+  })
+
+  it('masque les MCP bob-work du menu Intégrations & MCP', async () => {
+    mocks.getMcpServers.mockResolvedValue([
+      {
+        name: 'bob-work-microsoft',
+        transport: 'stdio',
+        commandOrUrl: 'python3',
+        args: ['microsoft_server.py'],
+        enabled: true,
+        status: 'ready',
+        builtin: true,
+        raw: {},
+      },
+      {
+        name: 'mcp-custom-hub',
+        transport: 'stdio',
+        commandOrUrl: 'python3',
+        args: ['hub.py'],
+        enabled: true,
+        status: 'ready',
+        raw: {},
+      },
+    ])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
+    expect(menu).toHaveTextContent('mcp-custom-hub')
+    expect(menu).not.toHaveTextContent('bob-work-microsoft')
   })
 
   it('liste les intégrations MCP connectées dans le menu plus', async () => {
@@ -657,6 +693,7 @@ describe('Composer popovers', () => {
 describe('Composer slash autocomplete', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useAppStore.setState({ bobStatus: 'ready' })
     mocks.getPlugins.mockResolvedValue([])
     mocks.getSkills.mockResolvedValue([])
     mocks.getIntegrationStatuses.mockResolvedValue([])
@@ -670,7 +707,9 @@ describe('Composer slash autocomplete', () => {
       { name: 'copy', description: 'Copy from conversation history', source: 'fallback' },
       { name: 'init', description: 'Initialize project context', source: 'fallback' },
     ])
-    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
+    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) =>
+      paths.map(path => ({ path, isDirectory: path.endsWith('dossier-projet') })),
+    )
   })
 
   it('shows native Bob commands when the user types /', async () => {
@@ -710,5 +749,18 @@ describe('Composer slash autocomplete', () => {
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(screen.queryByText('Commandes Bob')).not.toBeInTheDocument()
     expect(input).toHaveValue('/co')
+  })
+
+  it('shows an API key hint and disables send when Bob is unauthenticated', async () => {
+    useAppStore.setState({ bobStatus: 'unauthenticated' })
+    const onSend = vi.fn()
+    await renderComposer({ onSend })
+    expect(screen.getByRole('alert')).toHaveTextContent('Aucune clé API valide')
+    expect(screen.getByRole('button', { name: 'Réglages → IBM Bob Shell' })).toBeVisible()
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'Bonjour' } })
+    expect(screen.getByRole('button', { name: 'Envoyer le prompt' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    expect(onSend).not.toHaveBeenCalled()
   })
 })

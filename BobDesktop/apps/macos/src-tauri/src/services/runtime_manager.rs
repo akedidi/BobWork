@@ -34,6 +34,8 @@ const BOB_RUNTIME_OWNER: &str = "bob-work";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExternalInstallStrategy {
     PythonIndex,
+    CliArchive,
+    NpmRegistry,
 }
 
 /// One policy controls the lifecycle of every external runtime. A runtime is
@@ -46,8 +48,35 @@ fn external_install_strategy(source: Option<&RuntimeSource>) -> Option<ExternalI
         {
             Some(ExternalInstallStrategy::PythonIndex)
         }
+        Some(RuntimeSource { kind, .. }) if kind == "trusted-cli-archive" => {
+            Some(ExternalInstallStrategy::CliArchive)
+        }
+        Some(RuntimeSource { kind, .. }) if kind == "trusted-npm-registry" => {
+            Some(ExternalInstallStrategy::NpmRegistry)
+        }
         _ => None,
     }
+}
+
+fn is_managed_cli_manifest(manifest: &RuntimeManifest) -> bool {
+    manifest
+        .capabilities
+        .iter()
+        .any(|capability| capability.starts_with("cli."))
+}
+
+pub(crate) fn resolve_managed_cli_under_root(root: &Path, command: &str) -> Option<PathBuf> {
+    for candidate in [
+        root.join("venv").join("bin").join(command),
+        root.join("bin").join(command),
+        root.join("google-cloud-sdk").join("bin").join(command),
+        root.join("npm").join("bin").join(command),
+    ] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    super::cli_runtime_catalog::find_named_binary_public(root, command)
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +168,9 @@ impl RuntimeManager {
         self.recover_incomplete_operations(db)?;
 
         let python = resolve_host_python();
-        let shared_python_packages = python
-            .as_deref()
-            .map(detect_shared_python_packages)
-            .transpose()?
-            .unwrap_or_default();
+        // Skip Python package inventory on seed — spawning python to list imports
+        // costs hundreds of ms and is not needed for first paint.
+        let shared_python_packages = Vec::new();
         let shared = [
             RuntimeManifest {
                 id: SHARED_PYTHON_ID.into(),
@@ -171,6 +198,11 @@ impl RuntimeManager {
             },
             visualization_runtime_manifest(),
             diagram_runtime_manifest(),
+            RuntimeManifest {
+                version: "6.3.289".into(),
+                purpose: "Lecteur PDF.js local partagé : pages, zoom et sélection de texte".into(),
+                ..logical_shared_manifest("shared.pdf", "PDF.js", &["pdf.preview"])
+            },
             logical_shared_manifest(
                 SHARED_ARTIFACT_ID,
                 "Bob Work Artifact Runtime",
@@ -178,7 +210,11 @@ impl RuntimeManager {
             ),
         ];
 
-        for manifest in shared {
+        for manifest in shared
+            .into_iter()
+            .chain(super::document_runtime::manifests())
+            .chain(super::office_runtime::manifests())
+        {
             let (status, install_path) = if manifest.id == SHARED_PYTHON_ID {
                 (
                     if python.is_some() {
@@ -190,7 +226,10 @@ impl RuntimeManager {
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned()),
                 )
-            } else if manifest.id == SHARED_ARTIFACT_ID || manifest.id == SHARED_VISUALIZATION_ID {
+            } else if manifest.id == SHARED_ARTIFACT_ID
+                || manifest.id == SHARED_VISUALIZATION_ID
+                || manifest.id == "shared.pdf"
+            {
                 (
                     RuntimeStatus::Installed,
                     if manifest.id == SHARED_ARTIFACT_ID {
@@ -219,7 +258,11 @@ impl RuntimeManager {
             None,
             None,
         )?;
+        for manifest in super::cli_runtime_catalog::manifests() {
+            self.upsert_manifest(db, &manifest, RuntimeStatus::NotInstalled, None, None)?;
+        }
         self.migrate_external_ownership_markers(db)?;
+        self.reconcile_runtime_states(db)?;
         Ok(())
     }
 
@@ -489,7 +532,11 @@ impl RuntimeManager {
             ))
         })?;
         match strategy {
-            ExternalInstallStrategy::PythonIndex => validate_managed_python_source(&manifest)?,
+            ExternalInstallStrategy::PythonIndex if !is_managed_cli_manifest(&manifest) => {
+                validate_managed_python_source(&manifest)?
+            }
+            ExternalInstallStrategy::PythonIndex => {}
+            ExternalInstallStrategy::CliArchive | ExternalInstallStrategy::NpmRegistry => {}
         }
         if current.status == RuntimeStatus::Installed
             && current.installed_version.as_deref() == Some(manifest.version.as_str())
@@ -498,12 +545,16 @@ impl RuntimeManager {
         }
 
         let shared_python = self.shared_python(db)?;
-        let shared_compatible =
-            python_satisfies(&shared_python, manifest.python_compatibility.as_deref())?;
-        let python_mode = if shared_compatible {
-            PythonMode::Shared
+        let python_mode = if is_managed_cli_manifest(&manifest) {
+            manifest.python_mode.unwrap_or(PythonMode::None)
         } else {
-            PythonMode::Isolated
+            let shared_compatible =
+                python_satisfies(&shared_python, manifest.python_compatibility.as_deref())?;
+            if shared_compatible {
+                PythonMode::Shared
+            } else {
+                PythonMode::Isolated
+            }
         };
         let runtime_parent = self
             .runtime_root
@@ -541,9 +592,27 @@ impl RuntimeManager {
         )?;
 
         let result = match strategy {
-            ExternalInstallStrategy::PythonIndex => {
-                self.install_python_packages(&manifest, &shared_python, python_mode, &candidate)
-                    .await
+            ExternalInstallStrategy::PythonIndex if is_managed_cli_manifest(&manifest) => {
+                super::cli_runtime_catalog::install_managed_cli(
+                    &manifest,
+                    &shared_python,
+                    &candidate,
+                )
+                .await
+                .map(|_| ())
+            }
+            ExternalInstallStrategy::PythonIndex => self
+                .install_python_packages(&manifest, &shared_python, python_mode, &candidate)
+                .await
+                .map(|_| ()),
+            ExternalInstallStrategy::CliArchive | ExternalInstallStrategy::NpmRegistry => {
+                super::cli_runtime_catalog::install_managed_cli(
+                    &manifest,
+                    &shared_python,
+                    &candidate,
+                )
+                .await
+                .map(|_| ())
             }
         };
         if let Err(error) = result {
@@ -594,29 +663,57 @@ impl RuntimeManager {
 
         let activated_python = if python_mode == PythonMode::Shared {
             shared_python.clone()
-        } else {
+        } else if python_mode == PythonMode::Isolated {
             isolated_python(&final_path.join("venv"))
+        } else {
+            PathBuf::new()
         };
         let activated_package_root = if python_mode == PythonMode::Shared {
             final_path.join("python")
-        } else {
+        } else if python_mode == PythonMode::Isolated {
             final_path.join("venv")
+        } else {
+            final_path.join("bin")
+        };
+        let cli_command = manifest
+            .packages
+            .first()
+            .and_then(|package| package.import_name.as_deref());
+        let activated_executable = if is_managed_cli_manifest(&manifest) {
+            cli_command.and_then(|command| {
+                let direct = final_path.join("bin").join(command);
+                if direct.is_file() {
+                    return Some(direct);
+                }
+                super::cli_runtime_catalog::find_named_binary_public(&final_path, command)
+            })
+        } else {
+            None
         };
         let activation = (|| -> AppResult<()> {
+            let mut marker = serde_json::json!({
+                "runtimeId": manifest.id,
+                "version": manifest.version,
+                "managedBy": BOB_RUNTIME_OWNER,
+                "source": manifest.source,
+                "pythonMode": python_mode,
+                "packages": manifest.packages,
+                "installedAt": Utc::now().to_rfc3339(),
+                "platform": Self::platform_id()
+            });
+            if python_mode != PythonMode::None {
+                marker["python"] = serde_json::json!(activated_python);
+                marker["packageRoot"] = serde_json::json!(activated_package_root);
+            }
+            if let Some(command) = cli_command {
+                marker["command"] = serde_json::json!(command);
+            }
+            if let Some(executable) = activated_executable.as_ref() {
+                marker["executable"] = serde_json::json!(executable);
+            }
             std::fs::write(
                 final_path.join("runtime.json"),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "runtimeId": manifest.id,
-                    "version": manifest.version,
-                    "managedBy": BOB_RUNTIME_OWNER,
-                    "source": manifest.source,
-                    "pythonMode": python_mode,
-                    "python": activated_python,
-                    "packageRoot": activated_package_root,
-                    "packages": manifest.packages,
-                    "installedAt": Utc::now().to_rfc3339(),
-                    "platform": Self::platform_id()
-                }))?,
+                serde_json::to_vec_pretty(&marker)?,
             )?;
 
             let size = directory_size(&final_path)?;
@@ -821,6 +918,22 @@ impl RuntimeManager {
                 .get(db, runtime_id)?
                 .ok_or_else(|| AppError::NotFound(format!("Runtime {runtime_id}")))?;
         }
+        if super::document_runtime::engine(runtime_id).is_some() {
+            let root = super::document_runtime::materialize(&self.runtime_root, runtime_id)?;
+            self.mark_shared_installed(db, runtime_id, &root)?;
+            runtime = self
+                .get(db, runtime_id)?
+                .ok_or_else(|| AppError::NotFound(runtime_id.into()))?;
+        }
+        if super::office_runtime::is_office_runtime(runtime_id) {
+            let python = self.shared_python(db)?;
+            let root =
+                super::office_runtime::materialize(&self.runtime_root, runtime_id, &python)?;
+            self.mark_shared_installed(db, runtime_id, &root)?;
+            runtime = self
+                .get(db, runtime_id)?
+                .ok_or_else(|| AppError::NotFound(runtime_id.into()))?;
+        }
         if runtime.status != RuntimeStatus::Installed {
             return Err(AppError::NotFound(format!(
                 "Runtime {} is not installed",
@@ -828,10 +941,48 @@ impl RuntimeManager {
             )));
         }
         self.mark_used(db, runtime_id, consumer_id)?;
-        let executable = if runtime_id == SHARED_PYTHON_ID {
-            runtime.install_path.clone()
+        let executable = if runtime_id == SHARED_PYTHON_ID
+            || super::office_runtime::is_office_runtime(runtime_id)
+        {
+            self.shared_python(db)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        } else if let Some((binary, _)) = super::document_runtime::engine(runtime_id) {
+            runtime.install_path.as_ref().map(|root| {
+                Path::new(root)
+                    .join("bin")
+                    .join(binary)
+                    .to_string_lossy()
+                    .into_owned()
+            })
         } else {
             None
+        };
+        let environment = if super::document_runtime::engine(runtime_id).is_some() {
+            let cache = self.cache_root.join("tectonic");
+            std::fs::create_dir_all(&cache)?;
+            vec![
+                (
+                    "TECTONIC_CACHE_DIR".into(),
+                    cache.to_string_lossy().into_owned(),
+                ),
+                ("TECTONIC_UNTRUSTED_MODE".into(), "1".into()),
+            ]
+        } else if super::office_runtime::is_office_runtime(runtime_id) {
+            runtime
+                .install_path
+                .as_ref()
+                .map(|root| {
+                    vec![(
+                        "PYTHONPATH".into(),
+                        super::office_runtime::pythonpath_for(Path::new(root))
+                            .to_string_lossy()
+                            .into_owned(),
+                    )]
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
         Ok(RuntimeHandle {
             runtime_id: runtime.runtime_id,
@@ -841,8 +992,61 @@ impl RuntimeManager {
             executable,
             working_root: runtime.install_path,
             python_mode: runtime.python_mode,
-            environment: Vec::new(),
+            environment,
         })
+    }
+
+    /// Resolve Office runtimes for Bob Shell child processes: materialize when
+    /// needed, merge PYTHONPATH entries, and expose the shared Python executable.
+    pub fn office_session_environment(
+        &self,
+        db: &Database,
+        attachment_paths: &[String],
+    ) -> AppResult<Vec<(String, String)>> {
+        use crate::models::runtime::RuntimeStatus;
+
+        let attachment_caps =
+            super::office_runtime::capabilities_for_paths(attachment_paths);
+        let mut pythonpaths = Vec::new();
+        let mut shared_python = None;
+
+        for capability in super::office_runtime::office_capabilities() {
+            let Some(runtime_id) = shared_runtime_for_capability(capability) else {
+                continue;
+            };
+            if !super::office_runtime::is_office_runtime(runtime_id) {
+                continue;
+            }
+            let already_installed = self
+                .get(db, runtime_id)?
+                .map(|record| record.status == RuntimeStatus::Installed)
+                .unwrap_or(false);
+            if !already_installed && !attachment_caps.iter().any(|item| *item == capability) {
+                continue;
+            }
+            match self.resolve_platform_capability(db, "platform-office", capability) {
+                Ok(handle) => {
+                    if shared_python.is_none() {
+                        shared_python = handle.executable.clone();
+                    }
+                    for (key, value) in handle.environment {
+                        if key == "PYTHONPATH" && !pythonpaths.contains(&value) {
+                            pythonpaths.push(value);
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!("Office runtime {capability}: {error}"),
+            }
+        }
+
+        let mut env = Vec::new();
+        if !pythonpaths.is_empty() {
+            env.push(("PYTHONPATH".into(), pythonpaths.join(":")));
+        }
+        if let Some(python) = shared_python {
+            env.push(("BOB_WORK_SHARED_PYTHON".into(), python));
+        }
+        Ok(env)
     }
 
     pub fn resolve_external_runtime(
@@ -852,6 +1056,7 @@ impl RuntimeManager {
         manifest: &Value,
         runtime_id: &str,
     ) -> AppResult<RuntimeHandle> {
+        self.reconcile_runtime_states(db)?;
         let declared = external_runtime_requirements(manifest)
             .into_iter()
             .any(|requirement| requirement.get("id").and_then(Value::as_str) == Some(runtime_id));
@@ -874,11 +1079,48 @@ impl RuntimeManager {
                 runtime.name
             )));
         }
-        let root = runtime
+        let install_path = runtime
             .install_path
             .as_deref()
             .map(PathBuf::from)
-            .filter(|path| path.is_dir())
+            .ok_or_else(|| AppError::NotFound(format!("Runtime {} files", runtime.name)))?;
+
+        // Reconcile / host CLI discovery often store the executable path itself
+        // (e.g. ~/.bob/runtimes/docling/<ver>/bin/docling or a PATH binary).
+        // Treat that as installed — do not require a directory root.
+        if install_path.is_file() {
+            let working_root = install_path
+                .parent()
+                .map(|parent| {
+                    if parent.file_name().and_then(|name| name.to_str()) == Some("bin") {
+                        parent
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| parent.to_path_buf())
+                    } else {
+                        parent.to_path_buf()
+                    }
+                })
+                .unwrap_or_else(|| install_path.clone());
+            self.mark_used(db, runtime_id, plugin_id)?;
+            return Ok(RuntimeHandle {
+                runtime_id: runtime.runtime_id,
+                runtime_type: runtime.runtime_type,
+                version: runtime
+                    .installed_version
+                    .clone()
+                    .unwrap_or(runtime.version),
+                capability: runtime.capabilities.first().cloned(),
+                executable: Some(install_path.to_string_lossy().into_owned()),
+                working_root: Some(working_root.to_string_lossy().into_owned()),
+                python_mode: runtime.python_mode,
+                environment: Vec::new(),
+            });
+        }
+
+        let root = install_path
+            .is_dir()
+            .then_some(install_path)
             .ok_or_else(|| AppError::NotFound(format!("Runtime {} files", runtime.name)))?;
         let (executable, environment) = match runtime.python_mode {
             PythonMode::Shared => (
@@ -888,6 +1130,24 @@ impl RuntimeManager {
                     root.join("python").to_string_lossy().into_owned(),
                 )],
             ),
+            PythonMode::Isolated if is_managed_cli_manifest(&self.manifest(db, runtime_id)?) => {
+                let manifest = self.manifest(db, runtime_id)?;
+                let command = manifest
+                    .packages
+                    .first()
+                    .and_then(|package| package.import_name.as_deref())
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!("CLI entrypoint for {}", runtime.name))
+                    })?;
+                let cli = resolve_managed_cli_under_root(&root, command).ok_or_else(|| {
+                    AppError::NotFound(format!(
+                        "Managed CLI {} is missing under {}",
+                        runtime.name,
+                        root.display()
+                    ))
+                })?;
+                (Some(cli.to_string_lossy().into_owned()), Vec::new())
+            }
             PythonMode::Isolated => {
                 let python = isolated_python(&root.join("venv"));
                 if !python.is_file() {
@@ -898,7 +1158,35 @@ impl RuntimeManager {
                 }
                 (Some(python.to_string_lossy().into_owned()), Vec::new())
             }
-            PythonMode::None => (None, Vec::new()),
+            PythonMode::None => {
+                let manifest = self.manifest(db, runtime_id)?;
+                let marker: Value = serde_json::from_slice(
+                    &std::fs::read(root.join("runtime.json")).unwrap_or_default(),
+                )
+                .unwrap_or(Value::Null);
+                let command = manifest
+                    .packages
+                    .first()
+                    .and_then(|package| package.import_name.as_deref())
+                    .or_else(|| marker.get("command").and_then(Value::as_str))
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!("CLI entrypoint for {}", runtime.name))
+                    })?;
+                let cli = marker
+                    .get("executable")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_file())
+                    .or_else(|| resolve_managed_cli_under_root(&root, command))
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "Managed CLI {} is missing from {}",
+                            runtime.name,
+                            root.display()
+                        ))
+                    })?;
+                (Some(cli.to_string_lossy().into_owned()), Vec::new())
+            }
         };
         self.mark_used(db, runtime_id, plugin_id)?;
         Ok(RuntimeHandle {
@@ -959,9 +1247,13 @@ impl RuntimeManager {
                     "Known executable source must match the declared CLI entrypoint".into(),
                 ));
             }
-            which::which(command).map_err(|_| {
-                AppError::NotFound(format!("Required host CLI is not installed: {command}"))
-            })?
+            super::cli_runtime_catalog::bob_cli_search_paths(command)
+                .into_iter()
+                .find(|path| path.is_file())
+                .or_else(|| which::which(command).ok())
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Required host CLI is not installed: {command}"))
+                })?
         } else {
             let root = bundle_root.ok_or_else(|| {
                 AppError::ValidationFailed(
@@ -1332,7 +1624,164 @@ impl RuntimeManager {
         Ok(())
     }
 
+    /// Reconcile SQLite runtime status with what is actually present on disk.
+    pub fn reconcile_runtime_states(&self, db: &Database) -> AppResult<()> {
+        self.reconcile_shared_python(db)?;
+        self.reconcile_shared_materialized_runtimes(db)?;
+        self.reconcile_external_managed_runtimes(db)?;
+        Ok(())
+    }
+
+    fn reconcile_shared_python(&self, db: &Database) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        if let Some(python) = resolve_host_python() {
+            let version = python_version(&python).unwrap_or_else(|_| "unknown".into());
+            db.connection().execute(
+                "UPDATE runtime_registry SET status='installed',install_path=?1,version=?2,
+                        installed_version=?2,updated_at=?3,error=NULL
+                 WHERE runtime_id=?4",
+                params![
+                    python.to_string_lossy(),
+                    version,
+                    now,
+                    SHARED_PYTHON_ID
+                ],
+            )?;
+        } else {
+            db.connection().execute(
+                "UPDATE runtime_registry SET status='broken',updated_at=?1,
+                        error='Shared Python was not found on this Mac'
+                 WHERE runtime_id=?2",
+                params![now, SHARED_PYTHON_ID],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_shared_materialized_runtimes(&self, db: &Database) -> AppResult<()> {
+        for manifest in super::document_runtime::manifests() {
+            if let Ok(root) = super::document_runtime::materialize(&self.runtime_root, &manifest.id)
+            {
+                self.mark_shared_installed(db, &manifest.id, &root)?;
+            }
+        }
+        if let Ok(python) = self.shared_python(db) {
+            for manifest in super::office_runtime::manifests() {
+                if let Ok(root) =
+                    super::office_runtime::materialize(&self.runtime_root, &manifest.id, &python)
+                {
+                    self.mark_shared_installed(db, &manifest.id, &root)?;
+                }
+            }
+        }
+        let _ = self.materialize_shared_diagram(db);
+        Ok(())
+    }
+
+    fn reconcile_external_managed_runtimes(&self, db: &Database) -> AppResult<()> {
+        for runtime in self.list(db)? {
+            if runtime.runtime_type != RuntimeClass::ExternalManaged {
+                continue;
+            }
+            let source = runtime
+                .source
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<RuntimeSource>(raw).ok());
+            if external_install_strategy(source.as_ref()).is_none() {
+                continue;
+            }
+            if matches!(
+                runtime.status,
+                RuntimeStatus::Installing | RuntimeStatus::Updating | RuntimeStatus::Removing
+            ) {
+                continue;
+            }
+            if let Some((path, installed_version, python_mode)) =
+                discover_bob_managed_external_install(&self.runtime_root, &runtime.runtime_id)
+            {
+                let now = Utc::now().to_rfc3339();
+                db.connection().execute(
+                    "UPDATE runtime_registry SET status='installed',install_path=?1,size_bytes=?2,
+                            installed_version=?3,updated_at=?4,error=NULL,python_mode=?5,removable=1,
+                            installed_at=COALESCE(installed_at,?4)
+                     WHERE runtime_id=?6",
+                    params![
+                        path.to_string_lossy(),
+                        directory_size(&path)? as i64,
+                        installed_version,
+                        now,
+                        python_mode.as_str(),
+                        runtime.runtime_id
+                    ],
+                )?;
+                continue;
+            }
+            if let Some(entry) = super::cli_runtime_catalog::catalog_entries()
+                .iter()
+                .find(|item| item.runtime_id == runtime.runtime_id)
+            {
+                if let Some((binary, installed_version)) =
+                    super::cli_runtime_catalog::discover_managed_cli(entry.command)
+                        .or_else(|| super::cli_runtime_catalog::discover_system_cli(entry.command))
+                {
+                    let now = Utc::now().to_rfc3339();
+                    let removable = super::cli_runtime_catalog::is_bob_managed_binary(&binary);
+                    let store_path =
+                        super::cli_runtime_catalog::preferred_registry_install_path(&binary);
+                    let size_path = if store_path.is_dir() {
+                        store_path.as_path()
+                    } else {
+                        binary.as_path()
+                    };
+                    db.connection().execute(
+                        "UPDATE runtime_registry SET status='installed',install_path=?1,size_bytes=?2,
+                                installed_version=?3,updated_at=?4,error=NULL,removable=?5,
+                                installed_at=COALESCE(installed_at,?4)
+                         WHERE runtime_id=?6",
+                        params![
+                            store_path.to_string_lossy(),
+                            directory_size(size_path)? as i64,
+                            installed_version,
+                            now,
+                            removable as i64,
+                            runtime.runtime_id
+                        ],
+                    )?;
+                    continue;
+                }
+            }
+            let current_bob_path = runtime.install_path.as_deref().map(Path::new).and_then(|path| {
+                if !path.is_dir() {
+                    return None;
+                }
+                read_valid_external_marker(&runtime.runtime_id, path).map(|_| path.to_path_buf())
+            });
+            let current_system_binary = runtime.install_path.as_deref().map(Path::new).and_then(|path| {
+                if path.is_file() && path.exists() {
+                    Some(path.to_path_buf())
+                } else {
+                    None
+                }
+            });
+            if runtime.status == RuntimeStatus::Installed
+                && current_bob_path.is_none()
+                && current_system_binary.is_none()
+            {
+                let now = Utc::now().to_rfc3339();
+                db.connection().execute(
+                    "UPDATE runtime_registry SET status='not_installed',install_path=NULL,size_bytes=0,
+                            installed_at=NULL,installed_version=NULL,updated_at=?1,removable=1,
+                            error='Runtime files are missing on disk'
+                     WHERE runtime_id=?2",
+                    params![now, runtime.runtime_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn storage_report(&self, db: &Database) -> AppResult<RuntimeStorageReport> {
+        self.reconcile_runtime_states(db)?;
         let mut runtimes = self.list(db)?;
         for runtime in &mut runtimes {
             if let Some(path) = runtime.install_path.as_deref() {
@@ -1853,7 +2302,8 @@ fn diagram_runtime_manifest() -> RuntimeManifest {
         source: Some(RuntimeSource {
             kind: "local-application-bundle".into(),
             location: "resources/shared-runtimes/diagram/diagram-runtime.zip".into(),
-            sha256: Some(format!("{:x}", Sha256::digest(SHARED_DIAGRAM_BUNDLE))),
+            // Digest is validated at materialize time; hashing ~40MB here blocks startup.
+            sha256: None,
         }),
         estimated_size_bytes: Some(SHARED_DIAGRAM_BUNDLE.len() as u64),
         removable: false,
@@ -2176,11 +2626,78 @@ pub fn shared_capabilities(manifest: &Value) -> Vec<String> {
 }
 
 pub fn external_runtime_requirements(manifest: &Value) -> Vec<Value> {
-    manifest
+    let mut items = manifest
         .get("externalRuntimes")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let mut seen = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    for binding in catalog_bindings_from_resources(manifest) {
+        let Some(id) = binding.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if seen.insert(id.to_string()) {
+            items.push(binding);
+        }
+    }
+    items
+}
+
+fn catalog_bindings_from_resources(manifest: &Value) -> Vec<Value> {
+    let mut bindings = Vec::new();
+    let Some(resources) = manifest.get("resources").and_then(Value::as_array) else {
+        return bindings;
+    };
+    for resource in resources {
+        if resource.get("optional").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let kind = resource.get("kind").and_then(Value::as_str).unwrap_or("");
+        if !matches!(kind, "stdio-cli" | "host-cli" | "external-runtime") {
+            continue;
+        }
+        if let Some(runtime_id) = resource
+            .get("runtimeId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.starts_with("external."))
+        {
+            if let Some(entry) = super::cli_runtime_catalog::catalog_entries()
+                .iter()
+                .find(|entry| entry.runtime_id == runtime_id)
+            {
+                bindings.push(serde_json::json!({
+                    "id": entry.runtime_id,
+                    "version": entry.version,
+                }));
+                continue;
+            }
+        }
+        let Some(command) = resource
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if matches!(command, "python3" | "python" | "node" | "sh" | "bash" | "zsh") {
+            continue;
+        }
+        if let Some(entry) = super::cli_runtime_catalog::catalog_entries()
+            .iter()
+            .find(|entry| entry.command == command)
+        {
+            bindings.push(serde_json::json!({
+                "id": entry.runtime_id,
+                "version": entry.version,
+            }));
+        }
+    }
+    bindings
 }
 
 pub fn private_dependencies(manifest: &Value) -> Vec<Value> {
@@ -2203,6 +2720,13 @@ pub fn validate_plugin_runtime_requirements(manifest: &Value) -> Vec<String> {
         "visualization",
         "diagram",
         "artifact",
+        "latex",
+        "pandoc",
+        "document.convert",
+        "pdf.preview",
+        "docx",
+        "pptx",
+        "xlsx",
     ];
     if let Some(value) = manifest.get("sharedCapabilities") {
         match value.as_array() {
@@ -2384,6 +2908,12 @@ fn shared_runtime_for_capability(capability: &str) -> Option<&'static str> {
         "visualization" => Some(SHARED_VISUALIZATION_ID),
         "diagram" => Some(SHARED_DIAGRAM_ID),
         "artifact" => Some(SHARED_ARTIFACT_ID),
+        "pdf.preview" => Some("shared.pdf"),
+        "latex" => Some(super::document_runtime::LATEX_ID),
+        "pandoc" | "document.convert" => Some(super::document_runtime::PANDOC_ID),
+        "docx" => Some("shared.docx"),
+        "pptx" => Some("shared.pptx"),
+        "xlsx" => Some("shared.xlsx"),
         _ => None,
     }
 }
@@ -2450,6 +2980,74 @@ fn validate_managed_python_source(manifest: &RuntimeManifest) -> AppResult<()> {
     Ok(())
 }
 
+fn read_valid_external_marker(runtime_id: &str, path: &Path) -> Option<String> {
+    let marker_path = path.join("runtime.json");
+    if !marker_path.is_file() {
+        return None;
+    }
+    let marker: Value = serde_json::from_slice(&std::fs::read(&marker_path).ok()?).ok()?;
+    if marker.get("runtimeId").and_then(Value::as_str) != Some(runtime_id) {
+        return None;
+    }
+    if marker.get("managedBy").and_then(Value::as_str) != Some(BOB_RUNTIME_OWNER) {
+        return None;
+    }
+    let version = marker.get("version").and_then(Value::as_str)?.to_string();
+    let python_mode = marker
+        .get("pythonMode")
+        .and_then(Value::as_str)
+        .map(parse_python_mode)
+        .unwrap_or(PythonMode::Shared);
+    match python_mode {
+        PythonMode::Isolated => path.join("venv").is_dir().then_some(version),
+        PythonMode::Shared => path.join("python").is_dir().then_some(version),
+        PythonMode::None => {
+            if marker
+                .get("executable")
+                .and_then(Value::as_str)
+                .map(Path::new)
+                .is_some_and(|executable| executable.is_file())
+            {
+                return Some(version);
+            }
+            let command = marker.get("command").and_then(Value::as_str)?;
+            path.join("bin").join(command).is_file().then_some(version)
+        }
+    }
+}
+
+fn discover_bob_managed_external_install(
+    runtime_root: &Path,
+    runtime_id: &str,
+) -> Option<(PathBuf, String, PythonMode)> {
+    let slug = runtime_id.strip_prefix("external.")?;
+    let parent = runtime_root.join("external").join(slug);
+    if !parent.is_dir() {
+        return None;
+    }
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(&parent).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(version) = read_valid_external_marker(runtime_id, &path) else {
+            continue;
+        };
+        let marker: Value =
+            serde_json::from_slice(&std::fs::read(path.join("runtime.json")).ok()?).ok()?;
+        let python_mode = marker
+            .get("pythonMode")
+            .and_then(Value::as_str)
+            .map(parse_python_mode)
+            .unwrap_or(PythonMode::Shared);
+        matches.push((path, version, python_mode));
+    }
+    matches.sort_by(|left, right| left.1.cmp(&right.1));
+    matches.pop()
+}
+
 fn safe_version_segment(version: &str) -> String {
     version
         .chars()
@@ -2475,7 +3073,7 @@ fn python_satisfies(executable: &Path, compatibility: Option<&str>) -> AppResult
     Ok(requirement.matches(&version))
 }
 
-fn resolve_compatible_python(compatibility: Option<&str>) -> AppResult<PathBuf> {
+pub(crate) fn resolve_compatible_python(compatibility: Option<&str>) -> AppResult<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(configured) = std::env::var_os("BOB_SHARED_PYTHON") {
         candidates.push(PathBuf::from(configured));
@@ -2816,6 +3414,64 @@ mod tests {
         db
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn document_runtimes_are_shared_and_convert_real_documents() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = RuntimeManager::with_roots(
+            root.path().join("runtimes"),
+            root.path().join("cache"),
+            root.path().join("artifacts"),
+        );
+        let db = database();
+        manager.seed_registry(&db).unwrap();
+        let manifest = serde_json::json!({"sharedCapabilities":["document.convert", "latex"], "permissions":["command.execute"]});
+        let first = manager
+            .resolve_capability(&db, "plugin-one", &manifest, "document.convert")
+            .unwrap();
+        let second = manager
+            .resolve_capability(&db, "plugin-two", &manifest, "document.convert")
+            .unwrap();
+        assert_eq!(first.executable, second.executable);
+        assert_eq!(first.runtime_type, RuntimeClass::Shared);
+        let latex = manager
+            .resolve_capability(&db, "plugin-one", &manifest, "latex")
+            .unwrap();
+        assert!(Path::new(latex.executable.as_ref().unwrap()).is_file());
+        assert!(latex
+            .environment
+            .iter()
+            .any(|(key, _)| key == "TECTONIC_CACHE_DIR"));
+        assert!(manager
+            .resolve_capability(&db, "undeclared", &serde_json::json!({}), "latex")
+            .is_err());
+        let source = root.path().join("source with spaces.md");
+        let output = root.path().join("output.docx");
+        fs::write(&source, "# Bob Work\n\nConversion native **partagée**.").unwrap();
+        let result = manager
+            .execute_controlled(
+                &manifest,
+                ControlledProcessRequest {
+                    plugin_id: "plugin-one".into(),
+                    runtime_id: first.runtime_id,
+                    executable: first.executable.unwrap().into(),
+                    args: vec![
+                        source.to_string_lossy().into_owned(),
+                        "--output".into(),
+                        output.to_string_lossy().into_owned(),
+                    ],
+                    working_directory: root.path().to_path_buf(),
+                    environment: first.environment,
+                    timeout: Duration::from_secs(30),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
+        let mut archive = zip::ZipArchive::new(fs::File::open(output).unwrap()).unwrap();
+        assert!(archive.by_name("word/document.xml").is_ok());
+    }
+
     #[test]
     fn platform_id_uses_supported_runtime_vocabulary() {
         let value = RuntimeManager::platform_id();
@@ -2850,6 +3506,9 @@ mod tests {
         assert!(runtimes
             .iter()
             .any(|item| item.runtime_id == SHARED_ARTIFACT_ID));
+        assert!(runtimes.iter().any(|item| item.runtime_id == "shared.docx"));
+        assert!(runtimes.iter().any(|item| item.runtime_id == "shared.pptx"));
+        assert!(runtimes.iter().any(|item| item.runtime_id == "shared.xlsx"));
         let qiskit = runtimes
             .iter()
             .find(|item| item.runtime_id == "external.qiskit")
@@ -2867,6 +3526,92 @@ mod tests {
         assert_eq!(codegraph.status, RuntimeStatus::NotInstalled);
         assert!(codegraph.removable);
         assert!(codegraph.capabilities.contains(&"code.call-graph".into()));
+        let docling = runtimes
+            .iter()
+            .find(|item| item.runtime_id == "external.docling-cli")
+            .unwrap();
+        assert_eq!(docling.runtime_type, RuntimeClass::ExternalManaged);
+        assert_eq!(docling.management, "automatic");
+        assert_eq!(docling.python_mode, PythonMode::Isolated);
+        assert!(matches!(
+            docling.status,
+            RuntimeStatus::NotInstalled | RuntimeStatus::Installed
+        ));
+        if docling.status == RuntimeStatus::NotInstalled {
+            assert!(docling.removable);
+        }
+    }
+
+    #[test]
+    fn stdio_cli_resources_bind_catalog_runtimes_in_settings() {
+        let root = tempfile::tempdir().expect("root");
+        let manager = RuntimeManager::with_roots(
+            root.path().join("runtimes"),
+            root.path().join("cache"),
+            root.path().join("artifacts"),
+        );
+        let db = database();
+        manager.seed_registry(&db).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO plugins(id,name,version,manifest,created_at,updated_at)
+                 VALUES ('builtin-docling','Docling','1.0.0','{}','now','now')",
+                [],
+            )
+            .unwrap();
+        let manifest = serde_json::json!({
+            "slug": "bob-work-docling",
+            "permissions": [{"type": "command.execute"}],
+            "resources": [{
+                "kind": "stdio-cli",
+                "label": "CLI Docling",
+                "command": "docling",
+                "package": "docling",
+                "optional": false
+            }]
+        });
+        manager
+            .register_plugin_requirements(&db, "builtin-docling", &manifest)
+            .unwrap();
+        let runtime = manager
+            .get(&db, "external.docling-cli")
+            .unwrap()
+            .expect("docling runtime");
+        assert!(runtime.consumers.contains(&"builtin-docling".into()));
+        assert_eq!(runtime.runtime_type, RuntimeClass::ExternalManaged);
+        assert_eq!(runtime.management, "automatic");
+    }
+
+    #[test]
+    fn resolve_managed_cli_under_root_finds_legacy_bin_layout() {
+        let root = tempfile::tempdir().expect("root");
+        let version_root = root.path().join("2.123.0");
+        let bin_dir = version_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let binary = bin_dir.join("docling");
+        std::fs::write(&binary, "#!/bin/sh\necho docling\n").unwrap();
+        assert_eq!(
+            resolve_managed_cli_under_root(&version_root, "docling"),
+            Some(binary)
+        );
+    }
+
+    #[test]
+    fn resolve_managed_cli_under_root_prefers_venv_bin() {
+        let root = tempfile::tempdir().expect("root");
+        let version_root = root.path().join("2.123.0");
+        let venv_bin = version_root.join("venv").join("bin");
+        let legacy_bin = version_root.join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::create_dir_all(&legacy_bin).unwrap();
+        let venv_cli = venv_bin.join("docling");
+        let legacy_cli = legacy_bin.join("docling");
+        std::fs::write(&venv_cli, "venv").unwrap();
+        std::fs::write(&legacy_cli, "legacy").unwrap();
+        assert_eq!(
+            resolve_managed_cli_under_root(&version_root, "docling"),
+            Some(venv_cli)
+        );
     }
 
     #[test]
@@ -2950,6 +3695,92 @@ mod tests {
         assert_eq!(
             manager.get(&db, &manifest.id).unwrap().unwrap().status,
             RuntimeStatus::NotInstalled
+        );
+    }
+
+    #[test]
+    fn managed_cli_catalog_entries_are_automatic_and_removable() {
+        let root = tempfile::tempdir().expect("root");
+        let manager = RuntimeManager::with_roots(
+            root.path().join("runtimes"),
+            root.path().join("cache"),
+            root.path().join("artifacts"),
+        );
+        let db = database();
+        manager.seed_registry(&db).unwrap();
+        let ibmcloud = manager
+            .get(&db, "external.ibmcloud-cli")
+            .unwrap()
+            .expect("ibmcloud runtime");
+        assert_eq!(ibmcloud.management, "automatic");
+        assert!(ibmcloud.removable);
+        assert!(crate::services::cli_runtime_catalog::catalog_entries()
+            .iter()
+            .any(|entry| entry.runtime_id == "external.ibmcloud-cli"));
+    }
+
+    #[test]
+    fn reconcile_detects_system_cli_when_installed_on_path() {
+        if which::which("gcloud").is_err() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("root");
+        let manager = RuntimeManager::with_roots(
+            root.path().join("runtimes"),
+            root.path().join("cache"),
+            root.path().join("artifacts"),
+        );
+        let db = database();
+        manager.seed_registry(&db).unwrap();
+        let runtime = manager.get(&db, "external.gcloud-cli").unwrap().unwrap();
+        assert_eq!(runtime.status, RuntimeStatus::Installed);
+        assert!(!runtime.removable);
+        assert!(runtime.install_path.as_deref().is_some_and(|path| path.contains("gcloud")));
+    }
+
+    #[test]
+    fn reconcile_detects_bob_managed_external_runtime_on_disk() {
+        let root = tempfile::tempdir().expect("root");
+        let manager = RuntimeManager::with_roots(
+            root.path().join("runtimes"),
+            root.path().join("cache"),
+            root.path().join("artifacts"),
+        );
+        let db = database();
+        manager.seed_registry(&db).unwrap();
+        let manifest = qiskit_runtime_manifest();
+        let installed = root
+            .path()
+            .join("runtimes/external/qiskit")
+            .join(safe_version_segment(&manifest.version));
+        fs::create_dir_all(installed.join("python/qiskit")).unwrap();
+        fs::write(installed.join("python/qiskit/__init__.py"), b"__version__ = '2.5.2'\n")
+            .unwrap();
+        fs::write(
+            installed.join("runtime.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "runtimeId": manifest.id,
+                "version": manifest.version,
+                "managedBy": BOB_RUNTIME_OWNER,
+                "pythonMode": "shared"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manager.get(&db, "external.qiskit").unwrap().unwrap().status,
+            RuntimeStatus::NotInstalled
+        );
+        manager.reconcile_runtime_states(&db).unwrap();
+        let runtime = manager.get(&db, "external.qiskit").unwrap().unwrap();
+        assert_eq!(runtime.status, RuntimeStatus::Installed);
+        assert_eq!(
+            runtime.install_path.as_deref(),
+            Some(installed.to_str().unwrap())
+        );
+        assert_eq!(
+            runtime.installed_version.as_deref(),
+            Some(manifest.version.as_str())
         );
     }
 

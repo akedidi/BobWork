@@ -20,6 +20,12 @@ use uuid::Uuid;
 
 pub struct PluginService;
 
+struct NestedSkillMeta {
+    name: String,
+    display_name: String,
+    description: String,
+}
+
 impl PluginService {
     pub fn new() -> Self {
         Self
@@ -200,6 +206,20 @@ impl PluginService {
         }
         if let Err(error) = self.prune_shadow_agentic_plugins(db) {
             warn!("Unable to prune shadow agentic plugins: {}", error);
+        }
+        let active_deployments = self
+            .get_all(db)?
+            .into_iter()
+            .filter(|plugin| plugin.install_state == "installed")
+            .map(|plugin| (plugin.id, plugin.manifest))
+            .collect::<Vec<_>>();
+        if let Err(error) =
+            PluginDeployService::new().prune_stale_managed_deployments(&active_deployments)
+        {
+            warn!(
+                "Unable to prune stale managed plugin deployments: {}",
+                error
+            );
         }
         Ok(())
     }
@@ -396,22 +416,27 @@ impl PluginService {
         Ok(())
     }
 
-    /// Promote the former personal Senior Cloud Architect plugin to the protected
-    /// first-party Cloud Architect identity while preserving its version history.
+    /// Consolidate both former Cloud Architect identities into the canonical
+    /// agentic plugin id while preserving version history.
     fn promote_legacy_cloud_architect(&self, db: &Database) -> AppResult<()> {
-        const LEGACY_ID: &str = "agentic-senior-cloud-architect";
-        const TARGET_ID: &str = "builtin-cloud-architect";
-        let Some(legacy) = self.get_by_id(db, LEGACY_ID)? else {
-            return Ok(());
-        };
-        if self.get_by_id(db, TARGET_ID)?.is_some() {
-            let conn = db.conn.lock().unwrap();
-            let _ = conn.execute(
-                "DELETE FROM plugin_versions WHERE plugin_id=?1",
-                params![LEGACY_ID],
-            );
-            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
-        } else {
+        const LEGACY_IDS: &[&str] = &["agentic-senior-cloud-architect", "builtin-cloud-architect"];
+        const TARGET_ID: &str = "agentic-cloud-architect";
+        for legacy_id in LEGACY_IDS {
+            let Some(legacy) = self.get_by_id(db, legacy_id)? else {
+                continue;
+            };
+            if self.get_by_id(db, TARGET_ID)?.is_some() {
+                let conn = db.conn.lock().unwrap();
+                let _ = conn.execute(
+                    "DELETE FROM plugin_versions WHERE plugin_id=?1",
+                    params![legacy_id],
+                );
+                conn.execute("DELETE FROM plugins WHERE id=?1", params![legacy_id])?;
+                drop(conn);
+                let deployer = PluginDeployService::new();
+                let _ = deployer.remove_owned_deployments(legacy_id);
+                continue;
+            }
             let mut manifest = legacy.manifest.clone();
             if let Some(object) = manifest.as_object_mut() {
                 object.insert("builtin".into(), serde_json::Value::Bool(true));
@@ -431,18 +456,26 @@ impl PluginService {
                  (id,name,version,author,description,scope,category,manifest,install_state,validation_state,signature,created_at,updated_at,last_executed_at,available_version)
                  SELECT ?1,'Cloud Architect',version,'Bob Work',description,scope,category,?2,install_state,validation_state,signature,created_at,?3,last_executed_at,available_version
                  FROM plugins WHERE id=?4",
-                params![TARGET_ID, manifest.to_string(), now, LEGACY_ID],
+                params![TARGET_ID, manifest.to_string(), now, legacy_id],
             )?;
             conn.execute(
                 "UPDATE plugin_versions SET plugin_id=?1 WHERE plugin_id=?2",
-                params![TARGET_ID, LEGACY_ID],
+                params![TARGET_ID, legacy_id],
             )?;
-            conn.execute("DELETE FROM plugins WHERE id=?1", params![LEGACY_ID])?;
+            conn.execute("DELETE FROM plugins WHERE id=?1", params![legacy_id])?;
+            drop(conn);
+            let deployer = PluginDeployService::new();
+            let _ = deployer.remove_owned_deployments(legacy_id);
+            if legacy.install_state == "installed" {
+                if let Err(error) = deployer.deploy(TARGET_ID, &manifest) {
+                    warn!(
+                        "Cloud Architect migration deploy failed (non-fatal): {}",
+                        error
+                    );
+                }
+            }
+            info!("Promoted legacy {legacy_id} → {TARGET_ID}");
         }
-        let deployer = PluginDeployService::new();
-        let _ = deployer.undeploy(LEGACY_ID);
-        let _ = deployer.retire_agentic_bundle(LEGACY_ID);
-        info!("Promoted legacy {LEGACY_ID} → {TARGET_ID}");
         Ok(())
     }
 
@@ -477,6 +510,8 @@ impl PluginService {
                     );
                     conn.execute("DELETE FROM plugins WHERE id=?1", params![legacy_id])?;
                     drop(conn);
+                    let deployer = PluginDeployService::new();
+                    let _ = deployer.remove_owned_deployments(&legacy_id);
                     info!(
                         "Removed legacy IBM agentic row {} (target {} already present)",
                         legacy_id, builtin.id
@@ -509,6 +544,8 @@ impl PluginService {
                     )?;
                     conn.execute("DELETE FROM plugins WHERE id=?1", params![legacy_id])?;
                 }
+                let deployer = PluginDeployService::new();
+                let _ = deployer.remove_owned_deployments(&legacy_id);
                 info!("Promoted legacy {legacy_id} → {}", builtin.id);
             }
         }
@@ -658,7 +695,12 @@ impl PluginService {
     }
 
     /// Register local Office / packaged MCP servers for installed plugins that ship with Bob Work.
-    pub fn sync_installed_office_mcps(&self, db: &Database, bob_path: &str) -> AppResult<()> {
+    pub fn sync_installed_office_mcps(
+        &self,
+        db: &Database,
+        bob_path: &str,
+        runtime_manager: &crate::services::runtime_manager::RuntimeManager,
+    ) -> AppResult<()> {
         let packaged = builtin_document_plugins()
             .into_iter()
             .chain(packaged_work_plugins());
@@ -672,16 +714,106 @@ impl PluginService {
             if plugin.install_state != "installed" {
                 continue;
             }
-            let manifest = if PluginMcpService::has_servers(&plugin.manifest) {
+            let mut manifest = if PluginMcpService::has_servers(&plugin.manifest) {
                 plugin.manifest.clone()
             } else {
                 builtin.manifest.clone()
             };
+            manifest = Self::enrich_office_mcp_manifest(db, runtime_manager, builtin.id, manifest)?;
             let bundle_dir = PluginMcpService::bundle_dir(&manifest)?;
             PluginMcpService::new()
                 .sync(bob_path, builtin.id, &manifest, &bundle_dir, true)
                 .map(|_| ())?;
         }
+        Ok(())
+    }
+
+    fn enrich_office_mcp_manifest(
+        db: &Database,
+        runtime_manager: &crate::services::runtime_manager::RuntimeManager,
+        plugin_id: &str,
+        mut manifest: serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        let Some(slug) = manifest.get("slug").and_then(|value| value.as_str()) else {
+            return Ok(manifest);
+        };
+        let Some(capability) = crate::services::office_runtime::capability_for_slug(slug) else {
+            return Ok(manifest);
+        };
+        if !crate::services::runtime_manager::shared_capabilities(&manifest)
+            .iter()
+            .any(|item| item == capability)
+        {
+            return Ok(manifest);
+        }
+        runtime_manager.register_plugin_requirements(db, plugin_id, &manifest)?;
+        let handle = runtime_manager.resolve_capability(
+            db,
+            plugin_id,
+            &manifest,
+            capability,
+        )?;
+        let pythonpath = handle
+            .environment
+            .iter()
+            .find(|(key, _)| key == "PYTHONPATH")
+            .map(|(_, value)| value.clone());
+        let python_command = handle
+            .executable
+            .clone()
+            .unwrap_or_else(|| "python3".into());
+        let Some(servers) = manifest.get_mut("mcpServers").and_then(|value| value.as_object_mut())
+        else {
+            return Ok(manifest);
+        };
+        for server in servers.values_mut() {
+            let Some(config) = server.as_object_mut() else {
+                continue;
+            };
+            config.insert(
+                "command".into(),
+                serde_json::Value::String(python_command.clone()),
+            );
+            if let Some(pythonpath) = pythonpath.as_ref() {
+                let env = config
+                    .entry("env")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(object) = env.as_object_mut() {
+                    object.insert(
+                        "PYTHONPATH".into(),
+                        serde_json::Value::String(pythonpath.clone()),
+                    );
+                }
+            }
+        }
+        Ok(manifest)
+    }
+
+    /// Materialize shared Office runtimes and sync local MCP when a Word/PPT/Excel
+    /// attachment is present even if the user did not @mention the plugin.
+    pub fn ensure_office_plugin_ready(
+        &self,
+        db: &Database,
+        runtime_manager: &crate::services::runtime_manager::RuntimeManager,
+        bob_path: Option<&str>,
+        plugin: &crate::models::plugin::Plugin,
+    ) -> AppResult<()> {
+        if plugin.manifest.get("specializedMode").is_none()
+            || !PluginMcpService::has_servers(&plugin.manifest)
+        {
+            return Ok(());
+        }
+        let manifest = Self::enrich_office_mcp_manifest(
+            db,
+            runtime_manager,
+            &plugin.id,
+            plugin.manifest.clone(),
+        )?;
+        let Some(bob_path) = bob_path.filter(|value| !value.trim().is_empty()) else {
+            return Ok(());
+        };
+        let bundle_dir = PluginMcpService::bundle_dir(&manifest)?;
+        PluginMcpService::new().sync(bob_path, &plugin.id, &manifest, &bundle_dir, true)?;
         Ok(())
     }
 
@@ -778,6 +910,31 @@ impl PluginService {
         }
     }
 
+    /// Resolve a user-facing plugin mention by registry id or stable manifest
+    /// slug (builtins and personal plugins), including stripped catalog keys
+    /// such as `visualize` for slug `visualize` / id `builtin-visualize`.
+    pub fn get_by_reference(&self, db: &Database, reference: &str) -> AppResult<Option<Plugin>> {
+        if let Some(plugin) = self.get_by_id(db, reference)? {
+            return Ok(Some(plugin));
+        }
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.get_all(db)?.into_iter().find(|plugin| {
+            let slug = plugin
+                .manifest
+                .get("slug")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if slug == reference {
+                return true;
+            }
+            catalog_slug_keys(slug).contains(reference)
+                || catalog_slug_keys(&plugin.id).contains(reference)
+        }))
+    }
+
     /// Import agent-created Bob Shell skill bundles into Bob Work's plugin
     /// registry. A bundle is declarative: SKILL.md describes the agent
     /// behavior, `.bob-work-plugin.json` declares permissions/runtime, and
@@ -859,10 +1016,17 @@ impl PluginService {
                         }
                     }
                 }
-                Err(error) => warn!(
-                    "Ignored invalid agentic plugin bundle {:?}: {:?}",
-                    bundle_dir, error
-                ),
+                Err(error) => {
+                    let message = error.to_string();
+                    warn!(
+                        "Ignored invalid agentic plugin bundle {:?}: {}",
+                        bundle_dir, message
+                    );
+                    let _ = std::fs::write(
+                        bundle_dir.join(".bob-work-import-error"),
+                        format!("{message}\n"),
+                    );
+                }
             }
         }
         Ok(imported)
@@ -893,6 +1057,12 @@ impl PluginService {
         let object = manifest
             .as_object_mut()
             .ok_or_else(|| AppError::Plugin("Plugin manifest must be a JSON object".into()))?;
+        // Prompt-created bundles may use the older, human-facing manifest
+        // vocabulary. Normalize only aliases that have one unambiguous V2
+        // representation, then run the same strict security validation as for
+        // hand-authored bundles.
+        Self::normalize_prompt_created_manifest(object);
+        Self::enrich_manifest_skills(bundle_dir, object);
         let directory_slug = bundle_dir
             .file_name()
             .and_then(|value| value.to_str())
@@ -1001,6 +1171,15 @@ impl PluginService {
             .unwrap_or("executable")
             .to_string();
         let id = format!("agentic-{}", slug);
+        if self.get_by_id(db, &id)?.is_none()
+            && !Self::has_agentic_import_consent(bundle_dir, object)
+        {
+            warn!(
+                "Skipping agentic bundle {:?}: missing bobWorkImportConsent / .bob-work-import-ok (first import only)",
+                bundle_dir
+            );
+            return Ok(None);
+        }
         if self.slug_owned_by_canonical_plugin(db, &slug)? {
             warn!(
                 "Skipping agentic bundle {:?}: slug {} is owned by a packaged/built-in plugin",
@@ -1086,19 +1265,35 @@ impl PluginService {
             } else {
                 self.persist_version(db, &candidate, Some(bundle_dir), false)?;
             }
-            {
-                let conn = db.conn.lock().unwrap();
-                conn.execute(
-                    "UPDATE plugins SET available_version=?1, updated_at=?2 WHERE id=?3",
-                    params![version, now, id],
-                )?;
-            }
             std::fs::write(bundle_dir.join(".bob-work-plugin-id"), &id)?;
             info!(
                 "Detected agentic plugin update {} {} from {:?}",
                 id, candidate.version, bundle_dir
             );
-            return self.get_by_id(db, &id);
+            // Personal agentic bundles are the live source of truth under
+            // ~/.bob/skills/<slug>/. Apply the bump immediately — staging an
+            // "Update" button forced a later deploy() that rewrote SKILL.md
+            // with policy jargon and wiped .bob-work-plugin.json.
+            match self.activate_version(db, &id, &version) {
+                Ok(plugin) => {
+                    let _ = std::fs::remove_file(bundle_dir.join(".bob-work-import-error"));
+                    info!("Auto-activated agentic plugin {} to {}", id, version);
+                    return Ok(Some(plugin));
+                }
+                Err(error) => {
+                    warn!(
+                        "Could not auto-activate agentic plugin {} to {}: {:?}",
+                        id, version, error
+                    );
+                    let now = Utc::now().to_rfc3339();
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE plugins SET available_version=?1, updated_at=?2 WHERE id=?3",
+                        params![version, now, id],
+                    )?;
+                    return self.get_by_id(db, &id);
+                }
+            }
         }
 
         let now = Utc::now().to_rfc3339();
@@ -1124,6 +1319,7 @@ impl PluginService {
             )?;
         }
         std::fs::write(bundle_dir.join(".bob-work-plugin-id"), &id)?;
+        let _ = std::fs::remove_file(bundle_dir.join(".bob-work-import-error"));
         info!("Imported agentic Bob plugin {} from {:?}", id, bundle_dir);
         let plugin = self
             .get_by_id(db, &id)?
@@ -1140,6 +1336,342 @@ impl PluginService {
             })
             && !value.starts_with('-')
             && !value.ends_with('-')
+    }
+
+    fn has_agentic_import_consent(
+        bundle_dir: &Path,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> bool {
+        if object.get("bobWorkImportConsent") == Some(&serde_json::Value::Bool(true)) {
+            return true;
+        }
+        bundle_dir.join(".bob-work-import-ok").is_file()
+    }
+
+    fn normalize_prompt_created_manifest(object: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(permissions) = object
+            .get_mut("permissions")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for permission in permissions.iter_mut() {
+                if let Some(permission_type) = permission.as_str().map(str::to_string) {
+                    *permission = serde_json::json!({ "type": permission_type });
+                }
+            }
+        }
+
+        if let Some(dependencies) = object
+            .get_mut("privateDependencies")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            // Prompt-created bundles often invent `{name, source:"pypi"}` which fails
+            // Runtime Manager validation and silently blocks Plugins import. Drop the
+            // invalid shorthand; keep only V2-shaped privateDependencies.
+            dependencies.retain(|item| {
+                let Some(object) = item.as_object() else {
+                    return false;
+                };
+                object.get("id").and_then(serde_json::Value::as_str).is_some()
+                    && object
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|kind| {
+                            matches!(
+                                kind,
+                                "binary" | "cli" | "native" | "python" | "node" | "wasm"
+                            )
+                        })
+            });
+        }
+
+        let has_process = object
+            .get("entrypoints")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entrypoints| !entrypoints.is_empty());
+        if object.get("category").and_then(serde_json::Value::as_str) == Some("personal") {
+            object.insert(
+                "category".into(),
+                serde_json::Value::String(if has_process {
+                    "executable".into()
+                } else {
+                    "recipe".into()
+                }),
+            );
+        }
+
+        let Some(entrypoints) = object
+            .get_mut("entrypoints")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        for entrypoint in entrypoints {
+            let Some(entrypoint) = entrypoint.as_object_mut() else {
+                continue;
+            };
+            if entrypoint.get("name").is_none() {
+                if let Some(name) = entrypoint
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                {
+                    entrypoint.insert("name".into(), serde_json::Value::String(name));
+                }
+            }
+            let legacy_shell =
+                entrypoint.get("type").and_then(serde_json::Value::as_str) == Some("shell");
+            if legacy_shell && entrypoint.get("runtime").is_none() {
+                let runtime = entrypoint
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|runtime| matches!(*runtime, "bash" | "sh" | "zsh"))
+                    .unwrap_or("sh")
+                    .to_string();
+                entrypoint.insert("runtime".into(), serde_json::Value::String(runtime));
+            }
+            if legacy_shell && entrypoint.get("path").is_none() {
+                if let Some(path) = entrypoint
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|args| args.first())
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                {
+                    entrypoint.insert("path".into(), serde_json::Value::String(path));
+                }
+            }
+        }
+    }
+
+    /// Turn prompt-created `skills: ["skills/foo/SKILL.md"]` (or bare names) into the
+    /// object shape the Plugins detail UI expects: `{ name, displayName, description, path }`.
+    /// Also discovers nested `skills/*/SKILL.md` that were omitted from the manifest.
+    fn enrich_manifest_skills(
+        bundle_dir: &Path,
+        object: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        let mut enriched = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let declared = object
+            .get("skills")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        for skill in declared {
+            if let Some(path) = skill.as_str() {
+                let path = path.trim();
+                if path.is_empty() {
+                    continue;
+                }
+                if path.contains('/') || path.to_ascii_lowercase().ends_with(".md") {
+                    let meta = Self::nested_skill_meta(bundle_dir, path);
+                    Self::push_manifest_skill(
+                        &mut enriched,
+                        &mut seen,
+                        meta.name,
+                        meta.display_name,
+                        meta.description,
+                        Some(path.to_string()),
+                    );
+                } else {
+                    Self::push_manifest_skill(
+                        &mut enriched,
+                        &mut seen,
+                        path.to_string(),
+                        path.to_string(),
+                        String::new(),
+                        None,
+                    );
+                }
+                continue;
+            }
+            let Some(skill_object) = skill.as_object() else {
+                continue;
+            };
+            let path = skill_object
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let mut name = skill_object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_default();
+            let mut description = skill_object
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let mut display_name = skill_object
+                .get("displayName")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_default();
+            if let Some(path) = path.as_deref() {
+                let meta = Self::nested_skill_meta(bundle_dir, path);
+                if name.is_empty() {
+                    name = meta.name;
+                }
+                if description.is_empty() {
+                    description = meta.description;
+                }
+                if display_name.is_empty() {
+                    display_name = meta.display_name;
+                }
+            }
+            if name.is_empty() {
+                continue;
+            }
+            if display_name.is_empty() {
+                display_name = name.clone();
+            }
+            Self::push_manifest_skill(
+                &mut enriched,
+                &mut seen,
+                name,
+                display_name,
+                description,
+                path,
+            );
+        }
+
+        // Discover nested skills that the author forgot to list.
+        let skills_root = bundle_dir.join("skills");
+        if skills_root.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&skills_root) {
+                for entry in entries.filter_map(Result::ok) {
+                    let skill_dir = entry.path();
+                    if !skill_dir.is_dir() {
+                        continue;
+                    }
+                    let skill_file = skill_dir.join("SKILL.md");
+                    if !skill_file.is_file() {
+                        continue;
+                    }
+                    let relative = format!(
+                        "skills/{}/SKILL.md",
+                        entry.file_name().to_string_lossy()
+                    );
+                    let meta = Self::nested_skill_meta(bundle_dir, &relative);
+                    Self::push_manifest_skill(
+                        &mut enriched,
+                        &mut seen,
+                        meta.name,
+                        meta.display_name,
+                        meta.description,
+                        Some(relative),
+                    );
+                }
+            }
+        }
+
+        if enriched.is_empty() {
+            object.remove("skills");
+        } else {
+            object.insert("skills".into(), serde_json::Value::Array(enriched));
+        }
+    }
+
+    fn push_manifest_skill(
+        enriched: &mut Vec<serde_json::Value>,
+        seen: &mut std::collections::HashSet<String>,
+        name: String,
+        display_name: String,
+        description: String,
+        path: Option<String>,
+    ) {
+        let key = name.to_ascii_lowercase();
+        if name.is_empty() || !seen.insert(key) {
+            return;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".into(), serde_json::Value::String(name.clone()));
+        entry.insert(
+            "displayName".into(),
+            serde_json::Value::String(if display_name.is_empty() {
+                name
+            } else {
+                display_name
+            }),
+        );
+        if !description.is_empty() {
+            entry.insert(
+                "description".into(),
+                serde_json::Value::String(description),
+            );
+        }
+        if let Some(path) = path.filter(|value| !value.is_empty()) {
+            entry.insert("path".into(), serde_json::Value::String(path));
+        }
+        enriched.push(serde_json::Value::Object(entry));
+    }
+
+    fn nested_skill_meta(bundle_dir: &Path, relative_path: &str) -> NestedSkillMeta {
+        let fallback = Self::skill_name_from_path(relative_path);
+        let absolute = bundle_dir.join(relative_path);
+        let Ok(markdown) = std::fs::read_to_string(&absolute) else {
+            return NestedSkillMeta {
+                name: fallback.clone(),
+                display_name: fallback,
+                description: String::new(),
+            };
+        };
+        let (name, description) = Self::skill_frontmatter_name_description(&markdown);
+        let name = name.unwrap_or(fallback.clone());
+        NestedSkillMeta {
+            display_name: name.clone(),
+            name,
+            description: description.unwrap_or_default(),
+        }
+    }
+
+    fn skill_name_from_path(path: &str) -> String {
+        let normalized = path.trim().replace('\\', "/");
+        let parts: Vec<_> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+        if parts.len() >= 2 && parts[parts.len() - 1].eq_ignore_ascii_case("SKILL.md") {
+            return parts[parts.len() - 2].to_string();
+        }
+        parts
+            .last()
+            .map(|value| value.trim_end_matches(".md").trim_end_matches(".MD"))
+            .filter(|value| !value.is_empty())
+            .unwrap_or(path)
+            .to_string()
+    }
+
+    fn skill_frontmatter_name_description(markdown: &str) -> (Option<String>, Option<String>) {
+        let Some(rest) = markdown.strip_prefix("---") else {
+            return (None, None);
+        };
+        let Some((frontmatter, _)) = rest.split_once("\n---") else {
+            return (None, None);
+        };
+        let mut name = None;
+        let mut description = None;
+        for line in frontmatter.lines() {
+            let trimmed = line.trim();
+            if let Some(value) = trimmed.strip_prefix("name:") {
+                let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+                if !value.is_empty() {
+                    name = Some(value.to_string());
+                }
+            } else if let Some(value) = trimmed.strip_prefix("description:") {
+                let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+                if !value.is_empty() {
+                    description = Some(value.to_string());
+                }
+            }
+        }
+        (name, description)
     }
 
     fn skill_body(markdown: &str) -> String {
@@ -1377,7 +1909,13 @@ impl PluginService {
             "INSERT INTO plugin_versions
              (plugin_id,version,name,author,description,scope,category,manifest,
               validation_state,signature,release_notes,bundle_snapshot_path,created_at,installed_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+             ON CONFLICT(plugin_id, version) DO UPDATE SET
+             name=excluded.name,author=excluded.author,description=excluded.description,
+             scope=excluded.scope,category=excluded.category,manifest=excluded.manifest,
+             validation_state=excluded.validation_state,signature=excluded.signature,
+             release_notes=excluded.release_notes,bundle_snapshot_path=excluded.bundle_snapshot_path,
+             created_at=excluded.created_at,installed_at=excluded.installed_at",
             params![
                 plugin.id,
                 plugin.version,
@@ -1395,6 +1933,53 @@ impl PluginService {
                 installed_at,
             ],
         )?;
+        drop(conn);
+        self.prune_plugin_versions(db, &plugin.id, &[plugin.version.as_str()])?;
+        Ok(())
+    }
+
+    /// Bob Work keeps at most the active version and one staged update — no history.
+    fn prune_plugin_versions(
+        &self,
+        db: &Database,
+        plugin_id: &str,
+        also_keep: &[&str],
+    ) -> AppResult<()> {
+        let plugin = self
+            .get_by_id(db, plugin_id)?
+            .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
+        let mut keep = vec![plugin.version.clone()];
+        if let Some(available) = plugin.available_version.clone() {
+            if available != plugin.version {
+                keep.push(available);
+            }
+        }
+        for version in also_keep {
+            if !keep.iter().any(|kept| kept == version) {
+                keep.push((*version).to_string());
+            }
+        }
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT version, bundle_snapshot_path FROM plugin_versions WHERE plugin_id=?1",
+        )?;
+        let rows = stmt
+            .query_map(params![plugin_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (version, snapshot_path) in rows {
+            if keep.iter().any(|kept| kept == &version) {
+                continue;
+            }
+            if let Some(path) = snapshot_path.filter(|path| !path.trim().is_empty()) {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            conn.execute(
+                "DELETE FROM plugin_versions WHERE plugin_id=?1 AND version=?2",
+                params![plugin_id, version],
+            )?;
+        }
         Ok(())
     }
 
@@ -1460,18 +2045,21 @@ impl PluginService {
                 } else if plugin.available_version.as_deref() == Some(version.as_str()) {
                     "available"
                 } else {
-                    "previous"
+                    return Ok(None);
                 };
-                Ok(PluginVersion {
+                Ok(Some(PluginVersion {
                     plugin_id: row.get(0)?,
                     version,
                     release_notes: row.get(2)?,
                     created_at: row.get(3)?,
                     installed_at: row.get(4)?,
                     state: state.into(),
-                })
+                }))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         versions.sort_by(|left, right| {
             let left = Version::parse(&left.version).ok();
             let right = Version::parse(&right.version).ok();
@@ -1589,13 +2177,18 @@ impl PluginService {
         if current.version == version {
             return Ok(current);
         }
-        // Built-ins are re-applied to the packaged version on every plugin list.
-        // Allowing an explicit downgrade would only flash a success toast then
-        // snap back — refuse it with a clear message instead.
+        let current_semver = Self::parse_version(&current.version)?;
+        let target_semver = Self::parse_version(version)?;
+        if target_semver < current_semver {
+            return Err(AppError::ValidationFailed(format!(
+                "« {} » : Bob Work ne conserve plus les anciennes versions. \
+                 Seule une mise à jour vers une version plus récente est possible (actuelle : {}).",
+                current.name, current.version
+            )));
+        }
         if let Some(packaged) = Self::packaged_builtin_version(plugin_id) {
             let packaged_version = Self::parse_version(packaged)?;
-            let target_version = Self::parse_version(version)?;
-            if target_version < packaged_version {
+            if target_semver < packaged_version {
                 return Err(AppError::ValidationFailed(format!(
                     "« {} » est un plugin intégré : la version livrée {} ne peut pas être rétrogradée.",
                     current.name, packaged
@@ -1660,8 +2253,10 @@ impl PluginService {
                     serde_json::Value::String(canonical.to_string_lossy().to_string()),
                 );
             }
-        }
-        if current.install_state == "installed" {
+            // Agentic personal plugins already live under ~/.bob/skills/<slug>/.
+            // Regenerating via deploy() injects invocation policy into SKILL.md
+            // and replace_managed_tree can delete .bob-work-plugin.json.
+        } else if current.install_state == "installed" {
             if let Err(error) = PluginDeployService::new().deploy(plugin_id, &manifest) {
                 // Keep the version switch even if skill files cannot be rewritten —
                 // otherwise "Mettre à jour" appears broken while the DB stays old.
@@ -1672,21 +2267,12 @@ impl PluginService {
             }
         }
         let target_semver = Self::parse_version(version)?;
-        let mut available_after = current
+        let available_after = current
             .available_version
             .as_deref()
             .and_then(|value| Self::parse_version(value).ok())
             .filter(|candidate| candidate > &target_semver)
             .map(|candidate| candidate.to_string());
-        let current_semver = Self::parse_version(&current.version)?;
-        if current_semver > target_semver
-            && available_after
-                .as_deref()
-                .and_then(|value| Self::parse_version(value).ok())
-                .is_none_or(|candidate| current_semver > candidate)
-        {
-            available_after = Some(current.version.clone());
-        }
         let now = Utc::now().to_rfc3339();
         {
             let conn = db.conn.lock().unwrap();
@@ -1714,6 +2300,7 @@ impl PluginService {
                 params![now, plugin_id, version],
             )?;
         }
+        self.prune_plugin_versions(db, plugin_id, &[version])?;
         self.get_by_id(db, plugin_id)?
             .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))
     }
@@ -2094,7 +2681,13 @@ impl PluginService {
             let plugin = self
                 .get_by_id(db, plugin_id)?
                 .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-            PluginDeployService::new().deploy(plugin_id, &plugin.manifest)?;
+            if Self::requires_agentic_version_snapshot(plugin_id, &plugin.manifest) {
+                // Keep the authored ~/.bob/skills/<slug>/ tree intact. Full deploy
+                // regenerates SKILL.md and can wipe .bob-work-plugin.json.
+                PluginDeployService::new().restore_agentic_skill(plugin_id)?;
+            } else {
+                PluginDeployService::new().deploy(plugin_id, &plugin.manifest)?;
+            }
         } else {
             PluginDeployService::new().undeploy(plugin_id)?;
         }
@@ -2109,7 +2702,7 @@ impl PluginService {
     }
 }
 
-fn catalog_slug_keys(slug: &str) -> BTreeSet<String> {
+pub fn catalog_slug_keys(slug: &str) -> BTreeSet<String> {
     let normalized = slug.trim().to_ascii_lowercase();
     let mut keys = BTreeSet::new();
     if normalized.is_empty() {
@@ -2153,7 +2746,7 @@ fn office_specialized_mode(
 ) -> serde_json::Value {
     serde_json::json!({
         "label": label,
-        "description": "Mode spécialisé local : consignes, format attendu et outils autorisés (équivalent ChatGPT Work, sans upload serveur).",
+        "description": "Mode spécialisé local : consignes, format attendu et outils autorisés (mode spécialisé local, sans upload serveur).",
         "inputExtensions": input_extensions,
         "outputFormats": output_formats,
         "allowedTools": allowed_tools,
@@ -2354,13 +2947,13 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
     vec![BuiltinPlugin {
         id: "bob-work-cto-invest",
         name: "CTO Investissements",
-        version: "1.2.3",
+        version: "1.2.4",
         description: "Propose des idées d’actions chiffrées pour un Compte-Titres Ordinaire (CTO) français : cotations, screening et brief informatif — pas un conseil personnalisé.",
         category: "executable",
         manifest: serde_json::json!({
             "name": "CTO Investissements",
             "slug": "bob-work-cto-invest",
-            "version": "1.2.3",
+            "version": "1.2.4",
             "description": "Propose des idées d’actions chiffrées pour un Compte-Titres Ordinaire (CTO) français : cotations, screening et brief informatif — pas un conseil personnalisé.",
             "category": "executable",
             "builtin": false,
@@ -2377,7 +2970,7 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
                 {"name": "mcp", "runtime": "python3", "path": "mcp/server.py"}
             ],
             "resources": [
-                {"kind": "stdio-cli", "label": "CLI screen_cto.py", "optional": false, "notes": "Entrypoint local"},
+                {"kind": "bundled-python", "label": "Screening CTO", "script": "scripts/screen_cto.py", "optional": false, "notes": "Script Python embarqué — screening et chiffres pour le CTO."},
                 {"kind": "mcp", "label": "Marché CTO (local)", "optional": false, "provider": "cto-market", "mcpServer": "cto-market", "notes": "Cotations Stooq + Finnhub si clé présente"},
                 {"kind": "api-public", "label": "Stooq", "optional": false, "notes": "Cotations publiques sans clé — source par défaut"},
                 {"kind": "api-key", "label": "Finnhub", "optional": true, "provider": "finnhub", "env": "FINNHUB_API_KEY", "notes": "Fallback US optionnel via FINNHUB_API_KEY (pas un outil MCP séparé)"},
@@ -2397,7 +2990,7 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
                 "fallback": "T3 fixtures (e2e) → T1 Stooq → T2 Finnhub if key → enrich via T4 if user MCP present",
                 "designNotes": "Pas d’OAuth broker inventé : les données marché publiques n’exigent pas de compte. Un MCP distant n’est jamais hardcodé (URL fournie par l’utilisateur). Disclaimer CTO toujours renvoyé par les tools."
             },
-            "releaseNotes": "1.2.3 — Description fonctionnelle (bénéfice utilisateur) au lieu d’un résumé technique des connecteurs.",
+            "releaseNotes": "1.2.4 — Typage correct des sources : script Python embarqué au lieu de CLI locale.",
             "integrations": [],
             "specializedMode": {
                 "label": "Mode CTO Investissements",
@@ -2425,18 +3018,18 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
                     "tools": ["cto_connector_status", "cto_market_snapshot", "cto_screen_ideas"]
                 }
             },
-            "instructions": "Mode CTO Investissements Bob Work — plugin niveau ChatGPT Work (pas un skill seul).\n\nBundle : cto_market.py, scripts/screen_cto.py, mcp/server.py.\nConnecteurs : T1 Stooq (défaut, sans clé) ; T2 Finnhub si FINNHUB_API_KEY ; T3 MCP/CLI local ; T4 MCP distant seulement si l’utilisateur fournit une URL https ou l’ajoute dans Intégrations → MCP (ne jamais inventer ni simuler « connecté »).\nWorkflow : cto_connector_status → snapshot/screen locaux → éventuel use_mcp_tool sur MCP utilisateur → brief.\nRappels : pas un conseil personnalisé ; citer le disclaimer outil ; fiscalité CTO, frais, change US, risque de perte. Structure : sources actives → idées chiffrées → risques → prochaines vérifications."
+            "instructions": "Mode CTO Investissements Bob Work — plugin plugin Bob Work complet (pas un skill seul).\n\nBundle : cto_market.py, scripts/screen_cto.py, mcp/server.py.\nConnecteurs : T1 Stooq (défaut, sans clé) ; T2 Finnhub si FINNHUB_API_KEY ; T3 MCP/CLI local ; T4 MCP distant seulement si l’utilisateur fournit une URL https ou l’ajoute dans Intégrations → MCP (ne jamais inventer ni simuler « connecté »).\nWorkflow : cto_connector_status → snapshot/screen locaux → éventuel use_mcp_tool sur MCP utilisateur → brief.\nRappels : pas un conseil personnalisé ; citer le disclaimer outil ; fiscalité CTO, frais, change US, risque de perte. Structure : sources actives → idées chiffrées → risques → prochaines vérifications."
         }),
     }, BuiltinPlugin {
         id: "bob-work-ibm-pursuit",
         name: "Brief Mission IBM",
-        version: "1.0.0",
+        version: "1.0.1",
         description: "Prépare un brief d’atelier CIO à partir de sources publiques : snapshot client, 3–4 plays IBM et questions — pas une offre commerciale.",
         category: "executable",
         manifest: serde_json::json!({
             "name": "Brief Mission IBM",
             "slug": "bob-work-ibm-pursuit",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "description": "Prépare un brief d’atelier CIO à partir de sources publiques : snapshot client, 3–4 plays IBM et questions — pas une offre commerciale.",
             "category": "executable",
             "builtin": true,
@@ -2453,7 +3046,7 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
                 {"name": "mcp", "runtime": "python3", "path": "mcp/server.py"}
             ],
             "resources": [
-                {"kind": "stdio-cli", "label": "CLI brief_pursuit.py", "optional": false, "notes": "Entrypoint local"},
+                {"kind": "bundled-python", "label": "Brief atelier", "script": "scripts/brief_pursuit.py", "optional": false, "notes": "Script Python embarqué — brief d’atelier CIO à partir de sources publiques."},
                 {"kind": "mcp", "label": "Brief Mission IBM (local)", "optional": false, "provider": "ibm-pursuit", "mcpServer": "ibm-pursuit", "notes": "Snapshot public + screening de plays IBM"},
                 {"kind": "api-public", "label": "Wikipedia / Wikidata", "optional": false, "notes": "Fiche entreprise sans clé"},
                 {"kind": "api-public", "label": "DuckDuckGo Instant Answer", "optional": false, "notes": "Résumé public sans clé"},
@@ -2502,7 +3095,7 @@ fn packaged_work_plugins() -> Vec<BuiltinPlugin> {
                     "tools": ["ibm_connector_status", "ibm_client_snapshot", "ibm_screen_plays"]
                 }
             },
-            "instructions": "Mode Brief Mission IBM — plugin niveau ChatGPT Work (pas un skill seul).\n\nBundle : ibm_pursuit.py, scripts/brief_pursuit.py, mcp/server.py.\nConnecteurs : T1 Wikipedia/Wikidata/DuckDuckGo/Google News RSS (sans clé) ; T2 NewsAPI si NEWSAPI_KEY ; T3 MCP/CLI local. Pas Slack, pas Microsoft (Graph, Teams, SharePoint, Outlook).\nWorkflow : ibm_connector_status → ibm_client_snapshot → ibm_screen_plays → brief Markdown.\nRappels : pas une offre commerciale ; pas de prix inventés ; citer le disclaimer outil. Structure : sources actives → 5 faits + 3 signaux → 3–4 plays (preuve, offre, risque, question) → risques / non-objectifs → script d’atelier → disclaimer."
+            "instructions": "Mode Brief Mission IBM — plugin plugin Bob Work complet (pas un skill seul).\n\nBundle : ibm_pursuit.py, scripts/brief_pursuit.py, mcp/server.py.\nConnecteurs : T1 Wikipedia/Wikidata/DuckDuckGo/Google News RSS (sans clé) ; T2 NewsAPI si NEWSAPI_KEY ; T3 MCP/CLI local. Pas Slack, pas Microsoft (Graph, Teams, SharePoint, Outlook).\nWorkflow : ibm_connector_status → ibm_client_snapshot → ibm_screen_plays → brief Markdown.\nRappels : pas une offre commerciale ; pas de prix inventés ; citer le disclaimer outil. Structure : sources actives → 5 faits + 3 signaux → 3–4 plays (preuve, offre, risque, question) → risques / non-objectifs → script d’atelier → disclaimer."
         }),
     }]
 }
@@ -2620,14 +3213,35 @@ fn cli_product_manifest(
     references: &[(&str, &str)],
 ) -> serde_json::Value {
     let runtime_managed = command.starts_with("runtime://");
-    let mut resources = vec![if runtime_managed {
+    let bob_runtime = if runtime_managed {
+        None
+    } else {
+        super::cli_runtime_catalog::catalog_entries()
+            .iter()
+            .find(|entry| entry.command == command)
+            .map(|entry| (entry.runtime_id, entry.version))
+    };
+    let bob_managed = runtime_managed || bob_runtime.is_some();
+    let managed_runtime_id = if runtime_managed {
+        command.trim_start_matches("runtime://").trim_end_matches("/python")
+    } else {
+        bob_runtime.map(|(runtime_id, _)| runtime_id).unwrap_or_default()
+    };
+    let managed_install_hint = if bob_managed {
+        format!(
+            "{install_hint} Bob Work peut aussi l’installer automatiquement depuis Réglages → Runtimes."
+        )
+    } else {
+        install_hint.to_string()
+    };
+    let mut resources = vec![if bob_managed {
         serde_json::json!({
             "kind": "external-runtime",
             "label": package,
-            "runtimeId": command.trim_start_matches("runtime://").trim_end_matches("/python"),
-            "installHint": install_hint,
+            "runtimeId": managed_runtime_id,
+            "installHint": managed_install_hint,
             "optional": false,
-            "notes": "Runtime optionnel installé, validé et résolu exclusivement par le Runtime Manager ; aucun PATH global."
+            "notes": "Runtime externe géré par Bob Work sous ~/.bob/runtimes ; aucune modification du PATH global."
         })
     } else {
         serde_json::json!({
@@ -2670,12 +3284,25 @@ fn cli_product_manifest(
             {"type": "command.execute"}
         ],
         "capabilities": capabilities,
-        "runtime": if runtime_managed {
+        "runtime": if bob_managed {
             serde_json::json!({"managed": true})
         } else {
             serde_json::json!({"cli": true})
         },
-        "privateDependencies": if runtime_managed {
+        "externalRuntimes": if let Some((runtime_id, version)) = bob_runtime {
+            serde_json::json!([{
+                "id": runtime_id,
+                "version": version,
+                "pythonMode": if super::cli_runtime_catalog::uses_isolated_python(runtime_id) {
+                    "isolated"
+                } else {
+                    "none"
+                }
+            }])
+        } else {
+            serde_json::json!([])
+        },
+        "privateDependencies": if bob_managed {
             serde_json::json!([])
         } else {
             serde_json::json!([{
@@ -2691,9 +3318,9 @@ fn cli_product_manifest(
         "resources": resources,
         "distribution": {
             "bundledRuntime": false,
-            "state": if runtime_managed { "external-runtime-managed" } else { "external-cli-required" },
-            "notes": if runtime_managed {
-                "Le plugin est intégré à Bob Work. Son runtime optionnel est géré hors du paquet principal par le Runtime Manager.".to_string()
+            "state": if bob_managed { "external-runtime-managed" } else { "external-cli-required" },
+            "notes": if bob_managed {
+                "Le plugin est intégré à Bob Work. Son runtime externe peut être installé, mis à jour et supprimé par le Runtime Manager.".to_string()
             } else {
                 format!("Le plugin est intégré à Bob Work. La CLI `{command}` reste un composant externe et doit être installée séparément.")
             }
@@ -2821,23 +3448,19 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "name": "IBM Cloud",
                     "reason": "Fournit l’identité IAM, le compte, la région et le groupe de ressources utilisés par les services watsonx."
                 }],
-                "runtime": {"cli": true},
-                "privateDependencies": [{
-                    "id": "ibmcloud",
-                    "name": "IBM Cloud CLI",
-                    "kind": "cli",
-                    "version": "host-managed",
-                    "entrypoint": "ibmcloud",
-                    "purpose": "Authentification IAM et vérification du contexte IBM Cloud pour la plateforme watsonx",
-                    "source": {"kind": "known-existing-executable", "location": "ibmcloud"}
+                "runtime": {"managed": true},
+                "externalRuntimes": [{
+                    "id": "external.ibmcloud-cli",
+                    "version": "2.33.1",
+                    "pythonMode": "none"
                 }],
+                "privateDependencies": [],
                 "resources": [
                     {
-                        "kind": "stdio-cli",
+                        "kind": "external-runtime",
                         "label": "IBM Cloud CLI (identité et contexte)",
-                        "command": "ibmcloud",
-                        "package": "IBM Cloud CLI",
-                        "installHint": "Installez IBM Cloud CLI depuis la documentation officielle IBM, vérifiez avec `ibmcloud version`, puis authentifiez-vous avec `ibmcloud login` ou `ibmcloud login --sso`.",
+                        "runtimeId": "external.ibmcloud-cli",
+                        "installHint": "Installez IBM Cloud CLI depuis Réglages → Runtimes ou via la documentation officielle IBM, puis authentifiez-vous avec `ibmcloud login` ou `ibmcloud login --sso`.",
                         "optional": false,
                         "notes": "Prérequis partagé avec le plugin intégré IBM Cloud. Les jetons IAM restent secrets et ne doivent jamais apparaître dans la conversation."
                     },
@@ -3059,7 +3682,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-map-tools",
             name: "Cartes & itinéraires",
-            version: "1.0.0",
+            version: "1.0.1",
             description: "Géocode des lieux, recherche des points d’intérêt et calcule des itinéraires conduite, marche, vélo ou transports, avec une carte interactive directement dans la conversation.",
             category: "integration",
             manifest: serde_json::json!({
@@ -3068,7 +3691,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                 "agentic": true,
                 "name": "Cartes & itinéraires",
                 "slug": "map-tools",
-                "version": "1.0.0",
+                "version": "1.0.1",
                 "author": "Bob Work",
                 "description": "Outils natifs de géocodage, recherche de POI et itinéraires multimodaux avec résultats structurés et carte interactive persistante dans le chat.",
                 "category": "integration",
@@ -3085,12 +3708,13 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                 "specializedMode": {
                     "label":"Cartes",
                     "description":"Recherche géographique et itinéraires rendus directement dans la conversation.",
-                    "allowedTools":["map_geocode", "map_reverse_geocode", "map_search_poi", "map_current_location", "map_route"],
+                    "allowedTools":["use_mcp_tool", "map_geocode", "map_reverse_geocode", "map_search_poi", "map_current_location", "map_route"],
                     "outputFormats":["md", "json", "bob-map"],
-                    "workflow":"Identifier le besoin géographique → demander seulement les précisions indispensables → appeler l’outil le plus ciblé → résumer le résultat structuré ; Bob Work affiche automatiquement la carte.",
+                    "mcpServer": "bob-work-map-tools",
+                    "workflow":"Identifier le besoin géographique → appeler use_mcp_tool sur le serveur bob-work-map-tools (map_route, map_geocode, …) → résumer le résultat structuré ; Bob Work affiche automatiquement la carte. Ne génère pas de HTML de carte.",
                     "sandbox":"network-read-only"
                 },
-                "instructions":"N’utilise ces outils que lorsqu’une carte, des positions, des points d’intérêt ou un itinéraire apportent une valeur réelle à la demande. Pour une simple question factuelle sans dimension géographique, réponds sans appeler le plugin afin d’éviter consommation réseau et tokens. Pour plusieurs points d’intérêt, conserve tous les résultats structurés afin que la carte affiche plusieurs pins. Utilise la position actuelle comme origine seulement si elle est autorisée dans les réglages et pertinente pour la demande. Choisis explicitement driving, walking, cycling ou transit. N’envoie une adresse privée ou une position à un fournisseur distant que si elle est nécessaire à la demande de l’utilisateur. Les résultats structurés kind=bob-map sont affichés automatiquement : ne génère pas un second HTML de carte. Photon et Valhalla sont des services configurables et sans garantie de disponibilité ; signale une estimation ou une indisponibilité au lieu d’inventer un trajet."
+                "instructions":"MCP serveur obligatoire : `bob-work-map-tools`. Appelle les outils via `use_mcp_tool` avec server=`bob-work-map-tools` et les tools `map_geocode`, `map_reverse_geocode`, `map_search_poi`, `map_current_location`, `map_route`.\n\nN’utilise ces outils que lorsqu’une carte, des positions, des points d’intérêt ou un itinéraire apportent une valeur réelle à la demande. Pour une simple question factuelle sans dimension géographique, réponds sans appeler le plugin. Pour plusieurs points d’intérêt, conserve tous les résultats structurés afin que la carte affiche plusieurs pins. Utilise la position actuelle comme origine seulement si elle est autorisée dans les réglages et pertinente. Choisis explicitement driving, walking, cycling ou transit. Les résultats structurés kind=bob-map sont affichés automatiquement : ne génère pas un second HTML de carte. Photon et Valhalla sont configurables ; signale une indisponibilité au lieu d’inventer un trajet."
             }),
         },
         BuiltinPlugin {
@@ -3351,9 +3975,9 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
             ),
         },
         BuiltinPlugin {
-            id: "builtin-cloud-architect",
+            id: "agentic-cloud-architect",
             name: "Cloud Architect",
-            version: "2.8.0",
+            version: "2.8.5",
             description: "Conçoit, documente et révise des architectures AWS, Azure, GCP, IBM Cloud, Kubernetes, hybrides et multi-cloud en consommant le Diagram Runtime partagé ; conserve uniquement l’intelligence de domaine et son catalogue d’icônes.",
             category: "executable",
             manifest: serde_json::from_str(include_str!(
@@ -3364,8 +3988,8 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-ibm-agentic-designer",
             name: "Designer",
-            version: "1.0.1",
-            description: "Transforme un besoin en expérience validée, accessible et prête pour le développement, selon une démarche compatible IBM Enterprise Design Thinking et Carbon.",
+            version: "2.0.1",
+            description: "Design structured UX/UI experiences with responsive preview and open exports including Sketch.",
             category: "recipe",
             manifest: load_ibm_profession(include_str!(
                 "../../resources/ibm-agentic-professions/plugins/ibm-agentic-designer/manifest.json"
@@ -3434,13 +4058,14 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-documents",
             name: "Documents",
-            version: "1.1.0",
+            version: "1.2.0",
             description: "Créer, lire, transformer et contrôler des documents locaux avec aperçu dans Bob Work.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Documents", "slug": "bob-work-documents", "version": "1.1.0",
+                "name": "Documents", "slug": "bob-work-documents", "version": "1.2.0",
                 "description": "Create, read, transform and review local documents.", "category": "recipe",
                 "builtin": true, "icon": "document",
+                "sharedCapabilities": ["docx", "python"],
                 "fileExtensions": [".txt", ".md", ".markdown", ".pdf", ".rtf", ".docx", ".odt"],
                 "outputFormats": ["md", "txt", "pdf", "docx"],
                 "capabilities": ["document.read", "document.create", "document.convert", "preview"],
@@ -3493,28 +4118,33 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     {"type": "command.execute"},
                     {"type": "network.request"}
                 ],
-                "runtime": {"python": ">=3.10", "cli": true, "mcp": true},
+                "runtime": {"python": ">=3.10", "cli": true, "mcp": true, "managed": true},
+                "externalRuntimes": [{
+                    "id": "external.docling-cli",
+                    "version": "2.123.0",
+                    "pythonMode": "isolated"
+                }],
+                "privateDependencies": [],
                 "entrypoints": [
                     {"name": "docling", "path": "scripts/docling_cli.py", "runtime": "python3"},
                     {"name": "mcp", "path": "mcp/server.py", "runtime": "python3"}
                 ],
                 "resources": [
-                    {"kind": "stdio-cli", "label": "CLI Docling 2.123.0", "command": "docling", "package": "docling", "installHint": "Python ≥ 3.10, puis pip install 'docling==2.123.0' ou l’outil MCP docling_ensure_runtime (venv ~/.bob/runtimes/docling/2.123.0)", "notes": "venv ~/.bob/runtimes/docling/2.123.0 ; PATH = fallback optionnel", "optional": false},
-                    {"kind": "stdio-cli", "label": "docling convert", "command": "docling", "package": "docling", "notes": "PDF, DOCX, PPTX, XLSX, HTML, images, audio → md/json/html", "optional": false},
+                    {"kind": "external-runtime", "label": "CLI Docling", "runtimeId": "external.docling-cli", "installHint": "Installez la CLI Docling depuis Réglages → Runtimes, ou sur le Mac ; le venv géré par Bob Work reste un secours si aucune CLI externe n’est trouvée", "notes": "Runtime externe géré par Bob Work ; CLI externe prioritaire, venv ~/.bob/runtimes/external/docling-cli/2.123.0 ou ~/.bob/runtimes/docling/2.123.0 en secours", "optional": false},
                     {"kind": "file", "label": "Documents et images joints", "notes": "Overlay plugin ou pièces jointes du chat", "optional": true},
                     {"kind": "bob-llm", "label": "LLM Bob", "notes": "Synthèse après conversion", "optional": false}
                 ],
                 "connectorStrategy": {
                     "targetLevel": "chatgpt-work",
-                    "designNotes": "La CLI Docling (MIT, IBM / LF AI) est trop volumineuse pour un binaire embarqué (PyTorch + modèles). Bob Work l’installe dans un venv épinglé au premier usage, avec PATH en fallback.",
+                    "designNotes": "La CLI Docling (MIT, IBM / LF AI) est trop volumineuse pour un binaire embarqué (PyTorch + modèles). Bob Work l’installe depuis Réglages → Runtimes, ou utilise d’abord une CLI externe déjà présente ; un venv épinglé reste disponible en secours.",
                     "explored": ["docling-cli-2.123.0", "docling-mcp-official", "docling-serve-remote", "bundled-python-venv", "bob-llm"],
                     "tiers": [
-                        {"id": "T1", "kind": "local-cli", "provider": "docling-2.123.0", "required": true, "activation": "Premier appel : installation du venv ~/.bob/runtimes/docling/2.123.0"},
+                        {"id": "T1", "kind": "local-cli", "provider": "docling", "required": true, "activation": "Réglages → Runtimes, ou détection d’une CLI externe ; venv ~/.bob/runtimes/external/docling-cli/2.123.0 (ou ~/.bob/runtimes/docling/2.123.0) uniquement si elle est absente"},
                         {"id": "T2", "kind": "local-mcp", "provider": "bob-work-docling", "required": true},
                         {"id": "T3", "kind": "bob-llm", "provider": "bob", "required": true},
                         {"id": "T4", "kind": "path-fallback", "provider": "docling", "required": false}
                     ],
-                    "fallback": "Si l’installation pip/uv échoue, indiquer d’installer Python 3.10+ et de réessayer docling_ensure_runtime. Ne pas prétendre qu’une conversion a réussi."
+                    "fallback": "Si l’installation pip/uv échoue, indiquer d’installer Python 3.10+ puis d’utiliser Réglages → Runtimes ou docling_ensure_runtime. Ne pas prétendre qu’une conversion a réussi."
                 },
                 "specializedMode": {
                     "label": "Mode Docling",
@@ -3527,7 +4157,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         "use_mcp_tool", "execute_command", "read_file"
                     ],
                     "preferredLibraries": ["Docling 2.123.0 CLI"],
-                    "workflow": "1) docling_status. 2) docling_ensure_runtime si la CLI manque. 3) Choisir convert / ocr / extract_tables / enrich / transcribe selon la demande. 4) Lire les fichiers générés. 5) Synthétiser et renvoyer les chemins absolus.",
+                    "workflow": "1) docling_status. 2) Installer depuis Réglages → Runtimes ou appeler docling_ensure_runtime si la CLI manque. 3) Choisir convert / ocr / extract_tables / enrich / transcribe selon la demande. 4) Lire les fichiers générés. 5) Synthétiser et renvoyer les chemins absolus.",
                     "sandbox": "docling-cli"
                 },
                 "mcpServers": {
@@ -3545,19 +4175,20 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         ]
                     }
                 },
-                "instructions": "Mode Docling Bob Work. Convertis les documents **en local** avec la CLI Docling (pas d’upload cloud).\n\nOutils MCP : docling_status, docling_ensure_runtime, docling_convert, docling_ocr, docling_extract_tables, docling_enrich, docling_transcribe, docling_models_download. CLI : `python3 scripts/docling_cli.py convert <fichier> --to md` ou `docling convert` (shim bin/).\n\nWorkflow : 1) docling_status. 2) Si la CLI manque, docling_ensure_runtime (venv ~/.bob/runtimes/docling/2.123.0, Python ≥ 3.10). 3) Convertis le fichier joint — PDF/DOCX/PPTX/XLSX/HTML/image/audio. 4) OCR scanné → docling_ocr. Tableaux → docling_extract_tables. Code/formules/graphiques → docling_enrich. Audio → docling_transcribe. 5) Lis le Markdown/JSON produit et renvoie les chemins absolus pour l’aperçu.\n\nNe recopie pas de mot de passe PDF dans le chat. Ne simule jamais une conversion. Premier run : modèles téléchargés dans ~/.bob/runtimes/docling/models."
+                "instructions": "Mode Docling Bob Work. Convertis les documents **en local** avec la CLI Docling (pas d’upload cloud).\n\nOutils MCP : docling_status, docling_ensure_runtime, docling_convert, docling_ocr, docling_extract_tables, docling_enrich, docling_transcribe, docling_models_download. CLI : `python3 scripts/docling_cli.py convert <fichier> --to md` ou `docling convert` (shim bin/).\n\nWorkflow : 1) docling_status et utilise la CLI externe détectée, quelle que soit son origine d’installation. 2) Si aucune CLI n’est disponible, indique Réglages → Runtimes (Docling CLI) ou appelle docling_ensure_runtime ; le venv ~/.bob/runtimes/external/docling-cli/2.123.0 (ou l’ancien ~/.bob/runtimes/docling/2.123.0) est un secours, pas un prérequis. 3) Convertis le fichier joint — PDF/DOCX/PPTX/XLSX/HTML/image/audio. 4) OCR scanné → docling_ocr. Tableaux → docling_extract_tables. Code/formules/graphiques → docling_enrich. Audio → docling_transcribe. 5) Lis le Markdown/JSON produit et renvoie les chemins absolus pour l’aperçu.\n\nNe recopie pas de mot de passe PDF dans le chat. Ne simule jamais une conversion. Les modèles sont téléchargés dans ~/.bob/runtimes/docling/models lorsqu’ils sont nécessaires."
             }),
         },
         BuiltinPlugin {
             id: "builtin-word",
             name: "Microsoft Word",
-            version: "1.1.0",
+            version: "1.2.0",
             description: "Créer et modifier des fichiers Word DOCX en conservant autant que possible styles et structure.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft Word", "slug": "bob-work-microsoft-word", "version": "1.1.0",
+                "name": "Microsoft Word", "slug": "bob-work-microsoft-word", "version": "1.2.0",
                 "description": "Create and edit Microsoft Word DOCX files.", "category": "recipe",
                 "builtin": true, "icon": "word",
+                "sharedCapabilities": ["docx", "python"],
                 "fileExtensions": [".doc", ".docx"],
                 "outputFormats": ["docx"],
                 "capabilities": ["docx.read", "docx.create", "docx.edit", "preview"],
@@ -3579,19 +4210,20 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                         &["inspect_docx", "extract_docx_text", "validate_docx"]
                     )
                 },
-                "instructions": "Mode Microsoft Word Bob Work (local, sans upload OpenAI). Quand un .docx est joint au chat, traite-le comme dans ChatGPT Work : active ce mode spécialisé, inspecte le package avec inspect_docx, extrais le contenu avec extract_docx_text, puis modifie via python-docx dans une commande Python locale. Préserve ordre des sections, titres, listes, tableaux, liens, en-têtes/pieds et styles existants. Travaille sur une copie sauf autorisation explicite d’écrasement. Ne crée jamais un faux .docx (fichier texte renommé). Après écriture, validate_docx et renvoie le chemin absolu pour Quick Look."
+                "instructions": "Mode Microsoft Word Bob Work (local, sans upload distant). Quand un .docx est joint au chat, traite-le comme un mode document dédié : active ce mode spécialisé, inspecte le package avec inspect_docx, extrais le contenu avec extract_docx_text, puis modifie via python-docx dans une commande Python locale. Préserve ordre des sections, titres, listes, tableaux, liens, en-têtes/pieds et styles existants. Travaille sur une copie sauf autorisation explicite d’écrasement. Ne crée jamais un faux .docx (fichier texte renommé). Après écriture, validate_docx et renvoie le chemin absolu pour Quick Look."
             }),
         },
         BuiltinPlugin {
             id: "builtin-powerpoint",
             name: "Microsoft PowerPoint",
-            version: "1.1.0",
+            version: "1.2.0",
             description: "Créer, modifier et vérifier des présentations PowerPoint PPTX avec respect du modèle fourni.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft PowerPoint", "slug": "bob-work-microsoft-powerpoint", "version": "1.1.0",
+                "name": "Microsoft PowerPoint", "slug": "bob-work-microsoft-powerpoint", "version": "1.2.0",
                 "description": "Create, edit and review Microsoft PowerPoint presentations.", "category": "recipe",
                 "builtin": true, "icon": "powerpoint",
+                "sharedCapabilities": ["pptx", "python"],
                 "fileExtensions": [".ppt", ".pptx"],
                 "outputFormats": ["pptx"],
                 "capabilities": ["pptx.read", "pptx.create", "pptx.edit", "preview"],
@@ -3619,13 +4251,14 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-excel",
             name: "Microsoft Excel",
-            version: "1.1.0",
+            version: "1.2.0",
             description: "Créer, analyser et modifier des classeurs Excel XLSX en préservant formules et formats.",
             category: "recipe",
             manifest: serde_json::json!({
-                "name": "Microsoft Excel", "slug": "bob-work-microsoft-excel", "version": "1.1.0",
+                "name": "Microsoft Excel", "slug": "bob-work-microsoft-excel", "version": "1.2.0",
                 "description": "Create, analyze and edit Microsoft Excel workbooks.", "category": "recipe",
                 "builtin": true, "icon": "excel",
+                "sharedCapabilities": ["xlsx", "python", "spreadsheet"],
                 "fileExtensions": [".xls", ".xlsx", ".xlsm", ".csv", ".tsv"],
                 "outputFormats": ["xlsx", "csv"],
                 "capabilities": ["xlsx.read", "xlsx.create", "xlsx.edit", "formula.verify", "preview"],
@@ -3685,14 +4318,14 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
         BuiltinPlugin {
             id: "builtin-computer-use",
             name: "Computer Use",
-            version: "1.0.5",
-            description: "Contrôle n’importe quelle app Mac en arrière-plan : ouvrir, lire l’UI, cliquer, saisir via Accessibilité (style ChatGPT Work).",
+            version: "1.0.7",
+            description: "Contrôle n’importe quelle app Mac en arrière-plan avec un curseur Bob visible, indépendant de la souris système.",
             category: "executable",
             manifest: serde_json::json!({
                 "name": "Computer Use",
                 "slug": "bob-work-computer-use",
-                "version": "1.0.5",
-                "description": "Contrôle n’importe quelle app Mac en arrière-plan : ouvrir, lire l’UI, cliquer, saisir via Accessibilité (style ChatGPT Work).",
+                "version": "1.0.7",
+                "description": "Contrôle n’importe quelle app Mac en arrière-plan avec un curseur Bob visible, indépendant de la souris système.",
                 "category": "executable",
                 "builtin": true,
                 "icon": "computer",
@@ -3723,15 +4356,15 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "inputExtensions": [],
                     "outputFormats": ["md"],
                     "allowedTools": [
-                        "accessibility_status", "list_apps", "open_app", "focus_app",
+                        "get_computer_use_guide", "accessibility_status", "list_apps", "open_app", "focus_app",
                         "get_app_state", "ui_click", "ui_set_value", "app_command",
-                        "capture_screen", "desktop_click", "desktop_type", "press_key", "use_mcp_tool"
+                        "capture_screen", "desktop_click", "desktop_type", "desktop_scroll", "press_key", "use_mcp_tool"
                     ],
                     "preferredLibraries": [],
-                    "workflow": "1) accessibility_status. 2) open_app sans activate (toute app Mac). 3) get_app_state. 4) ui_click / ui_set_value / app_command en arrière-plan. 5) focus_app seulement en dernier recours. 6) Vérifier le résultat.",
+                    "workflow": "1) get_computer_use_guide (MCP). 2) @skill:computer-use stub if needed. 3) accessibility_status. 4) observe → act → verify loop per guide.",
                     "sandbox": "macos-accessibility"
                 },
-                "instructions": "Mode Computer Use Bob Work (style ChatGPT Work). MCP `bob-work-computer-use` requis. Tu contrôles n’importe quelle app macOS (Messages, Finder, Slack, Spotify, Notes, Terminal, etc.) — pas seulement une app précise.\n\nOutils : accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, press_key.\n\nReste dans Bob Work : ne vole pas le focus. open_app sans activate. Préfère ui_click / ui_set_value / app_command. focus_app et bring_to_front=true seulement si indispensable. Ne exige pas frontmost=true. Si l’arbre AX est pauvre, une capture sans focus (max 3). Pas de clic dans Bob Work/ChatGPT. Pas d’aperçu Chrome pour une app Mac. Pas d’osascript/python3/Terminal. Autorisations Accessibilité + Enregistrement d’écran pour Bob Work."
+                "instructions": "# Computer Use (Bob Work plugin)\n\nRuntime MCP `bob-work-computer-use`. This file is a **routing stub** — the version-matched guide lives in the MCP runtime.\n\nBefore any action, call MCP tool **`get_computer_use_guide`** on server **`bob-work-computer-use`**, or invoke **`@skill:computer-use`** for the agent discovery stub.\n\nRequires Settings → Computer Control enabled and Accessibility granted for Bob Work.\n\nDo not guess tool flags from this stub. Follow the guide returned by `get_computer_use_guide`."
             }),
         },
         BuiltinPlugin {
@@ -3760,7 +4393,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "tiers": [
                         {"id": "T3", "kind": "local-mcp", "provider": "bob-work-chrome-control", "required": true, "activation": "Réglages → Contrôle de Chrome"}
                     ],
-                    "designNotes": "Le MCP global bob-work-chrome-control est installé quand le réglage est activé. Automatisation macOS (Bob Work → Google Chrome) est requise pour lire/contrôler les onglets."
+                    "designNotes": "Le MCP global bob-work-chrome-control est installé quand le réglage est activé. Automatisation macOS (l’app en cours, Bob Work ou Bob Work-test → Google Chrome) est requise pour lire/contrôler les onglets."
                 },
                 "browserExtensions": [{
                     "id": "chrome",
@@ -3783,7 +4416,7 @@ fn builtin_document_plugins() -> Vec<BuiltinPlugin> {
                     "workflow": "1) Recherche/API/documentation : web_fetch en arrière-plan. 2) Seulement si l’utilisateur demande explicitement Chrome : vérifier l’Automatisation, puis chrome_open_url ou chrome_list_tabs. 3) chrome_navigate / chrome_execute_js selon besoin. 4) Renvoyer titre+URL confirmés. Ne simule jamais un onglet si l’outil échoue.",
                     "sandbox": "macos-chrome-automation"
                 },
-                "instructions": "Mode Contrôle Chrome Bob Work. Le serveur MCP `bob-work-chrome-control` doit être actif. Pour les recherches, API et documentations, utilise `web_fetch` ou `browser_snapshot` : ils travaillent en arrière-plan et ne doivent ouvrir aucune fenêtre. Les outils `chrome_*` sont réservés à une demande explicite d’ouverture, navigation ou interaction dans Chrome. N’utilise jamais osascript/python3. Si Automatisation est refusée après une demande explicite, explique d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation. Reste local ; pas d’upload cloud."
+                "instructions": "Mode Contrôle Chrome Bob Work. Le serveur MCP `bob-work-chrome-control` doit être actif. Pour les recherches, API et documentations, utilise `web_fetch` ou `browser_snapshot` : ils travaillent en arrière-plan et ne doivent ouvrir aucune fenêtre. Les outils `chrome_*` sont réservés à une demande explicite d’ouverture, navigation ou interaction dans Chrome. N’utilise jamais osascript/python3. Si Automatisation est refusée après une demande explicite, explique d’autoriser **l’app Bob Work en cours** (Bob Work ou Bob Work-test) → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation : une case pour Bob Work ne couvre pas Bob Work-test. Reste local ; pas d’upload cloud."
             }),
         },
     ]
@@ -3797,6 +4430,72 @@ mod builtin_tests {
         let db = Database::new_in_memory().expect("in-memory database");
         db.run_migrations().expect("migrations");
         db
+    }
+
+    #[test]
+    fn resolves_personal_plugin_by_manifest_slug_or_legacy_id() {
+        let db = test_database();
+        let manifest = serde_json::json!({"slug":"bonjour-simple","agentic":true});
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO plugins
+             (id,name,version,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+             VALUES ('agentic-bonjour-simple','Bonjour Simple','1.0.0','personal','executable',?1,'installed','valid','2026-09-01','2026-09-01')",
+            params![manifest.to_string()],
+        ).expect("personal plugin");
+        let service = PluginService::new();
+        assert_eq!(
+            service
+                .get_by_reference(&db, "bonjour-simple")
+                .unwrap()
+                .unwrap()
+                .id,
+            "agentic-bonjour-simple"
+        );
+        assert_eq!(
+            service
+                .get_by_reference(&db, "agentic-bonjour-simple")
+                .unwrap()
+                .unwrap()
+                .id,
+            "agentic-bonjour-simple"
+        );
+    }
+
+    #[test]
+    fn migrates_both_former_cloud_architect_ids_to_the_canonical_agentic_id() {
+        for legacy_id in ["agentic-senior-cloud-architect", "builtin-cloud-architect"] {
+            let db = test_database();
+            let service = PluginService::new();
+            let manifest = serde_json::json!({
+                "name": "Senior Cloud Architect",
+                "slug": "senior-cloud-architect",
+                "version": "2.8.0",
+                "permissions": []
+            });
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO plugins
+                     (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
+                     VALUES (?1,'Senior Cloud Architect','2.8.0','Bob Work','Legacy','personal','executable',?2,'disabled','valid','2026-09-01','2026-09-01')",
+                    params![legacy_id, manifest.to_string()],
+                )
+                .expect("legacy plugin");
+            }
+
+            service
+                .promote_legacy_cloud_architect(&db)
+                .expect("migration");
+
+            assert!(service.get_by_id(&db, legacy_id).unwrap().is_none());
+            let migrated = service
+                .get_by_id(&db, "agentic-cloud-architect")
+                .unwrap()
+                .expect("canonical plugin");
+            assert_eq!(migrated.name, "Cloud Architect");
+            assert_eq!(migrated.manifest["slug"], "cloud-architect");
+            assert_eq!(migrated.manifest["builtin"], true);
+        }
     }
 
     #[test]
@@ -4187,11 +4886,28 @@ mod builtin_tests {
                 .and_then(|value| value.as_array())
                 .and_then(|resources| {
                     resources.iter().find(|resource| {
-                        resource.get("kind").and_then(|value| value.as_str()) == Some("stdio-cli")
+                        let kind = resource.get("kind").and_then(|value| value.as_str());
+                        match kind {
+                            Some("stdio-cli") => {
+                                resource.get("command").and_then(|value| value.as_str())
+                                    == Some(command)
+                            }
+                            Some("external-runtime") => resource
+                                .get("runtimeId")
+                                .and_then(|value| value.as_str())
+                                .is_some_and(|runtime_id| {
+                                    crate::services::cli_runtime_catalog::catalog_entries()
+                                        .iter()
+                                        .any(|entry| {
+                                            entry.runtime_id == runtime_id
+                                                && entry.command == command
+                                        })
+                                }),
+                            _ => false,
+                        }
                     })
                 })
                 .unwrap_or_else(|| panic!("missing CLI resource for {id}"));
-            assert_eq!(cli.get("command").and_then(|v| v.as_str()), Some(command));
             assert_eq!(cli.get("optional").and_then(|v| v.as_bool()), Some(false));
             assert!(cli
                 .get("installHint")
@@ -4271,14 +4987,28 @@ mod builtin_tests {
                 .and_then(|value| value.as_array())
                 .and_then(|resources| {
                     resources.iter().find(|resource| {
-                        resource.get("kind").and_then(|value| value.as_str()) == Some("stdio-cli")
+                        let kind = resource.get("kind").and_then(|value| value.as_str());
+                        match kind {
+                            Some("stdio-cli") => {
+                                resource.get("command").and_then(|value| value.as_str())
+                                    == Some(command)
+                            }
+                            Some("external-runtime") => resource
+                                .get("runtimeId")
+                                .and_then(|value| value.as_str())
+                                .is_some_and(|runtime_id| {
+                                    crate::services::cli_runtime_catalog::catalog_entries()
+                                        .iter()
+                                        .any(|entry| {
+                                            entry.runtime_id == runtime_id
+                                                && entry.command == command
+                                        })
+                                }),
+                            _ => false,
+                        }
                     })
                 })
                 .unwrap_or_else(|| panic!("missing CLI resource for {id}"));
-            assert_eq!(
-                cli.get("command").and_then(|value| value.as_str()),
-                Some(command)
-            );
             assert_eq!(
                 cli.get("optional").and_then(|value| value.as_bool()),
                 Some(false)
@@ -4342,7 +5072,7 @@ mod builtin_tests {
             conn.execute(
                 "INSERT INTO plugins
                  (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at,available_version)
-                 VALUES ('builtin-ibm-agentic-designer','Agentic Designer','1.0.0','Bob Work','old','personal','recipe',?1,'installed','valid',?2,?2,'1.0.1')",
+                 VALUES ('builtin-ibm-agentic-designer','Agentic Designer','1.0.0','Bob Work','old','personal','recipe',?1,'installed','valid',?2,?2,'2.0.1')",
                 params![old_manifest.to_string(), now],
             )
             .expect("seed old profession");
@@ -4362,7 +5092,7 @@ mod builtin_tests {
             .get_by_id(&db, "builtin-ibm-agentic-designer")
             .expect("lookup")
             .expect("plugin");
-        assert_eq!(upgraded.version, "1.0.1");
+        assert_eq!(upgraded.version, "2.0.1");
         assert!(upgraded.available_version.is_none());
         assert_eq!(upgraded.name, "Designer");
     }
@@ -4375,7 +5105,7 @@ mod builtin_tests {
         let old_manifest = serde_json::json!({
             "name": "Designer",
             "slug": "ibm-agentic-designer",
-            "version": "1.0.1",
+            "version": "2.0.1",
             "description": "old",
             "category": "recipe",
             "builtin": true,
@@ -4388,7 +5118,7 @@ mod builtin_tests {
             conn.execute(
                 "INSERT INTO plugins
                  (id,name,version,author,description,scope,category,manifest,install_state,validation_state,created_at,updated_at)
-                 VALUES ('builtin-ibm-agentic-designer','Designer','1.0.1','Bob Work','old','personal','recipe',?1,'installed','valid',?2,?2)",
+                 VALUES ('builtin-ibm-agentic-designer','Designer','2.0.1','Bob Work','old','personal','recipe',?1,'installed','valid',?2,?2)",
                 params![old_manifest.to_string(), now],
             )
             .expect("seed profession without vendor");
@@ -4408,7 +5138,7 @@ mod builtin_tests {
             .get_by_id(&db, "builtin-ibm-agentic-designer")
             .expect("lookup")
             .expect("plugin");
-        assert_eq!(refreshed.version, "1.0.1");
+        assert_eq!(refreshed.version, "2.0.1");
         assert_eq!(
             refreshed
                 .manifest
@@ -4684,7 +5414,7 @@ mod builtin_tests {
             .get_by_id(&db, "bob-work-cto-invest")
             .expect("lookup")
             .expect("CTO plugin installed");
-        assert_eq!(plugin.version, "1.2.3");
+        assert_eq!(plugin.version, "1.2.4");
         assert_eq!(plugin.install_state, "installed");
         assert_eq!(plugin.category, "executable");
         assert_eq!(
@@ -4730,9 +5460,9 @@ mod builtin_tests {
         );
         assert!(PluginMcpService::has_servers(&plugin.manifest));
 
-        let skill_dir = dirs::home_dir()
-            .expect("home")
-            .join(".bob/skills/bob-work-cto-invest");
+        let skill_dir = PluginDeployService::bob_skills_dir()
+            .expect("skills root")
+            .join("bob-work-cto-invest");
         let mcp_script = skill_dir.join("mcp/server.py");
         assert!(
             skill_dir.join("SKILL.md").is_file(),
@@ -4802,7 +5532,7 @@ mod builtin_tests {
             .get_by_id(&db, "builtin-documents")
             .expect("lookup")
             .expect("plugin");
-        assert_eq!(upgraded.version, "1.1.0");
+        assert_eq!(upgraded.version, "1.2.0");
         assert!(upgraded.available_version.is_none());
     }
 
@@ -4874,10 +5604,19 @@ mod builtin_tests {
             Some(&serde_json::Value::Bool(false))
         );
 
-        let restored = service
-            .activate_version(&db, "bob-work-cto-invest", "1.1.0")
-            .expect("restore must succeed for non-builtin CTO");
-        assert_eq!(restored.version, "1.1.0");
+        let restored = service.activate_version(&db, "bob-work-cto-invest", "1.1.0");
+        assert!(
+            restored.is_err(),
+            "Bob Work no longer keeps older CTO versions for restore"
+        );
+        assert_eq!(
+            service
+                .get_by_id(&db, "bob-work-cto-invest")
+                .expect("lookup")
+                .expect("demoted plugin")
+                .version,
+            demoted.version
+        );
     }
 
     #[test]
@@ -4924,9 +5663,9 @@ mod builtin_tests {
             .persist_version(&db, &bumped, None, true)
             .expect("persist newer history row");
 
-        let skill_dir = dirs::home_dir()
-            .expect("home")
-            .join(".bob/skills/bob-work-cto-invest");
+        let skill_dir = PluginDeployService::bob_skills_dir()
+            .expect("skills root")
+            .join("bob-work-cto-invest");
         std::fs::create_dir_all(skill_dir.join("mcp")).expect("mcp dir");
         std::fs::create_dir_all(skill_dir.join("scripts")).expect("scripts dir");
         let custom_marker = "# bob-work-custom-cto-bundle\nprint('keep-me')\n";
@@ -5092,7 +5831,7 @@ mod builtin_tests {
                 "{} missing mcpServers",
                 plugin_id
             );
-            assert_eq!(plugin.version, "1.1.0");
+            assert_eq!(plugin.version, "1.2.0");
         }
         let docling = plugins
             .iter()
@@ -5108,6 +5847,94 @@ mod builtin_tests {
                 .and_then(|value| value.as_str()),
             Some("docling")
         );
+        assert_eq!(
+            docling.manifest["externalRuntimes"][0]["id"],
+            "external.docling-cli"
+        );
+        assert!(docling
+            .manifest
+            .get("resources")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .any(|resource| {
+                resource.get("kind").and_then(|value| value.as_str()) == Some("external-runtime")
+                    && resource.get("runtimeId").and_then(|value| value.as_str())
+                        == Some("external.docling-cli")
+            }));
+    }
+
+    #[test]
+    fn imports_the_legacy_shape_emitted_by_prompt_plugin_creation() {
+        let db = test_database();
+        let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
+        let bundle = root.join("bonjour-simple");
+        std::fs::create_dir_all(bundle.join("scripts")).expect("bundle directories");
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: bonjour-simple\ndescription: Dit bonjour.\n---\n\nExécute le script local.",
+        )
+        .expect("skill");
+        std::fs::write(
+            bundle.join("scripts/bonjour.sh"),
+            "#!/bin/sh\nprintf 'Bonjour depuis le plugin personnel !\\n'\n",
+        )
+        .expect("script");
+        std::fs::write(
+            bundle.join(".bob-work-plugin.json"),
+            serde_json::json!({
+                "schemaVersion": "2.0",
+                "name": "Bonjour Simple",
+                "slug": "bonjour-simple",
+                "bobWorkImportConsent": true,
+                "version": "1.0.0",
+                "description": "Dit bonjour depuis un script local.",
+                "category": "personal",
+                "permissions": ["command.execute"],
+                "entrypoints": [{
+                    "id": "bonjour",
+                    "label": "Dire bonjour",
+                    "type": "shell",
+                    "command": "sh",
+                    "args": ["scripts/bonjour.sh"]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("prompt-created bundle import");
+        assert_eq!(imported.len(), 1);
+        let plugin = &imported[0];
+        assert_eq!(plugin.id, "agentic-bonjour-simple");
+        assert_eq!(plugin.scope, "personal");
+        assert_eq!(plugin.category, "executable");
+        assert_eq!(
+            plugin.manifest["permissions"][0]["type"].as_str(),
+            Some("command.execute")
+        );
+        assert_eq!(
+            plugin.manifest["entrypoints"][0]["runtime"].as_str(),
+            Some("sh")
+        );
+        assert_eq!(
+            plugin.manifest["entrypoints"][0]["path"].as_str(),
+            Some("scripts/bonjour.sh")
+        );
+        assert!(bundle.join(".bob-work-plugin-id").is_file());
+
+        let output = std::process::Command::new("sh")
+            .arg(bundle.join("scripts/bonjour.sh"))
+            .output()
+            .expect("run prompt-created entrypoint");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "Bonjour depuis le plugin personnel !"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]
@@ -5138,6 +5965,7 @@ mod builtin_tests {
                 "schemaVersion": 1,
                 "name": "Cloud Architect Agent",
                 "slug": "cloud-architect-agent",
+                "bobWorkImportConsent": true,
                 "version": "1.0.0",
                 "description": "Architecture assessment",
                 "category": "executable",
@@ -5211,68 +6039,65 @@ mod builtin_tests {
             .sync_agentic_bundles_from(&db, &root)
             .expect("detect update");
         assert_eq!(detected.len(), 1);
-        let still_installed = service
+        let upgraded = service
             .get_by_id(&db, "agentic-cloud-architect-agent")
             .expect("lookup")
             .expect("plugin");
-        assert_eq!(still_installed.version, "1.0.0");
-        assert_eq!(still_installed.available_version.as_deref(), Some("1.1.0"));
+        assert_eq!(upgraded.version, "1.1.0");
+        assert!(upgraded.available_version.is_none());
+        assert!(
+            bundle.join(".bob-work-plugin.json").is_file(),
+            "agentic update must keep the authored manifest on disk"
+        );
+        let skill_after = std::fs::read_to_string(bundle.join("SKILL.md")).expect("skill");
+        assert!(
+            !skill_after.contains("Politique plugins/skills Bob Work"),
+            "agentic update must not inject deploy policy jargon into SKILL.md"
+        );
+        assert!(skill_after.contains("improved local architecture CLI"));
 
         let history = service
-            .list_versions(&db, &still_installed.id)
+            .list_versions(&db, &upgraded.id)
             .expect("version history");
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].state, "available");
-        assert_eq!(history[1].state, "current");
-        let diff = service
-            .compare_version(&db, &still_installed.id, "1.1.0")
-            .expect("version diff");
-        assert!(diff
-            .changes
-            .iter()
-            .any(|change| change.contains("résilience")));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].state, "current");
+        assert_eq!(history[0].version, "1.1.0");
 
-        // A staged version is immutable even if the source bundle changes later.
+        // Source mutations after auto-activation do not rewrite the active DB
+        // version until the SemVer is bumped again.
         std::fs::write(
             bundle.join("scripts/assessment.py"),
             "print('unreleased source mutation')\n",
         )
-        .expect("mutate source after snapshot");
-        let upgraded = service
-            .activate_version(&db, &still_installed.id, "1.1.0")
-            .expect("install update");
-        assert_eq!(upgraded.version, "1.1.0");
-        assert!(upgraded.available_version.is_none());
-        let upgraded_bundle = PathBuf::from(
-            upgraded
+        .expect("mutate source after activation");
+        let still = service
+            .get_by_id(&db, &upgraded.id)
+            .expect("lookup")
+            .expect("plugin");
+        assert_eq!(still.version, "1.1.0");
+        let snapshot_bundle = PathBuf::from(
+            still
                 .manifest
                 .get("bundlePath")
                 .and_then(|value| value.as_str())
-                .expect("snapshot bundle path"),
+                .expect("live bundle path"),
         );
+        // bundlePath points at the live authoring dir after activation.
+        assert_eq!(snapshot_bundle, bundle);
         assert!(
-            std::fs::read_to_string(upgraded_bundle.join("scripts/assessment.py"))
-                .expect("read snapshot")
-                .contains("version 1.1")
+            std::fs::read_to_string(bundle.join("scripts/assessment.py"))
+                .expect("read live script")
+                .contains("unreleased source mutation")
         );
 
-        let restored = service
-            .activate_version(&db, &still_installed.id, "1.0.0")
-            .expect("rollback");
-        assert_eq!(restored.version, "1.0.0");
-        assert_eq!(restored.available_version.as_deref(), Some("1.1.0"));
-        let restored_bundle = PathBuf::from(
-            restored
-                .manifest
-                .get("bundlePath")
-                .and_then(|value| value.as_str())
-                .expect("restored bundle path"),
-        );
-        assert!(
-            std::fs::read_to_string(restored_bundle.join("scripts/assessment.py"))
-                .expect("read restored snapshot")
-                .contains("print('ok')")
-        );
+        let rollback = service.activate_version(&db, &upgraded.id, "1.0.0");
+        assert!(rollback.is_err());
+        let history_after_upgrade = service
+            .list_versions(&db, &upgraded.id)
+            .expect("version history after upgrade");
+        assert_eq!(history_after_upgrade.len(), 1);
+        assert_eq!(history_after_upgrade[0].version, "1.1.0");
+        assert_eq!(history_after_upgrade[0].state, "current");
 
         std::fs::remove_dir_all(&root).expect("cleanup test bundle");
     }
@@ -5347,6 +6172,7 @@ mod builtin_tests {
                 "schemaVersion": 1,
                 "name": "Diagram kit",
                 "slug": "diagram-kit",
+                "bobWorkImportConsent": true,
                 "version": "1.0.0",
                 "description": "Convertit un diagramme avec un CLI et un binaire local.",
                 "category": "executable",
@@ -5464,6 +6290,178 @@ mod builtin_tests {
     }
 
     #[test]
+    fn skips_first_agentic_import_without_explicit_consent() {
+        let db = test_database();
+        let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
+        let bundle = root.join("notes-assistant");
+        std::fs::create_dir_all(&bundle).expect("bundle");
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: notes-assistant\n---\nAccidental CU bundle.",
+        )
+        .expect("skill");
+        std::fs::write(
+            bundle.join(".bob-work-plugin.json"),
+            serde_json::json!({
+                "name": "Notes Assistant",
+                "slug": "notes-assistant",
+                "version": "1.0.0",
+                "category": "executable",
+                "description": "Should not auto-import without consent",
+                "permissions": [{"type":"command.execute"}],
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("sync");
+        assert!(imported.is_empty());
+        assert!(PluginService::new()
+            .get_by_id(&db, "agentic-notes-assistant")
+            .expect("lookup")
+            .is_none());
+
+        std::fs::write(bundle.join(".bob-work-import-ok"), "").expect("consent marker");
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("sync with consent");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].id, "agentic-notes-assistant");
+
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn strips_invalid_pypi_shorthand_private_dependencies_during_import() {
+        let db = test_database();
+        let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
+        let bundle = root.join("canva-design");
+        std::fs::create_dir_all(bundle.join("scripts")).expect("bundle");
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: canva-design\ndescription: Canvas art\n---\n\nGenerate art.",
+        )
+        .expect("skill");
+        std::fs::write(
+            bundle.join("scripts/generate_design.py"),
+            "print('ok')\n",
+        )
+        .expect("script");
+        std::fs::write(bundle.join(".bob-work-import-ok"), "").expect("consent");
+        std::fs::write(
+            bundle.join(".bob-work-plugin.json"),
+            serde_json::json!({
+                "name": "Canva Design",
+                "slug": "canva-design",
+                "version": "1.0.0",
+                "category": "executable",
+                "description": "Create visual art",
+                "bobWorkImportConsent": true,
+                "sharedCapabilities": ["python", "artifact"],
+                "permissions": [{"type":"command.execute"},{"type":"file.read"},{"type":"file.write"}],
+                "entrypoints": [{
+                    "name": "generate-design",
+                    "runtime": "python3",
+                    "path": "scripts/generate_design.py"
+                }],
+                "privateDependencies": [{
+                    "name": "Pillow",
+                    "version": ">=10.4.0",
+                    "source": "pypi",
+                    "purpose": "PNG rendering"
+                }, {
+                    "name": "reportlab",
+                    "version": ">=4.2.0",
+                    "source": "pypi",
+                    "purpose": "PDF rendering"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("import despite pypi shorthand");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].id, "agentic-canva-design");
+        assert_eq!(
+            imported[0]
+                .manifest
+                .get("privateDependencies")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len())
+                .unwrap_or(usize::MAX),
+            0
+        );
+        assert!(!bundle.join(".bob-work-import-error").is_file());
+
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn enriches_string_skill_paths_during_agentic_import() {
+        let db = test_database();
+        let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
+        let bundle = root.join("canvas-pack");
+        std::fs::create_dir_all(bundle.join("skills/canvas-design")).expect("nested");
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\nname: canvas-pack\ndescription: Pack\n---\n\nRoot.",
+        )
+        .expect("root skill");
+        std::fs::write(
+            bundle.join("skills/canvas-design/SKILL.md"),
+            "---\nname: canvas-design\ndescription: Create posters\n---\n\nNested skill body.",
+        )
+        .expect("nested skill");
+        std::fs::write(bundle.join(".bob-work-import-ok"), "").expect("consent");
+        std::fs::write(
+            bundle.join(".bob-work-plugin.json"),
+            serde_json::json!({
+                "name": "Canvas Pack",
+                "slug": "canvas-pack",
+                "version": "1.0.0",
+                "category": "recipe",
+                "description": "Design pack",
+                "bobWorkImportConsent": true,
+                "permissions": [{"type":"file.read"}],
+                "skills": ["skills/canvas-design/SKILL.md"]
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        let imported = PluginService::new()
+            .sync_agentic_bundles_from(&db, &root)
+            .expect("import");
+        assert_eq!(imported.len(), 1);
+        let skills = imported[0]
+            .manifest
+            .get("skills")
+            .and_then(|value| value.as_array())
+            .expect("skills array");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(
+            skills[0].get("name").and_then(|value| value.as_str()),
+            Some("canvas-design")
+        );
+        assert_eq!(
+            skills[0].get("path").and_then(|value| value.as_str()),
+            Some("skills/canvas-design/SKILL.md")
+        );
+        assert!(skills[0]
+            .get("description")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .contains("posters"));
+
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
     fn rejects_an_agentic_entrypoint_outside_its_bundle() {
         let db = test_database();
         let root = std::env::temp_dir().join(format!("bob-work-plugin-test-{}", Uuid::new_v4()));
@@ -5477,7 +6475,8 @@ mod builtin_tests {
         std::fs::write(
             bundle.join(".bob-work-plugin.json"),
             serde_json::json!({
-                "name": "Unsafe plugin", "slug": "unsafe-plugin", "version": "1.0.0",
+                "name": "Unsafe plugin", "slug": "unsafe-plugin",
+                "bobWorkImportConsent": true, "version": "1.0.0",
                 "description": "Must be rejected", "category": "executable",
                 "entrypoints": [{"runtime":"python3", "path":"../outside.py"}]
             })

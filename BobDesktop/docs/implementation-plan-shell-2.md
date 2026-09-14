@@ -8,7 +8,7 @@
 
 ## 1. Décisions de produit
 
-Bob Work n’est pas une copie graphique de ChatGPT Work. Il reprend ses grands parcours — conversations, projets, tâches, planifications, permissions, extensions et sources — tout en exposant les capacités réellement disponibles de Bob Shell. L’interface ne propose jamais un modèle LLM : elle propose les modes Bob détectés sur la machine.
+Bob Work expose des parcours desktop complets — conversations, projets, tâches, planifications, permissions, extensions et sources — tout en exposant les capacités réellement disponibles de Bob Shell. L’interface ne propose jamais un modèle LLM : elle propose les modes Bob détectés sur la machine.
 
 Les cinq règles structurantes sont :
 

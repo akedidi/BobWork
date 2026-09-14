@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings } from '@bob-work/shared-types'
 import { I18nProvider } from '../i18n'
+import { AppDialogProvider } from '../components/AppDialog'
 import SettingsView from './SettingsView'
 
 function deferred<T>() {
@@ -33,6 +34,11 @@ const mocks = vi.hoisted(() => ({
   createMemory: vi.fn(),
   forgetMemory: vi.fn(),
   updateSettings: vi.fn(),
+  getArchivedConversations: vi.fn(),
+  getConversations: vi.fn(),
+  updateConversation: vi.fn(),
+  deleteConversation: vi.fn(),
+  getOrcaCliStatus: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -96,10 +102,16 @@ vi.mock('../lib/ipc', () => ({
   updateSettings: mocks.updateSettings,
   revokePermissionGrant: vi.fn(),
   importConversations: vi.fn(),
+  importConversationsFromBackup: vi.fn(),
   exportConversations: vi.fn(),
+  getArchivedConversations: mocks.getArchivedConversations,
+  getConversations: mocks.getConversations,
+  updateConversation: mocks.updateConversation,
+  deleteConversation: mocks.deleteConversation,
   openMacosPrivacyPane: vi.fn(),
   getChromeControlStatus: vi.fn().mockResolvedValue(null),
   getComputerUseStatus: vi.fn().mockResolvedValue(null),
+  getOrcaCliStatus: mocks.getOrcaCliStatus,
   testMcpServer: mocks.testMcpServer,
   isNotificationAuthGranted: vi.fn().mockReturnValue(false),
   requestNotificationAuthorization: vi.fn(),
@@ -111,9 +123,13 @@ vi.mock('../lib/ipc', () => ({
   requestAccessibilityPermission: vi.fn(),
   requestChromeAutomationPermission: vi.fn(),
   installBobShell: vi.fn(),
+  getAppInfo: vi.fn().mockResolvedValue({ appName: 'Bob Work', appVersion: '0.1.9', tauriVersion: '2.x', os: 'macos', arch: 'aarch64', dataDir: '/tmp', logDir: '/tmp' }),
   openDataDir: vi.fn(),
   exportDiagnostics: vi.fn(),
   purgeAppCache: vi.fn(),
+  listDatabaseBackups: vi.fn().mockResolvedValue([]),
+  createDatabaseBackup: vi.fn(),
+  restoreDatabaseBackup: vi.fn(),
   getRuntimeStorage: mocks.getRuntimeStorage,
   getRuntimeInstallationPlan: vi.fn(),
   installExternalRuntime: vi.fn(),
@@ -174,12 +190,14 @@ const settings: AppSettings = {
 function renderSettings(state?: { tab?: string }) {
   return render(
     <I18nProvider>
-      <MemoryRouter
-        initialEntries={[{ pathname: '/settings', state }]}
+      <AppDialogProvider>
+        <MemoryRouter
+          initialEntries={[{ pathname: '/settings', state }]}
 
-      >
-        <SettingsView />
-      </MemoryRouter>
+        >
+          <SettingsView />
+        </MemoryRouter>
+      </AppDialogProvider>
     </I18nProvider>,
   )
 }
@@ -242,6 +260,12 @@ describe('SettingsView progressive loading', () => {
     mocks.requestMicrophonePermission.mockResolvedValue('authorized')
     mocks.requestVoiceDictationPermission.mockResolvedValue({ microphone: 'authorized', speechRecognition: 'authorized' })
     mocks.updateSettings.mockResolvedValue(undefined)
+    mocks.getOrcaCliStatus.mockResolvedValue({
+      installed: false,
+      path: null,
+      supportsSkillsGet: false,
+      message: 'Orca CLI not found.',
+    })
     mocks.getRuntimeStorage.mockResolvedValue({
       coreBytes: 0,
       sharedBytes: 0,
@@ -256,6 +280,96 @@ describe('SettingsView progressive loading', () => {
     mocks.getProjects.mockResolvedValue([])
     mocks.createMemory.mockResolvedValue({})
     mocks.forgetMemory.mockResolvedValue(undefined)
+    mocks.getArchivedConversations.mockResolvedValue([])
+    mocks.getConversations.mockResolvedValue([])
+    mocks.updateConversation.mockResolvedValue(undefined)
+    mocks.deleteConversation.mockResolvedValue(undefined)
+  })
+
+  it('place Apparence et langue juste après Général', () => {
+    renderSettings()
+    const navigation = screen.getByRole('navigation')
+    const labels = Array.from(navigation.querySelectorAll('button')).map(button => button.textContent)
+    expect(labels.indexOf('Apparence et langue')).toBe(labels.indexOf('Général') + 1)
+  })
+
+  it('affiche les conversations archivées et permet de les restaurer', async () => {
+    mocks.getArchivedConversations.mockResolvedValue([{
+      id: 'archived-1',
+      title: 'Conversation archivée',
+      type: 'chat',
+      businessMode: 'agent',
+      bobMode: 'agent',
+      date: '2026-09-08T10:30:00Z',
+      pinned: false,
+      localOnly: true,
+      archived: true,
+    }])
+    renderSettings({ tab: 'data' })
+
+    expect(await screen.findByRole('heading', { name: 'Conversations archivées' })).toBeVisible()
+    expect(await screen.findByText('Conversation archivée')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Restaurer' }))
+
+    await waitFor(() => expect(mocks.updateConversation).toHaveBeenCalledWith('archived-1', { archived: false }))
+    expect(screen.queryByText('Conversation archivée')).not.toBeInTheDocument()
+  })
+
+  it('permet de supprimer définitivement une conversation archivée', async () => {
+    mocks.getArchivedConversations.mockResolvedValue([{
+      id: 'archived-1',
+      title: 'Conversation archivée',
+      type: 'chat',
+      businessMode: 'agent',
+      bobMode: 'agent',
+      date: '2026-09-08T10:30:00Z',
+      pinned: false,
+      localOnly: true,
+      archived: true,
+    }])
+    renderSettings({ tab: 'data' })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Supprimer définitivement Conversation archivée' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer' }))
+
+    await waitFor(() => expect(mocks.deleteConversation).toHaveBeenCalledWith('archived-1'))
+    expect(screen.queryByText('Conversation archivée')).not.toBeInTheDocument()
+  })
+
+  it('permet de supprimer définitivement toutes les conversations avec confirmation', async () => {
+    mocks.getConversations.mockResolvedValue([{
+      id: 'active-1',
+      title: 'Conversation active',
+      type: 'chat',
+      businessMode: 'agent',
+      bobMode: 'agent',
+      date: '2026-09-08T10:30:00Z',
+      pinned: false,
+      localOnly: true,
+      archived: false,
+    }])
+    mocks.getArchivedConversations.mockResolvedValue([{
+      id: 'archived-1',
+      title: 'Conversation archivée',
+      type: 'chat',
+      businessMode: 'agent',
+      bobMode: 'agent',
+      date: '2026-09-08T10:30:00Z',
+      pinned: false,
+      localOnly: true,
+      archived: true,
+    }])
+    renderSettings({ tab: 'data' })
+
+    expect(await screen.findByRole('heading', { name: 'Supprimer toutes les conversations' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Supprimer toutes les conversations' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer toutes les conversations' }))
+
+    await waitFor(() => {
+      expect(mocks.getConversations).toHaveBeenCalled()
+      expect(mocks.deleteConversation).toHaveBeenCalledWith('active-1')
+      expect(mocks.deleteConversation).toHaveBeenCalledWith('archived-1')
+    })
   })
 
   it('manages native persistent memory from its own settings section', async () => {
@@ -280,6 +394,26 @@ describe('SettingsView progressive loading', () => {
     expect(screen.getByText('Runtimes externes à Bob Work')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Runtimes' })).toHaveClass('active')
     expect(mocks.getRuntimeStorage).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not probe Orca when opening settings on the default tab', async () => {
+    renderSettings()
+    expect(await screen.findByRole('heading', { name: 'Général', level: 1 })).toBeVisible()
+    expect(mocks.getOrcaCliStatus).not.toHaveBeenCalled()
+  })
+
+  it('detects the Orca CLI from the extensions tab without treating it as opening the app', async () => {
+    mocks.getOrcaCliStatus.mockResolvedValue({
+      installed: true,
+      path: '/opt/homebrew/bin/orca',
+      supportsSkillsGet: true,
+      message: 'Orca CLI detected.',
+    })
+    renderSettings({ tab: 'extensions' })
+
+    expect(await screen.findByText('/opt/homebrew/bin/orca')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Orca CLI (skills intégrés)' })).toBeVisible()
+    expect(mocks.getOrcaCliStatus).toHaveBeenCalled()
   })
 
   it('shows the copyable Cloudflare link when remote control is enabled', async () => {
@@ -367,7 +501,7 @@ describe('SettingsView progressive loading', () => {
     expect(screen.queryByRole('button', { name: 'Arrêter' })).not.toBeInTheDocument()
   })
 
-  it('exposes only explicitly selected local MCP tools', async () => {
+  it('hides the remote MCP gateway until that surface is ready', async () => {
     mocks.getSettings.mockResolvedValue({ ...settings, mcpGatewayEnabled: true, mcpGatewayTools: [] })
     mocks.getMcpServers.mockResolvedValue([{
       name: 'local-files', transport: 'stdio', commandOrUrl: '/usr/bin/node', args: [], enabled: true, status: 'configured', raw: {},
@@ -375,15 +509,15 @@ describe('SettingsView progressive loading', () => {
     mocks.testMcpServer.mockResolvedValue({ id: 'local-files', name: 'local-files', ok: true, message: '', tools: ['read_file', 'write_file'] })
     renderSettings({ tab: 'remote' })
 
-    const readTool = await screen.findByRole('checkbox', { name: 'read_file' })
-    expect(readTool).not.toBeChecked()
-    fireEvent.click(readTool)
+    expect(await screen.findByRole('heading', { name: 'Télécommande', level: 1 })).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Passerelle MCP distante' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'read_file' })).not.toBeInTheDocument()
+  })
 
-    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      mcpGatewayEnabled: true,
-      mcpGatewayTools: ['local-files::read_file'],
-    })))
-    expect(screen.getByText('https://bob.trycloudflare.com/mcp')).toBeVisible()
+  it('hides the SSH servers settings tab', async () => {
+    renderSettings()
+    expect(await screen.findByRole('heading', { name: 'Général', level: 1 })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Serveurs SSH' })).not.toBeInTheDocument()
   })
 
   it('shows preference toggles immediately even before settings IPC resolves', async () => {
@@ -420,6 +554,25 @@ describe('SettingsView progressive loading', () => {
     await waitFor(() => {
       expect(mocks.getSettings).toHaveBeenCalled()
     })
+  })
+
+  it('hides Bobcoins usage when Bob is not authenticated', async () => {
+    mocks.getBobAuthSnapshot.mockResolvedValue({
+      found: true,
+      path: '/usr/local/bin/bob',
+      version: '2.0.0',
+      authenticated: false,
+      authenticationMethod: 'required',
+    })
+    mocks.getBobProfile.mockResolvedValue({
+      detection: { found: true, authenticated: false, path: '/usr/local/bin/bob', version: '2.0.0' },
+      authenticationMethod: 'required',
+    })
+
+    renderSettings({ tab: 'bob' })
+
+    expect(await screen.findByRole('heading', { name: 'IBM Bob Shell' })).toBeVisible()
+    expect(screen.queryByText('Consommation Bobcoins')).not.toBeInTheDocument()
   })
 
   it('keeps the Bob tab usable while usage is still loading', async () => {
@@ -483,7 +636,7 @@ describe('SettingsView progressive loading', () => {
     expect(await screen.findByText('Le Microphone et la Reconnaissance vocale sont autorisés pour Bob Work.')).toBeVisible()
   })
 
-  it('masque le détail technique des autorisations persistantes', async () => {
+  it('ne montre plus la politique par défaut ni les grants techniques, seulement les permissions de tâche', async () => {
     mocks.getPermissionGrants.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({
       id: `grant-${index}`,
       actionType: 'bob.run.full_disk',
@@ -494,7 +647,9 @@ describe('SettingsView progressive loading', () => {
     })))
     renderSettings({ tab: 'permissions' })
 
-    expect(await screen.findByRole('button', { name: 'Réinitialiser les choix d’autorisation' })).toBeVisible()
+    expect(await screen.findByText('Permissions de tâche')).toBeVisible()
+    expect(screen.queryByText('Politique par défaut')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Réinitialiser les choix d’autorisation' })).not.toBeInTheDocument()
     expect(screen.queryByText('Autorisations mémorisées (5)')).not.toBeInTheDocument()
     expect(screen.queryByText('bob.run.full_disk')).not.toBeInTheDocument()
     expect(screen.queryByText('/private/internal/0')).not.toBeInTheDocument()

@@ -7,8 +7,12 @@ import { bobAuthService, resolveSessionApiKeyStatus } from '../services/BobAuthS
 import { useAppStore } from '../stores/appStore'
 import type { BobAuthSnapshot, PermissionGrant, ShellProfile, UsageStatus } from '@bob-work/shared-types'
 import { errorMessage } from '../lib/errorMessage'
+import { useT } from '../i18n'
+
+export const BOB_SETTINGS_POLL_INTERVAL_MS = 5_000
 
 export function useBobProfile(tab: string, setStatus: (status: string) => void, showTransientStatus: (status: string) => void) {
+  const t = useT()
   const { setBobStatus, setBobInfo } = useAppStore()
   
   const [profile, setProfile] = useState<ShellProfile | null>(null)
@@ -32,6 +36,7 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
   const [apiKey, setApiKey] = useState('')
   const [sessionKeyStatus, setSessionKeyStatus] = useState({ active: false, source: 'none' as 'session' | 'environment' | 'sso' | 'none', vaultKeyPresent: false })
   const [bobExtrasReady, setBobExtrasReady] = useState(false)
+  const [installingBob, setInstallingBob] = useState(false)
   const authSnapshotRef = useRef(authSnapshot)
   const usageRef = useRef(usage)
   const grantsLoadingRef = useRef(grantsLoading)
@@ -107,9 +112,9 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
         }
       : snapshot
     setSessionKeyStatus(resolveSessionApiKeyStatus(methodSource, vaultFromIpc))
-    if (announce) showTransientStatus('Vérification terminée')
+    if (announce) showTransientStatus(t('settings.checkComplete'))
     return nextProfile
-  }, [setBobInfo, setBobStatus, showTransientStatus])
+  }, [setBobInfo, setBobStatus, showTransientStatus, t])
 
   useEffect(() => {
     const idle = window.setTimeout(() => { void refreshProfile() }, 0)
@@ -125,12 +130,27 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
     return () => window.cancelAnimationFrame(id)
   }, [tab])
 
+  useEffect(() => {
+    if (tab !== 'bob' && !installingBob) return
+    const poll = window.setInterval(() => { void refreshProfile(false, false) }, BOB_SETTINGS_POLL_INTERVAL_MS)
+    return () => window.clearInterval(poll)
+  }, [tab, installingBob, refreshProfile])
+
   useUsageUpdated(setUsage)
 
   const install = async () => {
-    setStatus('Téléchargement et vérification SHA-256 de Bob Shell…')
-    try { await installBobShell(); setStatus('Bob Shell installé.'); await refreshProfile() }
-    catch (error) { setStatus(`Installation impossible : ${String(error)}`) }
+    if (installingBob) return
+    setInstallingBob(true)
+    setStatus(t('settings.bobInstalling'))
+    try {
+      await installBobShell()
+      setStatus(t('settings.bobInstalled'))
+      await refreshProfile()
+    } catch (error) {
+      setStatus(t('settings.bobInstallFailed', { error: errorMessage(error) }))
+    } finally {
+      setInstallingBob(false)
+    }
   }
 
   const saveKey = async () => {
@@ -138,7 +158,7 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
     try {
       await bobAuthService.setSessionApiKey(apiKey.trim())
       setApiKey('')
-      setStatus('Clé IBM Bob enregistrée dans le coffre local chiffré.')
+      setStatus(t('settings.bobKeySaved'))
       await refreshProfile()
     } catch (error) { setStatus(errorMessage(error)) }
   }
@@ -163,6 +183,7 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
     bobExtrasReady,
     refreshProfile,
     install,
+    installingBob,
     saveKey,
     revokeGrant
   }

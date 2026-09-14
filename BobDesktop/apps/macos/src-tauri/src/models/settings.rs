@@ -29,10 +29,11 @@ pub struct AppSettings {
     pub telemetry_enabled: bool,
     pub computer_use_enabled: bool,
     pub chrome_control_enabled: bool,
-    /// Confine bob run to the workspace (never pass `--trust`; no Computer Use / Chrome for the session).
+    /// Confine bob run to the connected workspace (never pass `--trust`;
+    /// Computer Use forced off; Chrome/subagents follow settings via host bridge).
     pub sandbox_mode: bool,
     /// When true, Bob Work may retrieve short excerpts from other conversations
-    /// (same project when applicable) to enrich the prompt — ChatGPT-style.
+    /// (same project when applicable) to enrich the prompt.
     pub cross_conversation_context: bool,
     /// Native, user-controlled memories recalled across sessions.
     #[serde(default)]

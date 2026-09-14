@@ -6,7 +6,7 @@ import { ConnectionStatusBar } from '../components/ConnectionStatusBar'
 import { AppContext } from '../context/AppContext'
 import type { Language } from '../i18n'
 import { formatDateTime, formatNumber } from '../i18n'
-import { modeLabel, permissionPolicyLabel } from '../labels'
+import { modeLabel } from '../labels'
 import { colors, commonStyles } from '../theme'
 import type { Conversation, ConversationItem } from '../types'
 
@@ -17,9 +17,10 @@ export function SettingsScreen({ onOpenExtensions }: { onOpenExtensions: () => v
   const [archivedError, setArchivedError] = useState(false)
   const [archiveAction, setArchiveAction] = useState<string | null>(null)
   const [locationBusy, setLocationBusy] = useState(false)
+  const [executionBusy, setExecutionBusy] = useState(false)
   const languages: Array<{ id: Language; label: string }> = [{ id: 'fr', label: t('french') }, { id: 'en', label: t('english') }, { id: 'es', label: t('spanish') }]
+  const sandboxMode = Boolean(bootstrap?.settings.sandboxMode)
   const confirmDisconnect = () => Alert.alert(t('disconnect'), t('disconnectConfirm'), [{ text: t('cancel'), style: 'cancel' }, { text: t('confirm'), style: 'destructive', onPress: () => void disconnect() }])
-  const permissionPolicy = permissionPolicyLabel(bootstrap?.settings.permissionPolicy, t)
   const total = usage?.totalAmount ?? (usage?.usedAmount != null && usage.remainingAmount != null ? usage.usedAmount + usage.remainingAmount : null)
   const percent = usage?.usedAmount != null && total != null && total > 0 ? Math.min(100, Math.max(0, usage.usedAmount / total * 100)) : null
   const amount = (value: number | null | undefined) => value == null ? '—' : formatNumber(value, language)
@@ -91,6 +92,18 @@ export function SettingsScreen({ onOpenExtensions }: { onOpenExtensions: () => v
     } catch { Alert.alert(t('error'), t('locationUpdateFailed')) }
     finally { setLocationBusy(false) }
   }
+  const setExecutionMode = async (nextSandbox: boolean) => {
+    if (!api || executionBusy || sandboxMode === nextSandbox) return
+    setExecutionBusy(true)
+    try {
+      await api.updateExecutionMode(nextSandbox)
+      await refreshBootstrap()
+    } catch {
+      Alert.alert(t('error'), t('executionModeUpdateFailed'))
+    } finally {
+      setExecutionBusy(false)
+    }
+  }
   return (
     <View style={commonStyles.screen}>
       <ConnectionStatusBar />
@@ -119,10 +132,41 @@ export function SettingsScreen({ onOpenExtensions }: { onOpenExtensions: () => v
         <Pressable style={commonStyles.card} onPress={() => void refreshBootstrap()}>
           <View style={styles.status}><View style={[styles.dot, !bootstrap?.bobAvailable && styles.dotError]} /><Text style={[styles.connected, !bootstrap?.bobAvailable && styles.unavailable]}>{bootstrap?.bobAvailable ? t('bobAvailable') : t('bobUnavailable')}</Text><Ionicons name="refresh" size={18} color={colors.textMuted} /></View>
           <Text style={styles.label}>{t('defaultMode')}</Text><Text style={styles.server}>{bootstrap ? modeLabel(bootstrap.settings.defaultMode, t) : '—'}</Text>
-          <Text style={[styles.label, styles.settingGap]}>{t('permissionPolicy')}</Text><Text style={styles.server}>{permissionPolicy}</Text>
-          <View style={styles.security}><Ionicons name={bootstrap?.settings.sandboxMode ? 'lock-closed-outline' : 'folder-open-outline'} size={18} color={colors.accent} /><Text style={styles.securityText}>{bootstrap?.settings.sandboxMode ? t('sandboxOn') : t('sandboxOff')}</Text></View>
-          <Text style={styles.help}>{t('followsBobWork')}</Text>
         </Pressable>
+        <Text style={styles.section}>{t('executionMode')}</Text>
+        <View style={commonStyles.card}>
+          <Text style={styles.navigationDescription}>{t('executionModeDesc')}</Text>
+          <Pressable
+            style={[styles.executionOption, sandboxMode && styles.executionOptionSelected, executionBusy && styles.executionOptionDisabled]}
+            disabled={!connected || executionBusy}
+            onPress={() => void setExecutionMode(true)}
+            accessibilityRole="radio"
+            accessibilityState={{ selected: sandboxMode }}
+          >
+            <View style={styles.executionOptionIcon}><Ionicons name="lock-closed-outline" size={18} color={sandboxMode ? colors.accent : colors.textMuted} /></View>
+            <View style={styles.executionOptionText}>
+              <Text style={styles.navigationTitle}>{t('executionModeSandbox')}</Text>
+              <Text style={styles.navigationDescription}>{t('executionModeSandboxDesc')}</Text>
+            </View>
+            <Ionicons name={sandboxMode ? 'radio-button-on' : 'radio-button-off'} size={22} color={sandboxMode ? colors.accent : colors.textMuted} />
+          </Pressable>
+          <Pressable
+            style={[styles.executionOption, !sandboxMode && styles.executionOptionSelected, executionBusy && styles.executionOptionDisabled]}
+            disabled={!connected || executionBusy}
+            onPress={() => void setExecutionMode(false)}
+            accessibilityRole="radio"
+            accessibilityState={{ selected: !sandboxMode }}
+          >
+            <View style={styles.executionOptionIcon}><Ionicons name="folder-open-outline" size={18} color={!sandboxMode ? colors.accent : colors.textMuted} /></View>
+            <View style={styles.executionOptionText}>
+              <Text style={styles.navigationTitle}>{t('executionModeDirect')}</Text>
+              <Text style={styles.navigationDescription}>{t('executionModeDirectDesc')}</Text>
+              {!sandboxMode ? <Text style={styles.executionWarning}>{t('executionModeDirectWarning')}</Text> : null}
+            </View>
+            <Ionicons name={!sandboxMode ? 'radio-button-on' : 'radio-button-off'} size={22} color={!sandboxMode ? colors.accent : colors.textMuted} />
+          </Pressable>
+          {executionBusy ? <ActivityIndicator color={colors.accent} style={{ marginTop: 10 }} /> : null}
+        </View>
         <Text style={styles.section}>{t('extensions')}</Text>
         <Pressable style={[commonStyles.card, styles.navigationCard]} onPress={onOpenExtensions}>
           <View style={styles.navigationIcon}><Ionicons name="extension-puzzle-outline" size={22} color={colors.accent} /></View>
@@ -175,6 +219,7 @@ const styles = StyleSheet.create({
   usageTrack: { height: 8, overflow: 'hidden', borderRadius: 99, backgroundColor: colors.surfaceRaised }, usageFill: { height: 8, borderRadius: 99, backgroundColor: colors.accent }, usageRemaining: { color: colors.textMuted, fontSize: 11, fontWeight: '700', marginTop: 9 },
   disconnect: { minHeight: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, borderWidth: 1, borderColor: '#5A2634', marginTop: 26 }, disconnectText: { color: colors.danger, fontWeight: '800' },
   navigationCard: { flexDirection: 'row', alignItems: 'center', gap: 12 }, navigationIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' }, navigationText: { flex: 1, minWidth: 0 }, navigationTitle: { color: colors.text, fontSize: 14, fontWeight: '800' }, navigationDescription: { color: colors.textMuted, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  executionOption: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginTop: 12, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceRaised }, executionOptionSelected: { borderColor: colors.accent, backgroundColor: colors.accentSoft }, executionOptionDisabled: { opacity: 0.55 }, executionOptionIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface }, executionOptionText: { flex: 1, minWidth: 0 }, executionWarning: { color: colors.warning, fontSize: 11, lineHeight: 15, marginTop: 6, fontWeight: '700' },
   locationRow: { flexDirection: 'row', alignItems: 'center', gap: 12 }, locationText: { flex: 1, minWidth: 0 }, locationRefresh: { minHeight: 38, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderRadius: 10, backgroundColor: colors.surfaceRaised },
   archivedSection: { marginTop: 28 }, archivedHelp: { color: colors.textMuted, fontSize: 11, lineHeight: 17, marginTop: -3, marginBottom: 10 }, archivedLoading: { minHeight: 84, alignItems: 'center', justifyContent: 'center' }, archivedEmpty: { color: colors.textMuted, fontSize: 13, lineHeight: 19, textAlign: 'center' }, retry: { color: colors.accent, fontSize: 12, fontWeight: '800', textAlign: 'center', marginTop: 8 }, projectGroup: { marginBottom: 14 }, projectHeading: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 4, marginBottom: 7 }, projectName: { flex: 1, color: colors.text, fontSize: 13, fontWeight: '800' }, archivedRow: { paddingVertical: 12 }, archivedTitle: { color: colors.text, fontSize: 14, fontWeight: '700', lineHeight: 19 }, archivedActions: { flexDirection: 'row', gap: 8, marginTop: 10 }, archiveButton: { minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 11, borderRadius: 9, borderWidth: 1 }, disableArchiveButton: { borderColor: colors.border, backgroundColor: colors.surfaceRaised }, deleteArchiveButton: { borderColor: '#5A2634' }, disableArchiveText: { color: colors.accent, fontSize: 11, fontWeight: '800' }, deleteArchiveText: { color: colors.danger, fontSize: 11, fontWeight: '800' }, actionDisabled: { opacity: .5 },
 })

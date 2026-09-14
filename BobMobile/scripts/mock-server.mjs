@@ -107,6 +107,7 @@ function makeDemoPdf() {
   return Buffer.from(value)
 }
 const demoPdf = makeDemoPdf()
+let sandboxMode = false
 
 function json(response, status, body) {
   response.writeHead(status, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*', 'Content-Type': 'application/json' })
@@ -130,7 +131,12 @@ http.createServer(async (request, response) => {
   if (request.headers.authorization !== `Bearer ${token}`) return json(response, 401, { error: 'Invalid test token' })
   const url = new URL(request.url ?? '/', 'http://localhost')
   if (url.pathname === '/api/v1/health') return json(response, 200, { status: 'ok', apiVersion: '1', bobAvailable: true })
-  if (url.pathname === '/api/v1/bootstrap') return json(response, 200, { apiVersion: '1', bobAvailable: true, settings: { theme: 'dark', language: 'fr', defaultMode: 'agent', permissionPolicy: 'ask_for_important', sandboxMode: false, mcpEnabled: true, subagentsEnabled: true, webEnabled: true } })
+  if (url.pathname === '/api/v1/bootstrap') return json(response, 200, { apiVersion: '1', bobAvailable: true, settings: { theme: 'dark', language: 'fr', defaultMode: 'agent', permissionPolicy: 'ask_for_important', sandboxMode, mcpEnabled: true, subagentsEnabled: true, webEnabled: true } })
+  if (url.pathname === '/api/v1/settings/execution-mode' && request.method === 'PATCH') {
+    const input = await requestBody(request)
+    sandboxMode = Boolean(input.sandboxMode)
+    return json(response, 200, { sandboxMode, executionMode: sandboxMode ? 'sandbox' : 'direct_disk' })
+  }
   if (url.pathname === '/api/v1/events') {
     response.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
     sse(response, 'connected', { apiVersion: '1' })

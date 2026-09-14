@@ -76,4 +76,41 @@ describe('execution plan activity parsing', () => {
 
     expect(plan?.steps.map(step => step.status)).toEqual(['completed', 'running', 'pending'])
   })
+
+  it('completes stale final steps when Bob Shell finishes successfully', () => {
+    const plan = executionPlanFromActivities([
+      {
+        eventType: 'tool_started',
+        toolName: 'update_todo_list',
+        payload: { parameters: { todos: [
+          { content: 'Analyser', status: 'completed' },
+          { content: 'Implémenter', status: 'running' },
+          { content: 'Vérifier', status: 'pending' },
+        ] } },
+      },
+      {
+        eventType: 'run_finished',
+        payload: { type: 'result', status: 'success' },
+        receivedAt: '2026-09-08T22:00:00Z',
+      },
+    ])
+
+    expect(plan?.steps.map(step => step.status)).toEqual(['completed', 'completed', 'completed'])
+    expect(plan?.updatedAt).toBe('2026-09-08T22:00:00Z')
+  })
+
+  it('does not complete unfinished steps after an error', () => {
+    const plan = executionPlanFromActivities([
+      {
+        toolName: 'update_plan',
+        payload: { steps: [
+          { content: 'Analyser', status: 'completed' },
+          { content: 'Implémenter', status: 'running' },
+        ] },
+      },
+      { eventType: 'error', payload: { status: 'failed' } },
+    ])
+
+    expect(plan?.steps.map(step => step.status)).toEqual(['completed', 'running'])
+  })
 })

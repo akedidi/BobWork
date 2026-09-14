@@ -1,44 +1,50 @@
 ---
 name: user-journey
-description: "Cartographier l’expérience de bout en bout et ses moments critiques."
+description: "Map the end-to-end experience and its critical moments."
 icon: designer
 ---
 
 # user-journey
 
-Utiliser ce skill pour cartographier l’expérience de bout en bout et ses moments critiques.
+Use this skill to map the end-to-end experience and its critical moments.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir acteur, scénario, objectif et bornes du parcours.
-2. Décrire étapes, actions, canaux, pensées, émotions, irritants et opportunités.
-3. Relier frontstage, backstage et dépendances lorsque le service l’exige.
-4. Prioriser les moments de vérité par impact utilisateur et valeur métier.
+1. Define actor, scenario, goal, and journey boundaries.
+2. Describe steps, actions, channels, thoughts, emotions, pain points, and opportunities.
+3. Link frontstage, backstage, and dependencies when the service requires it.
+4. Prioritize moments of truth by user impact and business value.
 
-## Livrable
+## Deliverable
 
-Journey map lisible, opportunités, hypothèses et métriques par étape.
+Readable journey map, opportunities, hypotheses, and metrics per step.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Un scénario et un acteur explicites.
-- As-is et to-be clairement distingués.
-- Opportunités rattachées à des irritants observés.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- One explicit scenario and actor.
+- As-is and to-be are clearly distinguished.
+- Opportunities are tied to observed pain points.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

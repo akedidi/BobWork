@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from './builtinCatalog'
 
 describe('builtinCatalog', () => {
-  it('marks every skill except CTO Investissements as built-in', () => {
+  it('uses backend ownership and known-slug fallback to classify skills', () => {
     expect(isBuiltinSkill({ slug: 'bob-work-computer-use' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'bob-work-microsoft-word' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'bob-work-docling' })).toBe(true)
@@ -16,7 +16,16 @@ describe('builtinCatalog', () => {
     expect(isBuiltinSkill({ slug: 'bob-rh-recruiting' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'hr-recruiting' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'redacteur-juridique' })).toBe(true)
-    expect(isBuiltinSkill({ slug: 'my-personal-skill' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'orca-cli' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'computer-use' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'find-skills' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'orchestration' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'skill-creator' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'plugin-creator' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'agent-review' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'computer-use' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'my-personal-skill' })).toBe(false)
+    expect(isBuiltinSkill({ slug: 'bonjour-simple', builtin: false })).toBe(false)
     expect(isBuiltinSkill({ slug: 'custom', builtin: true })).toBe(true)
   })
 
@@ -52,7 +61,7 @@ describe('builtinCatalog', () => {
     ])
   })
 
-  it('keeps the personal CTO skill first and sorts built-ins by update time', () => {
+  it('sorts personal skills first, then built-ins, by update time', () => {
     const ordered = sortSkillsForDisplay([
       { slug: 'bob-work-computer-use', name: 'Computer Use', builtin: true, createdAt: '2026-08-11T12:00:00Z', updatedAt: '2026-08-11T12:00:00Z' },
       { slug: 'old-user', name: 'Old', createdAt: '2026-08-01T10:00:00Z', updatedAt: '2026-08-01T10:00:00Z' },
@@ -61,11 +70,11 @@ describe('builtinCatalog', () => {
       { slug: 'bob-work-cto-invest', name: 'CTO', createdAt: '2026-07-01T10:00:00Z', updatedAt: '2026-07-01T10:00:00Z' },
     ])
     expect(ordered.map(skill => skill.slug)).toEqual([
+      'new-user',
+      'old-user',
       'bob-work-cto-invest',
       'bob-work-computer-use',
       'bob-work-github',
-      'new-user',
-      'old-user',
     ])
   })
 })

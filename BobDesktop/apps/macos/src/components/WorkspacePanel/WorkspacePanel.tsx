@@ -1,3 +1,4 @@
+import { PdfViewer } from '../PdfViewer/PdfViewer'
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type WheelEvent } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { open as chooseFile } from '@tauri-apps/plugin-dialog'
@@ -7,7 +8,9 @@ import { openPreviewResource, prepareFilePreview, revealInFileManager } from '..
 import type { FilePreview, TaskDetail } from '@bob-work/shared-types'
 import { errorMessage } from '../../lib/errorMessage'
 import { isLocalDevelopmentBrowserUrl, isTrustedEmbeddedBrowserUrl, normalizeBrowserUrl } from '../../lib/browserNavigation'
-import { FittedHtmlFrame } from '../FittedHtmlFrame'
+import { FittedHtmlFrame, openHtmlPreviewExternally } from '../FittedHtmlFrame'
+import { localizeActivityTitle } from '../../lib/activityLabels'
+import { useT } from '../../i18n'
 
 function safeFileSrc(path: string) {
   try {
@@ -236,6 +239,12 @@ function ActivityView({ detail, live, running, onOpen }: {
   running: boolean
   onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void
 }) {
+  const t = useT()
+  const labelFor = (event: PanelActivity) => localizeActivityTitle(t, {
+    eventType: event.eventType,
+    title: event.title,
+    toolName: event.toolName,
+  })
   const persisted = detail?.events.map(event => ({
     eventType: event.eventType, title: event.title, content: event.content,
     toolName: event.toolName, payload: event.payload as Record<string, unknown>,
@@ -262,7 +271,7 @@ function ActivityView({ detail, live, running, onOpen }: {
         <ul>
           {subagents.map((event, index) => (
             <li key={`subagent-${index}`} className={activityState(event.eventType)}>
-              <span>{event.title || activityLabel(event.eventType)}</span>
+              <span>{labelFor(event)}</span>
               {event.content && <small>{event.content}</small>}
             </li>
           ))}
@@ -276,7 +285,7 @@ function ActivityView({ detail, live, running, onOpen }: {
       data-event-type={event.eventType}
     >
       <span className="activity-node" />
-      <div><strong>{event.title || event.toolName || activityLabel(event.eventType)}</strong>
+      <div><strong>{labelFor(event)}</strong>
         {event.content && <p>{event.content}</p>}
       </div>
     </div>)}</div>
@@ -317,6 +326,12 @@ function FileView({ tab, onOpen, onRefresh }: {
 
   const canZoom = preview ? isZoomablePreview(preview.kind) : false
   const zoomPercent = Math.round(zoom * 100)
+  const openExternally = () => {
+    if (!tab.target) return Promise.resolve()
+    return /\.html?$/i.test(tab.target)
+      ? openHtmlPreviewExternally(tab.target)
+      : openPreviewResource(tab.target)
+  }
 
   return <div className="workspace-file-view">
     <div className="workspace-toolbar">
@@ -369,7 +384,7 @@ function FileView({ tab, onOpen, onRefresh }: {
       <button
         type="button"
         className="workspace-action-btn workspace-action-btn--accent"
-        onClick={() => tab.target && void openPreviewResource(tab.target).catch(error => setError(errorMessage(error, 'Impossible d’ouvrir le fichier.')))}
+        onClick={() => void openExternally().catch(error => setError(errorMessage(error, 'Impossible d’ouvrir le fichier.')))}
         title="Ouvrir dans l’application par défaut"
       >
         <PanelIcon kind="external" />
@@ -475,11 +490,6 @@ function PreviewContent({
     ? safeFileSrc(rasterPages[safePage - 1])
     : ''
   const htmlSource = htmlPages[safePage - 1] ?? ''
-  const pdfSource = pdfSourcePath
-    ? `${safeFileSrc(pdfSourcePath)}#page=${safePage}`
-    : preview.kind === 'html' && preview.previewPath
-    ? safeFileSrc(preview.previewPath)
-      : ''
 
   const meta = (
     <div className="preview-meta">
@@ -520,22 +530,18 @@ function PreviewContent({
         src={htmlSource}
         title={`${preview.name} — ${pageLabel} ${safePage}`}
         mode="panel"
+        zoom={zoom}
       />
     )
-  } else if (pdfSourcePath || (preview.kind === 'pdf' && pdfSource)) {
-    body = (
-      <iframe
-        key={`${pdfSourcePath}-${safePage}`}
-        src={pdfSource}
-        title={`${preview.name} — ${pageLabel} ${safePage}`}
-      />
-    )
+  } else if (pdfSourcePath) {
+    return <PdfViewer path={pdfSourcePath} title={preview.name} zoom={zoom} onZoomChange={onZoomChange} />
   } else if (preview.kind === 'html') {
     body = (
       <FittedHtmlFrame
         src={preview.previewPath ?? ''}
         title={preview.name}
         mode="panel"
+        zoom={zoom}
       />
     )
   } else if (preview.kind === 'image' || (preview.kind === 'office' && rasterSource)) {
@@ -588,7 +594,7 @@ function PreviewContent({
         <div
           className="preview-zoom-surface"
           style={{
-            zoom,
+            zoom: htmlSource || preview.kind === 'html' ? 1 : zoom,
             '--preview-image-max-width': `${Math.round(zoom * 100)}%`,
           } as CSSProperties}
         >
@@ -675,21 +681,6 @@ function resourceName(target: string) { try { return decodeURIComponent(new URL(
 function hostname(target: string) { try { return new URL(target).hostname } catch { return 'Web' } }
 function fileGlyph(name: string) { const ext = name.split('.').pop()?.toLowerCase(); return ext === 'docx' || ext === 'doc' ? 'W' : ext === 'pptx' || ext === 'ppt' ? 'P' : ext === 'xlsx' || ext === 'xls' || ext === 'csv' ? 'X' : ext === 'one' ? 'N' : ext === 'pdf' ? 'PDF' : '◇' }
 function formatBytes(value: number) { if (!value) return '0 octet'; const units = ['octets', 'Ko', 'Mo', 'Go']; const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1); return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}` }
-function activityLabel(type: string) {
-  return ({
-    analysis: 'Analyse',
-    tool_started: 'Outil démarré',
-    tool_finished: 'Outil terminé',
-    tool_error: 'Erreur outil',
-    usage: 'Consommation',
-    source: 'Source',
-    step: 'Étape',
-    subagent_started: 'Sous-agent démarré',
-    subagent_finished: 'Sous-agent terminé',
-    graph_started: 'Orchestration démarrée',
-    graph_finished: 'Orchestration terminée',
-  } as Record<string, string>)[type] ?? type.replace(/_/g, ' ')
-}
 function activityState(type: string) { return type === 'error' || type.endsWith('_error') ? 'failed' : type.endsWith('_finished') ? 'completed' : 'running' }
 function isSubagentEvent(event: PanelActivity) {
   return event.eventType.includes('subagent')

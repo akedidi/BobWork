@@ -321,7 +321,7 @@ describe('PluginsView', () => {
 
     const cloudRow = screen.getByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ })
     expect(cloudRow).toHaveTextContent('Mise à jour')
-    expect(cloudRow).toHaveTextContent('Agentique')
+    expect(cloudRow).toHaveTextContent('Personnel')
   })
 
   it('allows deleting non-builtin plugins from the list', async () => {
@@ -347,24 +347,22 @@ describe('PluginsView', () => {
     await waitFor(() => expect(mocks.deletePlugin).toHaveBeenCalledWith('cloud'))
   })
 
-  it('hides Restaurer for built-in plugins and keeps it for agentic ones', async () => {
+  it('shows only the active version and never offers rollback', async () => {
     mocks.getPluginVersions.mockImplementation((pluginId: string) => Promise.resolve(pluginId === 'cloud' ? [
-      { pluginId: 'cloud', version: '1.1.0', createdAt: '2026-08-09T08:00:00Z', installedAt: '2026-08-09T08:00:00Z', state: 'current' },
-      { pluginId: 'cloud', version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'previous' },
+      { pluginId: 'cloud', version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'current' },
+      { pluginId: 'cloud', version: '1.1.0', createdAt: '2026-08-09T08:00:00Z', installedAt: null, state: 'available' },
     ] : [
       { pluginId, version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'current' },
-      { pluginId, version: '0.9.0', createdAt: '2026-08-01T08:00:00Z', installedAt: '2026-08-01T08:00:00Z', state: 'previous' },
     ]))
     render(<MemoryRouter><PluginsView /></MemoryRouter>)
 
     fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
-    expect(await screen.findByText(/Plugin intégré : la version livrée/)).toBeVisible()
-    await waitFor(() => expect(screen.getByText('Version 0.9.0')).toBeVisible())
+    expect(await screen.findByText(/Bob Work ne conserve qu’une version active/)).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Restaurer' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
-    await waitFor(() => expect(screen.getByText('Version 1.0.0')).toBeVisible())
-    expect(screen.getByRole('button', { name: 'Restaurer' })).toBeVisible()
+    expect(await screen.findByText('Version 1.1.0 disponible')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Restaurer' })).not.toBeInTheDocument()
   })
 
   it('liste les skills du manifeste et ouvre le catalogue Skills', async () => {
@@ -395,7 +393,7 @@ describe('PluginsView', () => {
     expect(screen.queryByText('Aucun plugin.')).not.toBeInTheDocument()
   })
 
-  it('montre une liste vide de fichiers ressources', async () => {
+  it('masque les fichiers ressources sur les plugins intégrés', async () => {
     render(
       <MemoryRouter>
         <AppDialogProvider>
@@ -404,13 +402,13 @@ describe('PluginsView', () => {
       </MemoryRouter>,
     )
     fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
-    expect(await screen.findByText('Fichiers ressources')).toBeVisible()
-    expect(screen.getByText('Aucun fichier uploadé.')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Ajouter un fichier' })).toBeVisible()
+    expect(await screen.findByText('Ce plugin peut faire')).toBeVisible()
+    expect(screen.queryByText('Fichiers ressources')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Ajouter un fichier' })).not.toBeInTheDocument()
   })
 
-  it('uploade, ouvre et supprime un fichier ressource', async () => {
-    const uploaded = { id: 'f2', pluginId: 'builtin-documents', fileName: 'notes.pdf', path: '/tmp/notes.pdf', kind: 'pdf', size: 1024, uploadedAt: '2026-08-28T00:00:00Z' }
+  it('uploade, ouvre et supprime un fichier ressource sur un plugin personnel', async () => {
+    const uploaded = { id: 'f2', pluginId: 'cloud', fileName: 'notes.pdf', path: '/tmp/notes.pdf', kind: 'pdf', size: 1024, uploadedAt: '2026-08-28T00:00:00Z' }
     vi.mocked(open).mockResolvedValue(['/tmp/notes.pdf'])
     mocks.uploadPluginFileResource.mockResolvedValue(uploaded)
     mocks.listPluginFileResources.mockResolvedValueOnce([]).mockResolvedValue([uploaded])
@@ -424,10 +422,10 @@ describe('PluginsView', () => {
         </AppDialogProvider>
       </MemoryRouter>,
     )
-    fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
     expect(await screen.findByText('Aucun fichier uploadé.')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Ajouter un fichier' }))
-    await waitFor(() => expect(mocks.uploadPluginFileResource).toHaveBeenCalledWith('builtin-documents', '/tmp/notes.pdf'))
+    await waitFor(() => expect(mocks.uploadPluginFileResource).toHaveBeenCalledWith('cloud', '/tmp/notes.pdf'))
     expect(await screen.findByText('notes.pdf')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir' }))
     expect(mocks.openPreviewResource).toHaveBeenCalledWith('/tmp/notes.pdf')
@@ -436,12 +434,12 @@ describe('PluginsView', () => {
     mocks.listPluginFileResources.mockResolvedValue([])
     fireEvent.click(screen.getByRole('button', { name: 'Retirer' }))
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer' }))
-    await waitFor(() => expect(mocks.deletePluginFileResource).toHaveBeenCalledWith('builtin-documents', 'f2'))
+    await waitFor(() => expect(mocks.deletePluginFileResource).toHaveBeenCalledWith('cloud', 'f2'))
   })
 
-  it('conserve les fichiers ressources sans afficher de bases liées', async () => {
+  it('conserve les fichiers ressources sans afficher de bases liées sur un plugin personnel', async () => {
     mocks.listPluginFileResources.mockResolvedValue([
-      { id: 'f1', pluginId: 'builtin-documents', fileName: 'brief.pdf', path: '/tmp/brief.pdf', kind: 'pdf', size: 2048, uploadedAt: '2026-08-28T00:00:00Z' },
+      { id: 'f1', pluginId: 'cloud', fileName: 'brief.pdf', path: '/tmp/brief.pdf', kind: 'pdf', size: 2048, uploadedAt: '2026-08-28T00:00:00Z' },
     ])
     mocks.getDbConnections.mockResolvedValue([
       { id: 'db-1', name: 'sales', engine: 'sqlite', config: { filePath: '/tmp/sales.sqlite' }, hasSecret: false, enabled: true, createdAt: '', updatedAt: '' },
@@ -457,12 +455,11 @@ describe('PluginsView', () => {
         </AppDialogProvider>
       </MemoryRouter>,
     )
-    fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
     expect(await screen.findByText('Fichiers ressources')).toBeVisible()
     expect(screen.getByText('brief.pdf')).toBeVisible()
     expect(screen.queryByText('Bases liées')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Configurer dans DB' }))
-    expect(screen.getByTestId('location').textContent).toBe('/integrations|{"tab":"db"}')
+    expect(screen.getByRole('button', { name: 'Configurer dans APIs' })).toBeVisible()
   })
 
   it('ne propose plus de liaison DB exclusive dans les fiches plugins', async () => {
@@ -477,7 +474,7 @@ describe('PluginsView', () => {
         </AppDialogProvider>
       </MemoryRouter>,
     )
-    fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
     expect(await screen.findByText('Fichiers ressources')).toBeVisible()
     expect(screen.queryByTestId('plugin-linked-databases')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Lier' })).not.toBeInTheDocument()

@@ -1,9 +1,9 @@
 import { useT } from '../../i18n'
 import { PluginIcon, resolveIntegrationIcon } from '../PluginIcon'
 import { ConnectionOkPastille, ConnectionTestBadge } from './ConnectionTestBadge'
-import type { IntegrationDef } from '../../views/IntegrationsTabs/catalogData'
+import type { IntegrationAuthMode, IntegrationDef } from '../../views/IntegrationsTabs/catalogData'
 import type { IntegrationConnectionStatus } from '../../lib/ipc'
-import { isPkcePublicProvider } from '../../hooks/useIntegrations'
+import { defaultAuthMode, isPkcePublicProvider } from '../../hooks/useIntegrations'
 
 const connectButtonStyle = { flex: 1, padding: '7px 0', borderRadius: 99, fontSize: 12, fontWeight: 500, border: 'none', background: 'var(--accent)', color: 'white', cursor: 'pointer' }
 const secondaryButtonStyle = { ...connectButtonStyle, background: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--border)' }
@@ -21,8 +21,15 @@ const MCP_BY_PROVIDER: Record<string, string> = {
 
 function connectLabel(t: (key: string, params?: Record<string, string | number>) => string, integration: IntegrationDef, pending: boolean) {
   if (pending) return t('integrations.connectPending')
+  if (integration.tokenOnly) return t('integrations.connectWithToken')
   if (integration.oauthProvider === 'microsoft') return t('integrations.connectMicrosoft')
   return t('integrations.connectWith', { name: integration.name })
+}
+
+function authMethodLabel(t: (key: string) => string, authMethod?: string | null) {
+  if (authMethod === 'ssh') return t('common.ssh')
+  if (authMethod === 'token') return t('common.token')
+  return t('common.oauth')
 }
 
 export function IntegrationCard({
@@ -35,15 +42,20 @@ export function IntegrationCard({
   needsMoreScopes,
   oauthForm,
   tokenForm,
+  authModeForm,
   highlightProvider,
   deviceCode,
   mcpTestBusy,
   setOauthForms,
   setTokenForms,
+  setAuthModeForms,
   handleConnect,
   handleSaveOAuthAndConnect,
   handleConnectWithToken,
+  handleConnectWithSsh,
+  handleStartOAuth,
   handleDisconnect,
+  connectingSsh,
   openConnectPanel,
   setConnectPanelId,
   setDeviceCode,
@@ -53,6 +65,12 @@ export function IntegrationCard({
   const t = useT()
   const integrationName = (item: IntegrationDef) =>
     item.id === 'outlook-calendar' ? t('integrations.outlookCalendar') : item.name
+  const selectedAuthMode: IntegrationAuthMode = authModeForm ?? defaultAuthMode(integration)
+  const showAuthModePicker = (integration.authModes?.length ?? 0) > 1
+  const showPersonalTokenOption = !integration.tokenOnly
+    && !integration.authModes?.includes('ssh')
+    && integration.oauthProvider !== 'slack'
+    && !integration.webOnly
 
   return (
     <div
@@ -74,7 +92,7 @@ export function IntegrationCard({
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>{integrationName(integration)}</div>
           <span style={{ fontSize: 11, background: 'var(--bg-hover)', padding: '2px 7px', borderRadius: 99, color: 'var(--text-secondary)' }}>
-            {info?.authMethod === 'token' ? t('common.token') : t('common.oauth')}
+            {authMethodLabel(t, info?.authMethod)}
           </span>
         </div>
         {info?.lastTest?.ok ? <ConnectionOkPastille test={info.lastTest} /> : isConnected ? <span className="status-dot green" /> : null}
@@ -98,11 +116,6 @@ export function IntegrationCard({
       {needsMoreScopes && (
         <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>
           {t('integrations.needsMoreScopes', { name: integrationName(integration) })}
-        </p>
-      )}
-      {!isConnected && integration.oauthProvider === 'microsoft' && info && !info.oauthClientConfigured && (
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>
-          {t('integrations.entraRequired')}
         </p>
       )}
       {info?.accountLabel && <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>{t('integrations.accountLabel', { label: info.accountLabel })}</p>}
@@ -155,60 +168,8 @@ export function IntegrationCard({
             <button onClick={() => setConnectPanelId(null)} style={ghostButtonStyle}>{t('common.cancel')}</button>
           </>}
 
-          {integration.oauthProvider !== 'slack' && !integration.webOnly && <>
-            {!info?.oauthClientConfigured && <>
-              <div style={{ fontSize: 12, fontWeight: 600 }}>
-                {isPkcePublicProvider(integration.oauthProvider)
-                  ? (integration.oauthProvider === 'microsoft' ? t('integrations.clientIdEntra') : t('integrations.clientIdOauthPkce'))
-                  : t('integrations.optionOauthApp')}
-              </div>
-              <label style={fieldLabelStyle}>
-                Client ID
-                <input
-                  value={oauthForm.clientId}
-                  onChange={event => setOauthForms((current: any) => ({
-                    ...current,
-                    [integration.id]: { ...oauthForm, clientId: event.target.value },
-                  }))}
-                  placeholder={
-                    integration.oauthProvider === 'microsoft'
-                      ? 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
-                      : t('integrations.oauthAppIdPlaceholder')
-                  }
-                  style={fieldInputStyle}
-                />
-              </label>
-              {!isPkcePublicProvider(integration.oauthProvider) && (
-                <label style={fieldLabelStyle}>
-                  {integration.oauthProvider === 'github' ? t('integrations.clientSecret') : t('integrations.clientSecretOptional')}
-                  <input
-                    type="password"
-                    value={oauthForm.clientSecret}
-                    onChange={event => setOauthForms((current: any) => ({
-                      ...current,
-                      [integration.id]: { ...oauthForm, clientSecret: event.target.value },
-                    }))}
-                    placeholder={t('integrations.clientSecretPlaceholder')}
-                    style={fieldInputStyle}
-                  />
-                </label>
-              )}
-              <button
-                disabled={isPending || !oauthForm.clientId.trim()}
-                onClick={() => void handleSaveOAuthAndConnect(integration)}
-                style={connectButtonStyle}
-              >
-                {isPending
-                  ? t('common.opening')
-                  : isPkcePublicProvider(integration.oauthProvider)
-                    ? connectLabel(t, integration, false)
-                    : t('integrations.saveAndConnectOauth')}
-              </button>
-              <div style={{ height: 1, background: 'var(--border)' }} />
-            </>}
-            <div style={{ fontSize: 12, fontWeight: 600 }}>
-              {info?.oauthClientConfigured ? t('integrations.connected') : t('integrations.optionPersonalToken')}
-            </div>
+          {integration.tokenOnly && <>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>{t('integrations.optionPersonalToken')}</div>
             <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>{t(integration.tokenHintKey)}</p>
             <label style={fieldLabelStyle}>
               {t('integrations.accessToken')}
@@ -219,7 +180,8 @@ export function IntegrationCard({
                   ...current,
                   [integration.id]: { ...tokenForm, token: event.target.value },
                 }))}
-                placeholder="ghp_…, xoxb-…, eyJ…"
+                placeholder="eyJ…"
+                autoFocus
                 style={fieldInputStyle}
               />
             </label>
@@ -244,40 +206,201 @@ export function IntegrationCard({
             </button>
             <button onClick={() => setConnectPanelId(null)} style={ghostButtonStyle}>{t('common.cancel')}</button>
           </>}
+
+          {!integration.tokenOnly && integration.oauthProvider !== 'slack' && !integration.webOnly && <>
+            {showAuthModePicker && (
+              <div style={{ display: 'flex', gap: 6 }}>
+                {integration.authModes!.map((mode: IntegrationAuthMode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setAuthModeForms((current: any) => ({ ...current, [integration.id]: mode }))}
+                    style={{
+                      flex: 1,
+                      padding: '6px 0',
+                      borderRadius: 99,
+                      fontSize: 11.5,
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      border: '1px solid var(--border)',
+                      background: selectedAuthMode === mode ? 'var(--accent)' : 'var(--bg-surface)',
+                      color: selectedAuthMode === mode ? 'white' : 'var(--text-secondary)',
+                    }}
+                  >
+                    {mode === 'oauth' ? t('common.oauth') : t('common.ssh')}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {selectedAuthMode === 'ssh' && integration.authModes?.includes('ssh') && <>
+              <div style={{ fontSize: 12, fontWeight: 600 }}>{t('integrations.optionSsh')}</div>
+              <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
+                {t('integrations.githubSshHint')}
+              </p>
+              <label style={fieldLabelStyle}>
+                {t('integrations.accountLabelOptional')}
+                <input
+                  value={tokenForm.label}
+                  onChange={event => setTokenForms((current: any) => ({
+                    ...current,
+                    [integration.id]: { ...tokenForm, label: event.target.value },
+                  }))}
+                  placeholder="mon-compte@entreprise.com"
+                  style={fieldInputStyle}
+                />
+              </label>
+              <button
+                disabled={!!connectingSsh}
+                onClick={() => void handleConnectWithSsh(integration)}
+                style={connectButtonStyle}
+              >
+                {connectingSsh === integration.id ? t('common.connecting') : t('integrations.connectWithSsh')}
+              </button>
+              <button onClick={() => setConnectPanelId(null)} style={ghostButtonStyle}>{t('common.cancel')}</button>
+            </>}
+
+            {selectedAuthMode !== 'ssh' && <>
+              {!info?.oauthClientConfigured && !info?.deviceFlowAvailable && <>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>
+                  {isPkcePublicProvider(integration.oauthProvider)
+                    ? (integration.oauthProvider === 'microsoft' ? t('integrations.clientIdEntra') : t('integrations.clientIdOauthPkce'))
+                    : t('integrations.optionOauthApp')}
+                </div>
+                <label style={fieldLabelStyle}>
+                  Client ID
+                  <input
+                    value={oauthForm.clientId}
+                    onChange={event => setOauthForms((current: any) => ({
+                      ...current,
+                      [integration.id]: { ...oauthForm, clientId: event.target.value },
+                    }))}
+                    placeholder={
+                      integration.oauthProvider === 'microsoft'
+                        ? 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+                        : t('integrations.oauthAppIdPlaceholder')
+                    }
+                    style={fieldInputStyle}
+                  />
+                </label>
+                {!isPkcePublicProvider(integration.oauthProvider) && (
+                  <label style={fieldLabelStyle}>
+                    {integration.oauthProvider === 'github' ? t('integrations.clientSecret') : t('integrations.clientSecretOptional')}
+                    <input
+                      type="password"
+                      value={oauthForm.clientSecret}
+                      onChange={event => setOauthForms((current: any) => ({
+                        ...current,
+                        [integration.id]: { ...oauthForm, clientSecret: event.target.value },
+                      }))}
+                      placeholder={t('integrations.clientSecretPlaceholder')}
+                      style={fieldInputStyle}
+                    />
+                  </label>
+                )}
+                <button
+                  disabled={isPending || !oauthForm.clientId.trim()}
+                  onClick={() => void handleSaveOAuthAndConnect(integration)}
+                  style={connectButtonStyle}
+                >
+                  {isPending
+                    ? t('common.opening')
+                    : isPkcePublicProvider(integration.oauthProvider)
+                      ? connectLabel(t, integration, false)
+                      : t('integrations.saveAndConnectOauth')}
+                </button>
+                {showPersonalTokenOption && <div style={{ height: 1, background: 'var(--border)' }} />}
+              </>}
+              {(info?.oauthClientConfigured || info?.deviceFlowAvailable) && integration.authModes?.includes('ssh') && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{t('integrations.optionOauthApp')}</div>
+                  <button
+                    disabled={isPending}
+                    onClick={() => void handleStartOAuth(integration)}
+                    style={connectButtonStyle}
+                  >
+                    {isPending ? t('common.opening') : connectLabel(t, integration, false)}
+                  </button>
+                  {showPersonalTokenOption && <div style={{ height: 1, background: 'var(--border)' }} />}
+                </>
+              )}
+              {showPersonalTokenOption && <>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>
+                  {info?.oauthClientConfigured ? t('integrations.connected') : t('integrations.optionPersonalToken')}
+                </div>
+                <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>{t(integration.tokenHintKey)}</p>
+                <label style={fieldLabelStyle}>
+                  {t('integrations.accessToken')}
+                  <input
+                    type="password"
+                    value={tokenForm.token}
+                    onChange={event => setTokenForms((current: any) => ({
+                      ...current,
+                      [integration.id]: { ...tokenForm, token: event.target.value },
+                    }))}
+                    placeholder="ghp_…, xoxb-…, eyJ…"
+                    style={fieldInputStyle}
+                  />
+                </label>
+                <label style={fieldLabelStyle}>
+                  {t('integrations.accountLabelOptional')}
+                  <input
+                    value={tokenForm.label}
+                    onChange={event => setTokenForms((current: any) => ({
+                      ...current,
+                      [integration.id]: { ...tokenForm, label: event.target.value },
+                    }))}
+                    placeholder="mon-compte@entreprise.com"
+                    style={fieldInputStyle}
+                  />
+                </label>
+                <button
+                  disabled={isConnectingToken || !tokenForm.token.trim()}
+                  onClick={() => void handleConnectWithToken(integration)}
+                  style={connectButtonStyle}
+                >
+                  {isConnectingToken ? t('common.connecting') : t('integrations.connectWithToken')}
+                </button>
+              </>}
+              <button onClick={() => setConnectPanelId(null)} style={ghostButtonStyle}>{t('common.cancel')}</button>
+            </>}
+          </>}
         </div>
       )}
 
-      <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
-        {isConnected
-          ? <>
-            <button
-              disabled={mcpTestBusy === integration.id || !MCP_BY_PROVIDER[integration.oauthProvider]}
-              onClick={() => testIntegrationMcp(integration.id, MCP_BY_PROVIDER[integration.oauthProvider])}
-              style={secondaryButtonStyle}
-            >
-              {mcpTestBusy === integration.id ? t('common.testingShort') : t('common.test')}
-            </button>
-            <button onClick={() => void handleDisconnect(integration)} style={dangerButtonStyle}>{t('integrations.disconnect')}</button>
-          </>
-          : <>
-            <button
-              disabled={isPending || isConnectingToken}
-              onClick={() => void handleConnect(integration)}
-              style={connectButtonStyle}
-            >
-              {needsMoreScopes && !isPending ? t('integrations.extendMicrosoftScopes') : connectLabel(t, integration, isPending)}
-            </button>
-            {!integration.webOnly && !panelOpen && (
+      {(!panelOpen || isConnected) && (
+        <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
+          {isConnected
+            ? <>
               <button
-                disabled={isPending || isConnectingToken}
-                onClick={() => void openConnectPanel(integration)}
+                disabled={mcpTestBusy === integration.id || !MCP_BY_PROVIDER[integration.oauthProvider]}
+                onClick={() => testIntegrationMcp(integration.id, MCP_BY_PROVIDER[integration.oauthProvider])}
                 style={secondaryButtonStyle}
               >
-                {t('common.token')}
+                {mcpTestBusy === integration.id ? t('common.testingShort') : t('common.test')}
               </button>
-            )}
-          </>}
-      </div>
+              <button onClick={() => void handleDisconnect(integration)} style={dangerButtonStyle}>{t('integrations.disconnect')}</button>
+            </>
+            : <>
+              <button
+                disabled={isPending || isConnectingToken || !!connectingSsh}
+                onClick={() => void handleConnect(integration)}
+                style={connectButtonStyle}
+              >
+                {needsMoreScopes && !isPending ? t('integrations.extendMicrosoftScopes') : connectLabel(t, integration, isPending)}
+              </button>
+              {showPersonalTokenOption && (
+                <button
+                  disabled={isPending || isConnectingToken || !!connectingSsh}
+                  onClick={() => void openConnectPanel(integration)}
+                  style={secondaryButtonStyle}
+                >
+                  {t('common.token')}
+                </button>
+              )}
+            </>}
+        </div>
+      )}
     </div>
   )
 }

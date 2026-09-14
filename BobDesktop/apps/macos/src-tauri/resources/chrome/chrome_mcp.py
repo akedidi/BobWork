@@ -116,6 +116,21 @@ def require_macos() -> None:
         raise RuntimeError("Chrome control MCP requires macOS")
 
 
+def app_display_name() -> str:
+    return os.environ.get("BOB_WORK_APP_NAME", "").strip() or "Bob Work"
+
+
+def bridge_required_error() -> str:
+    app = app_display_name()
+    return (
+        f"Le pont AppleScript de {app} est indisponible (socket hôte inaccessible). "
+        f"Relancez l’app {app} pour recréer le bridge. Si le pont est déjà actif et "
+        f"qu’Automatisation manque encore, autorisez **{app} → Google Chrome** "
+        "(pas python3, pas osascript) dans Réglages Système → Confidentialité et "
+        "sécurité → Automatisation. Bob Work et Bob Work-test sont distincts."
+    )
+
+
 def require_visible_chrome_intent() -> None:
     if os.environ.get("BOB_WORK_ALLOW_VISIBLE_CHROME", "").strip() != "1":
         raise PermissionError(
@@ -124,25 +139,29 @@ def require_visible_chrome_intent() -> None:
         )
 
 
-BRIDGE_REQUIRED_ERROR = (
-    "Le pont AppleScript de Bob Work est indisponible. Relancez l’app Bob Work, "
-    "puis autorisez **Bob Work → Google Chrome** (pas python3, pas osascript) dans "
-    "Réglages Système → Confidentialité et sécurité → Automatisation."
-)
+def applescript_socket_path() -> str:
+    env = os.environ.get("BOB_WORK_APPLESCRIPT_SOCKET", "").strip()
+    if env:
+        return env
+    bundle = os.environ.get("BOB_WORK_BUNDLE_ID", "").strip()
+    app = os.environ.get("BOB_WORK_APP_NAME", "").strip().lower()
+    name = (
+        "applescript-test.sock"
+        if bundle.endswith(".test") or "test" in app
+        else "applescript.sock"
+    )
+    return str(Path.home() / ".bob" / "run" / name)
 
 
 def run_osascript(script: str) -> subprocess.CompletedProcess[str]:
     """Run AppleScript inside Bob Work only — never spawn osascript/python3 TCC."""
-    socket_path = (
-        os.environ.get("BOB_WORK_APPLESCRIPT_SOCKET", "").strip()
-        or str(Path.home() / ".bob" / "run" / "applescript.sock")
-    )
+    socket_path = applescript_socket_path()
     if not socket_path or not Path(socket_path).exists():
         return subprocess.CompletedProcess(
             args=["bob-work-applescript", socket_path or "missing"],
             returncode=1,
             stdout="",
-            stderr=BRIDGE_REQUIRED_ERROR,
+            stderr=bridge_required_error(),
         )
     try:
         return _run_osascript_via_bob_work(socket_path, script)
@@ -151,15 +170,19 @@ def run_osascript(script: str) -> subprocess.CompletedProcess[str]:
             args=["bob-work-applescript", socket_path],
             returncode=1,
             stdout="",
-            stderr=f"{BRIDGE_REQUIRED_ERROR} ({error})",
+            stderr=f"{bridge_required_error()} ({error})",
         )
 
 
 def _run_osascript_via_bob_work(socket_path: str, script: str) -> subprocess.CompletedProcess[str]:
-    import socket
+    return _run_bridge_request(socket_path, {"script": script})
 
-    payload = (json.dumps({"script": script}, ensure_ascii=False) + "\n").encode("utf-8")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+
+def _run_bridge_request(socket_path: str, request: dict) -> subprocess.CompletedProcess[str]:
+    import socket as socket_module
+
+    payload = (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
+    with socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM) as client:
         client.settimeout(30)
         client.connect(socket_path)
         client.sendall(payload)
@@ -184,44 +207,138 @@ def _run_osascript_via_bob_work(socket_path: str, script: str) -> subprocess.Com
     )
 
 
+def _run_screencapture(output_path: str, region: str | None = None) -> subprocess.CompletedProcess[str]:
+    socket_path = applescript_socket_path()
+    if not socket_path or not Path(socket_path).exists():
+        return subprocess.CompletedProcess(
+            args=["bob-work-screencapture", socket_path or "missing"],
+            returncode=1,
+            stdout="",
+            stderr=bridge_required_error(),
+        )
+    payload: dict = {
+        "action": "screencapture",
+        "output_path": output_path,
+        "text": output_path,
+        "operation": "png",
+    }
+    if region:
+        payload["region"] = region
+    try:
+        return _run_bridge_request(socket_path, payload)
+    except Exception as error:  # noqa: BLE001 — do not fall back to python3 screencapture
+        return subprocess.CompletedProcess(
+            args=["bob-work-screencapture", socket_path],
+            returncode=1,
+            stdout="",
+            stderr=f"{bridge_required_error()} ({error})",
+        )
+
+
+def snapshot_cache_dir() -> Path:
+    bundle = os.environ.get("BOB_WORK_BUNDLE_ID", "").strip() or "com.bobwork.desktop"
+    return Path.home() / "Library" / "Caches" / bundle / "chrome-snapshots"
+
+
 def escape_applescript(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def automation_error(result: subprocess.CompletedProcess[str]) -> dict:
     stderr = result.stderr.strip() or "AppleScript failed"
-    return {
+    if "JavaScript" in stderr and "AppleScript" in stderr:
+        return {
+            "ok": False,
+            "browser": "Google Chrome",
+            "error": "chrome_javascript_from_applescript_disabled",
+            "message": stderr,
+            "hint": (
+                "Dans Chrome, activez Affichage > Développeur > "
+                "Autoriser JavaScript dans les événements AppleScript."
+            ),
+        }
+    lower = stderr.lower()
+    # Bridge/socket failures must not be reported as macOS Automation denials.
+    if "pont applescript" in lower or "socket" in lower or "bridge" in lower:
+        return {
+            "ok": False,
+            "browser": "Google Chrome",
+            "error": "applescript_bridge_unavailable",
+            "message": stderr,
+        }
+    automation_denied = any(
+        token in lower
+        for token in (
+            "not authorized",
+            "not allowed to send",
+            "(-1743)",
+            "errAEEventNotPermitted".lower(),
+            "automatisation",
+            "automation",
+        )
+    )
+    payload = {
         "ok": False,
         "browser": "Google Chrome",
-        "automation_required": True,
         "error": stderr,
     }
+    if automation_denied:
+        payload["automation_required"] = True
+    return payload
 
 
 def chrome_open_url(url: str) -> dict:
+    """Open a URL in Chrome via the host AppleScript bridge.
+
+    Do not use Launch Services `open -a`: Seatbelt sandboxed MCP children get
+    LS error -54, which previously produced a misleading Automation hint.
+    """
     require_macos()
     require_visible_chrome_intent()
-    if shutil.which("open") is None:
-        raise RuntimeError("macOS open command unavailable")
     if not url.startswith(("http://", "https://")):
         raise ValueError("url must be http(s)")
-    result = subprocess.run(
-        ["open", "-a", "Google Chrome", url],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    payload = {
-        "opened": result.returncode == 0,
-        "url": url,
-        "browser": "Google Chrome",
-        "returncode": result.returncode,
-    }
-    if result.stderr.strip():
-        payload["stderr"] = result.stderr.strip()
+    escaped = escape_applescript(url)
+    script = f'''
+tell application "Google Chrome"
+  activate
+  open location "{escaped}"
+  delay 0.4
+  if (count of windows) = 0 then return "NO_WINDOW"
+  return title of active tab of front window & "|||" & URL of active tab of front window
+end tell
+'''
+    result = run_osascript(script)
     if result.returncode != 0:
-        payload["hint"] = "Install Google Chrome or grant Automatisation for this MCP tool."
-    return payload
+        payload = {
+            "opened": False,
+            "url": url,
+            "browser": "Google Chrome",
+            "returncode": result.returncode,
+        }
+        if result.stderr.strip():
+            payload["stderr"] = result.stderr.strip()
+        payload.update({k: v for k, v in automation_error(result).items() if k != "ok"})
+        return payload
+    raw = result.stdout.strip()
+    if raw == "NO_WINDOW":
+        return {
+            "opened": False,
+            "url": url,
+            "browser": "Google Chrome",
+            "error": "no_chrome_window",
+            "returncode": 0,
+        }
+    if "|||" in raw:
+        title, opened_url = raw.split("|||", 1)
+    else:
+        title, opened_url = "", raw or url
+    return {
+        "opened": True,
+        "url": opened_url or url,
+        "title": title,
+        "browser": "Google Chrome",
+        "returncode": 0,
+    }
 
 
 def chrome_read_front_tab() -> dict:
@@ -244,7 +361,19 @@ end tell
     if "|||" not in raw:
         return {"ok": False, "browser": "Google Chrome", "error": raw}
     title, url = raw.split("|||", 1)
-    return {"ok": True, "browser": "Google Chrome", "title": title, "url": url}
+    payload = {"ok": True, "browser": "Google Chrome", "title": title, "url": url}
+    # Reading a public page outline must keep working when Chrome's optional
+    # “JavaScript from Apple Events” setting is disabled. The visible tab URL
+    # still comes from Chrome; the outline fetch does not open another window.
+    try:
+        outline = fetch_background_url(url)
+        if outline.get("ok"):
+            payload["headings"] = outline.get("headings", [])
+            payload["text"] = outline.get("text", "")
+            payload["contentSource"] = "public_page_fetch"
+    except Exception as error:  # noqa: BLE001 — tab metadata remains useful
+        payload["contentError"] = str(error)
+    return payload
 
 
 def chrome_list_tabs() -> dict:
@@ -433,23 +562,15 @@ def capture_chrome_window() -> dict:
     bounds = chrome_front_window_bounds()
     if not bounds:
         return {"ok": False, "error": "chrome_window_bounds_unavailable"}
-    executable = shutil.which("screencapture") or "/usr/sbin/screencapture"
-    if not Path(executable).exists():
-        return {"ok": False, "error": "screencapture_unavailable"}
 
-    directory = Path.home() / "Library" / "Caches" / "com.bobwork.desktop" / "chrome-snapshots"
+    directory = snapshot_cache_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     cleanup_old_snapshots(directory)
     token = f"{int(time.time() * 1000)}-{os.getpid()}"
     png_path = directory / f"chrome-{token}.png"
     jpg_path = directory / f"chrome-{token}.jpg"
     left, top, width, height = bounds
-    result = subprocess.run(
-        [executable, "-x", "-o", f"-R{left},{top},{width},{height}", str(png_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_screencapture(str(png_path), region=f"{left},{top},{width},{height}")
     if result.returncode != 0 or not png_path.is_file() or png_path.stat().st_size == 0:
         try:
             png_path.unlink()
@@ -458,6 +579,10 @@ def capture_chrome_window() -> dict:
         return {
             "ok": False,
             "error": result.stderr.strip() or "screen_recording_permission_required",
+            "hint": (
+                f"Autorisez {app_display_name()} dans Réglages Système → Confidentialité et sécurité → "
+                "Enregistrement de l’écran. Bob Work et Bob Work-test sont distincts."
+            ),
         }
 
     # Keep persisted task events small: a 1100 px JPEG is ample for the card.
@@ -478,21 +603,54 @@ def capture_chrome_window() -> dict:
     return {"ok": True, "path": str(png_path)}
 
 
+_SANDBOX_PRIVATE_NET_MSG = (
+    "Cette action est bloquée par les limitations de la sandbox Bob Work : "
+    "pas d’accès au réseau local, aux adresses privées ni aux métadonnées cloud."
+)
+
+
+def _is_blocked_private_host(hostname: str) -> bool:
+    host = hostname.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".local"):
+        return True
+    if host in {"metadata.google.internal", "metadata.google"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or not ip.is_global
+    )
+
+
 def validate_background_url(url: str) -> str:
     parsed = urlsplit(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("url must be a public http(s) URL")
     hostname = parsed.hostname.lower().rstrip(".")
-    if hostname == "localhost" or hostname.endswith(".local"):
-        raise ValueError("local and private network URLs are not allowed")
+    if _is_blocked_private_host(hostname):
+        raise ValueError(_SANDBOX_PRIVATE_NET_MSG)
     try:
         addresses = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
     except socket.gaierror as error:
         raise ValueError(f"hostname resolution failed: {error}") from error
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0].split("%", 1)[0])
-        if not ip.is_global:
-            raise ValueError("local and private network URLs are not allowed")
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or not ip.is_global
+        ):
+            raise ValueError(_SANDBOX_PRIVATE_NET_MSG)
     return parsed.geturl()
 
 

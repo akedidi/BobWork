@@ -4,7 +4,6 @@ import { Suspense, lazy } from 'react'
 import { open as openUrl } from '@tauri-apps/plugin-shell'
 import { open as chooseFile, save as chooseSavePath } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { useNavigate } from 'react-router-dom'
 import { importConversations, exportConversations, openDataDir, exportDiagnostics, purgeAppCache, createDatabaseBackup, restoreDatabaseBackup, requestNotificationAuthorization, openMacosPrivacyPane, requestVoiceDictationPermission, requestMicrophonePermission, requestChromeAutomationPermission, requestAccessibilityPermission } from '../../lib/ipc'
 import { useT } from '../../i18n'
 import { UsageMeter } from '../../components/UsageMeter/UsageMeter'
@@ -18,53 +17,63 @@ const BobalyticsPanel = lazy(() => import('../BobalyticsPanel'))
   
 
 export default function ExtensionsSettingsTab(props: any) {
-  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
+  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, orcaCliStatus, orcaCliLoading, orcaCliError, refreshOrcaCliStatus, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus, appName } = props
   const dialog = useAppDialog()
-  const navigate = useNavigate()
   const loadingLabel = t('common.loading')
+  const app = appName || 'Bob Work'
 
   return (
     <>
-      <Heading title="Accès et contrôle" description="MCP, sous-agents / orchestrateur, web, Computer Use et Chrome. Les skills se gèrent dans la barre latérale (Skills) — ce n’est pas cet onglet." />
+      <Heading title={t('settings.extensionsHeading')} description={t('settings.extensionsDesc')} />
           <Card>
             <SettingsFields settings={settings} error={settingsError} loadingLabel={loadingLabel}>
               {s => <>
-                <ToggleRow title="Serveurs MCP" value={s.mcpEnabled} onChange={value => change('mcpEnabled', value)} />
                 <ToggleRow
-                  title="Sous-agents / orchestrateur"
+                  title={t('settings.mcpServers')}
+                  value={s.mcpEnabled}
+                  onChange={value => change('mcpEnabled', value)}
+                />
+                <ToggleRow
+                  title={t('settings.subagentsOrchestrator')}
                   description={profile && !profile.supportsSubagents
-                    ? 'Ce Bob Shell n’expose pas les sous-agents (--disable-subagents). Mettez à jour Bob Shell pour les activer.'
-                    : 'Autorise Bob Shell à lancer des sous-agents. Désactiver ajoute --disable-subagents à bob run.'}
+                    ? t('settings.subagentsUnsupported')
+                    : t('settings.subagentsDesc')}
                   value={s.subagentsEnabled}
                   onChange={value => change('subagentsEnabled', value)}
                   disabled={Boolean(profile && !profile.supportsSubagents)}
                 />
-                <ToggleRow title="Accès web" description="Soumis aux permissions et aux capacités réellement disponibles dans Bob Shell." value={s.webEnabled} onChange={value => change('webEnabled', value)} />
                 <ToggleRow
-                  title="Contrôle de l’ordinateur"
-                  description="Installe le MCP bob-work-computer-use. Les clics et la saisie passent par l’app Bob Work — autorisez Bob Work (pas python3) dans Accessibilité."
+                  title={t('settings.webAccess')}
+                  description={t('settings.webAccessDesc')}
+                  value={s.webEnabled}
+                  onChange={value => change('webEnabled', value)}
+                />
+                <ToggleRow
+                  title={t('settings.computerControl')}
+                  description={s.sandboxMode
+                    ? t('settings.computerUseSandboxBlocked')
+                    : t('settings.computerControlDesc', { appName: app })}
                   value={s.computerUseEnabled}
                   onChange={value => change('computerUseEnabled', value)}
                   disabled={s.sandboxMode}
                 />
                 <ToggleRow
-                  title="Contrôle de Chrome"
+                  title={t('settings.chromeControl')}
                   description={t('settings.chromeControlPermissionTiming')}
                   value={s.chromeControlEnabled}
                   onChange={value => change('chromeControlEnabled', value)}
-                  disabled={s.sandboxMode}
                 />
                 {s.sandboxMode && <p className="settings-note">{t('settings.sandboxBlocksElevated')}</p>}
               </>}
             </SettingsFields>
           </Card>
           {settings?.computerUseEnabled && computerUseLoading && !computerUseStatus && !computerUseError && (
-            <Card title="Statut Computer Use">
+            <Card title={t('settings.computerUseStatus')}>
               <SectionLoader label={loadingLabel} />
             </Card>
           )}
           {settings?.computerUseEnabled && computerUseError && !computerUseStatus && (
-            <Card title="Statut Computer Use">
+            <Card title={t('settings.computerUseStatus')}>
               <LoadErrorBanner
                 error={computerUseError}
                 onRetry={() => void refreshComputerUseStatus()}
@@ -72,16 +81,16 @@ export default function ExtensionsSettingsTab(props: any) {
               />
             </Card>
           )}
-          {settings?.computerUseEnabled && computerUseStatus && <Card title="Statut Computer Use">
-            <StatusRow title="Serveur MCP intégré" value={computerUseStatus.mcpEnabled ? 'bob-work-computer-use actif' : computerUseStatus.mcpConfigured ? 'Configuré mais désactivé' : 'Non configuré'} ok={computerUseStatus.mcpEnabled} />
-            <StatusRow title="Accessibilité macOS" value={computerUseAccessibilityLabel(computerUseStatus.accessibility)} ok={computerUseStatus.accessibility === 'granted'} />
+          {settings?.computerUseEnabled && computerUseStatus && <Card title={t('settings.computerUseStatus')}>
+            <StatusRow title={t('settings.integratedMcpServer')} value={computerUseStatus.mcpEnabled ? t('settings.mcpActive', { name: 'bob-work-computer-use' }) : computerUseStatus.mcpConfigured ? t('settings.configuredDisabled') : t('settings.notConfigured')} ok={computerUseStatus.mcpEnabled} />
+            <StatusRow title={t('settings.macosAccessibility')} value={computerUseAccessibilityLabel(computerUseStatus.accessibility, t)} ok={computerUseStatus.accessibility === 'granted'} />
             <StatusRow
-              title="Outils MCP"
+              title={t('settings.mcpTools')}
               value={computerUseTools?.ok
-                ? `${computerUseTools.tools.length} outil${computerUseTools.tools.length > 1 ? 's' : ''} : ${computerUseTools.tools.join(', ')}`
+                ? t('settings.mcpToolsCount', { count: computerUseTools.tools.length, tools: computerUseTools.tools.join(', ') })
                 : computerUseTools
                   ? computerUseTools.message
-                  : computerUseStatus.mcpEnabled ? 'Test en cours…' : 'Activez le MCP pour lister les outils'}
+                  : computerUseStatus.mcpEnabled ? t('settings.testInProgress') : t('settings.enableMcpToListTools')}
               ok={Boolean(computerUseTools?.ok)}
             />
             <p className="settings-note">{computerUseStatus.accessibilityMessage}</p>
@@ -94,8 +103,8 @@ export default function ExtensionsSettingsTab(props: any) {
                       const trusted = await requestAccessibilityPermission()
                       showTransientStatus(
                         trusted
-                          ? t('settings.accessibilityGranted')
-                          : t('settings.accessibilityPrompted'),
+                          ? t('settings.accessibilityGranted', { appName: app })
+                          : t('settings.accessibilityPrompted', { appName: app }),
                       )
                       await refreshComputerUseStatus()
                       if (!trusted) {
@@ -109,16 +118,58 @@ export default function ExtensionsSettingsTab(props: any) {
               >
                 {t('settings.requestAccessibility')}
               </button>
-              <button className="secondary-btn" onClick={() => void refreshComputerUseStatus()}>Revérifier</button>
+              <button className="secondary-btn" onClick={() => void refreshComputerUseStatus()}>{t('settings.recheck')}</button>
+              <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('accessibility').catch(error => setStatus(errorMessage(error)))}>
+                {t('settings.openAccessibilityForComputerUse')}
+              </button>
             </div>
           </Card>}
+          {orcaCliLoading && !orcaCliStatus && !orcaCliError && (
+            <Card title={t('settings.orcaCliStatus')}>
+              <SectionLoader label={loadingLabel} />
+            </Card>
+          )}
+          {orcaCliError && !orcaCliStatus && (
+            <Card title={t('settings.orcaCliStatus')}>
+              <LoadErrorBanner
+                error={orcaCliError}
+                onRetry={() => void refreshOrcaCliStatus()}
+                fallback={t('settings.orcaCliLoadFailed')}
+              />
+            </Card>
+          )}
+          {orcaCliStatus && (
+            <Card title={t('settings.orcaCliStatus')}>
+              <StatusRow
+                title={t('settings.orcaCliBinary')}
+                value={orcaCliStatus.installed
+                  ? (orcaCliStatus.path ?? t('settings.orcaCliInstalled'))
+                  : t('settings.orcaCliNotInstalled')}
+                ok={orcaCliStatus.installed}
+              />
+              {orcaCliStatus.installed && (
+                <StatusRow
+                  title={t('settings.orcaCliSkillsGet')}
+                  value={orcaCliStatus.supportsSkillsGet ? t('settings.orcaCliSkillsGetYes') : t('settings.orcaCliSkillsGetNo')}
+                  ok={orcaCliStatus.supportsSkillsGet}
+                />
+              )}
+              <p className="settings-note">{orcaCliStatus.message}</p>
+              {!orcaCliStatus.installed && (
+                <p className="settings-note">{t('settings.orcaCliInstallHint')}</p>
+              )}
+              <div className="settings-actions">
+                <button className="secondary-btn" onClick={() => void refreshOrcaCliStatus()}>{t('settings.recheck')}</button>
+              </div>
+            </Card>
+          )}
           {settings?.chromeControlEnabled && chromeLoading && !chromeStatus && !chromeError && (
-            <Card title="Statut Chrome">
+            <Card title={t('settings.chromeStatus')}>
               <SectionLoader label={loadingLabel} />
             </Card>
           )}
           {settings?.chromeControlEnabled && chromeError && !chromeStatus && (
-            <Card title="Statut Chrome">
+            <Card title={t('settings.chromeStatus')}>
               <LoadErrorBanner
                 error={chromeError}
                 onRetry={() => void refreshChromeStatus()}
@@ -126,31 +177,41 @@ export default function ExtensionsSettingsTab(props: any) {
               />
             </Card>
           )}
-          {settings?.chromeControlEnabled && chromeStatus && <Card title="Statut Chrome">
-            <StatusRow title="Google Chrome" value={chromeStatus.chromeInstalled ? 'Installé' : 'Non installé'} ok={chromeStatus.chromeInstalled} />
-            <StatusRow title="Serveur MCP intégré" value={chromeStatus.mcpEnabled ? 'bob-work-chrome-control actif' : chromeStatus.mcpConfigured ? 'Configuré mais désactivé' : 'Non configuré'} ok={chromeStatus.mcpEnabled} />
+          {settings?.chromeControlEnabled && chromeStatus && <Card title={t('settings.chromeStatus')}>
+            <StatusRow title="Google Chrome" value={chromeStatus.chromeInstalled ? t('settings.statusInstalled') : t('settings.statusNotInstalled')} ok={chromeStatus.chromeInstalled} />
+            <StatusRow title={t('settings.integratedMcpServer')} value={chromeStatus.mcpEnabled ? t('settings.mcpActive', { name: 'bob-work-chrome-control' }) : chromeStatus.mcpConfigured ? t('settings.configuredDisabled') : t('settings.notConfigured')} ok={chromeStatus.mcpEnabled} />
             <StatusRow
-              title="Outils MCP"
+              title={t('settings.mcpTools')}
               value={chromeTools?.ok
-                ? `${chromeTools.tools.length} outil${chromeTools.tools.length > 1 ? 's' : ''} : ${chromeTools.tools.join(', ')}`
+                ? t('settings.mcpToolsCount', { count: chromeTools.tools.length, tools: chromeTools.tools.join(', ') })
                 : chromeTools
                   ? chromeTools.message
-                  : chromeStatus.mcpEnabled ? 'Test en cours…' : 'Activez le MCP pour lister les outils'}
+                  : chromeStatus.mcpEnabled ? t('settings.testInProgress') : t('settings.enableMcpToListTools')}
               ok={Boolean(chromeTools?.ok)}
             />
-            <StatusRow title="Automatisation macOS" value={chromeAutomationLabel(chromeStatus.automation)} ok={chromeStatus.automation === 'granted'} />
-            <p className="settings-note">{chromeStatus.automationMessage}</p>
+            <StatusRow title={t('settings.macosAutomation')} value={chromeAutomationLabel(chromeStatus.automation, t)} ok={chromeStatus.automation === 'granted'} />
+            {chromeStatus.automation !== 'granted' && (
+              <div className="settings-warning execution-mode-warning">
+                <strong>{t('settings.chromeAutomationSetupTitle')}</strong>
+                <p>{t('settings.chromeAutomationSetupSteps', { appName: chromeStatus.appName || 'Bob Work' })}</p>
+                <p>{t('settings.chromeAutomationVsAccessibility')}</p>
+              </div>
+            )}
+            {chromeStatus.automation !== 'denied' && chromeStatus.automationMessage ? (
+              <p className="settings-note">{chromeStatus.automationMessage}</p>
+            ) : null}
             <div className="settings-actions">
               <button
                 className="secondary-btn"
                 onClick={() => {
                   void (async () => {
+                    const appName = chromeStatus.appName || 'Bob Work'
                     try {
                       await requestChromeAutomationPermission()
-                      showTransientStatus(t('settings.automationGranted'))
+                      showTransientStatus(t('settings.automationGranted', { appName }))
                       await refreshChromeStatus()
-                    } catch (error) {
-                      setStatus(errorMessage(error))
+                    } catch {
+                      showTransientStatus(t('settings.automationDenied', { appName }))
                       void openMacosPrivacyPane('automation').catch(() => undefined)
                       await refreshChromeStatus()
                     }
@@ -159,18 +220,12 @@ export default function ExtensionsSettingsTab(props: any) {
               >
                 {t('settings.requestAutomation')}
               </button>
-              <button className="secondary-btn" onClick={() => void refreshChromeStatus()}>Revérifier</button>
+              <button className="secondary-btn" onClick={() => void refreshChromeStatus()}>{t('settings.recheck')}</button>
+              <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('automation').catch(error => setStatus(errorMessage(error)))}>
+                {t('settings.openAutomationForChrome')}
+              </button>
             </div>
           </Card>}
-          <div className="settings-actions">
-            <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('accessibility').catch(error => setStatus(errorMessage(error)))}>
-              Ouvrir Accessibilité (Réglages Système)
-            </button>
-            <button className="secondary-btn" onClick={() => void openMacosPrivacyPane('automation').catch(error => setStatus(errorMessage(error)))}>
-              Ouvrir Automatisation (Réglages Système)
-            </button>
-          </div>
-          <div className="settings-actions"><button className="btn-primary" onClick={() => navigate('/skills')}>Gérer les skills</button><button className="secondary-btn" onClick={() => navigate('/integrations')}>Gérer les intégrations et MCP</button><button className="secondary-btn" onClick={() => navigate('/plugins')}>Gérer les plugins</button></div>
     </>
   )
 }

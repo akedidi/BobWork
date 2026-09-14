@@ -1,44 +1,50 @@
 ---
 name: product-design
-description: "Passer du problème validé à une solution testable et mesurable."
+description: "Move from a validated problem to a testable, measurable solution."
 icon: designer
 ---
 
 # product-design
 
-Utiliser ce skill pour passer du problème validé à une solution testable et mesurable.
+Use this skill to move from a validated problem to a testable, measurable solution.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Reformuler résultat utilisateur, contraintes et critères de succès.
-2. Diverger sur plusieurs options avant convergence.
-3. Prototyper au niveau de fidélité minimum utile.
-4. Tester, documenter les arbitrages et itérer avec les parties prenantes.
+1. Reframe user outcome, constraints, and success criteria.
+2. Diverge on multiple options before converging.
+3. Prototype at the minimum useful fidelity level.
+4. Test, document trade-offs, and iterate with stakeholders.
 
-## Livrable
+## Deliverable
 
-Concept retenu, alternatives, prototype, résultats de test et décisions.
+Selected concept, alternatives, prototype, test results, and decisions.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Le concept répond à un résultat, pas seulement à une liste de fonctions.
-- Les alternatives et compromis restent visibles.
-- Les critères de succès sont mesurables.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- The concept addresses an outcome, not just a feature list.
+- Alternatives and trade-offs remain visible.
+- Success criteria are measurable.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

@@ -1,44 +1,52 @@
 ---
 name: cost-analysis
-description: "Estimer et optimiser le coût complet sans compromettre les drivers."
+description: "Estimate and optimize total cost without compromising drivers."
 icon: architecture
 ---
 
 # cost-analysis
 
-Utiliser ce skill pour estimer et optimiser le coût complet sans compromettre les drivers.
+Use this skill to estimate and optimize total cost without compromising drivers.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir unités de demande et hypothèses de charge.
-2. Modéliser compute, stockage, réseau, licences, support et opérations.
-3. Comparer scénarios de croissance et engagements.
-4. Définir allocation, budgets, alertes et leviers FinOps.
+1. Define demand units and load assumptions.
+2. Model compute, storage, network, licenses, support, and operations.
+3. Compare growth scenarios and commitments.
+4. Define allocation, budgets, alerts, and FinOps levers.
 
-## Livrable
+## Deliverable
 
-Modèle de coût, hypothèses, sensibilités et plan d’optimisation.
+Cost model, assumptions, sensitivities, and optimization plan.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Tarifs et devises datés et sourcés.
-- Inclure coûts de migration et d’exploitation.
-- L’optimisation ne viole pas les SLO ou la sécurité.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Rates and currencies dated and sourced.
+- Include migration and operational costs.
+- Optimization does not violate SLOs or security.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.

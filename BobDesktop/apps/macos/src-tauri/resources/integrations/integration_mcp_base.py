@@ -45,6 +45,7 @@ def http_json(
     token: str,
     body: dict | None = None,
     headers: dict[str, str] | None = None,
+    timeout: int = 30,
 ) -> Any:
     payload = None
     req_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -55,12 +56,18 @@ def http_json(
         req_headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=payload, method=method, headers=req_headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw.strip() else {}
+    except TimeoutError as error:
+        raise RuntimeError(f"Timed out after {timeout}s calling {url}") from error
     except urllib.error.HTTPError as error:
+        # Must run before URLError: HTTPError subclasses URLError.
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {error.code}: {detail[:500]}") from error
+    except urllib.error.URLError as error:
+        reason = getattr(error, "reason", error)
+        raise RuntimeError(f"Network error calling {url}: {reason}") from error
 
 
 def tool_result(payload: Any) -> dict:

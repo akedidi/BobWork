@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
+  connectIntegrationSsh,
   connectIntegrationToken,
   disconnectIntegration,
   getIntegrationStatuses,
@@ -12,10 +13,14 @@ import type { IntegrationConnectionStatus } from '../lib/ipc'
 import { errorMessage } from '../lib/errorMessage'
 import { useT } from '../i18n'
 import { useAppDialog } from '../components/AppDialog'
-import { CATALOG, IntegrationDef } from '../views/IntegrationsTabs/catalogData'
+import { CATALOG, IntegrationAuthMode, IntegrationDef } from '../views/IntegrationsTabs/catalogData'
 
 export function isPkcePublicProvider(provider: string) {
-  return provider === 'slack' || provider === 'microsoft' || provider === 'monday'
+  return provider === 'slack' || provider === 'microsoft'
+}
+
+export function defaultAuthMode(integration: IntegrationDef): IntegrationAuthMode {
+  return integration.authModes?.[0] ?? 'oauth'
 }
 
 export function setupStatusMessage(integration: IntegrationDef, t: (key: string, params?: Record<string, string | number>) => string) {
@@ -34,7 +39,9 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
   const [connectPanelId, setConnectPanelId] = useState<string | null>(null)
   const [oauthForms, setOauthForms] = useState<Record<string, { clientId: string; clientSecret: string }>>({})
   const [tokenForms, setTokenForms] = useState<Record<string, { token: string; label: string }>>({})
+  const [authModeForms, setAuthModeForms] = useState<Record<string, IntegrationAuthMode>>({})
   const [connectingToken, setConnectingToken] = useState<string | null>(null)
+  const [connectingSsh, setConnectingSsh] = useState<string | null>(null)
   const [status, setStatus] = useState('')
 
   const statusTimerRef = useRef<number | null>(null)
@@ -59,6 +66,7 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     listen<IntegrationConnectionStatus>('integration-oauth-done', async event => {
       setPendingOAuth(null)
       setConnectingToken(null)
+      setConnectingSsh(null)
       setConnectPanelId(null)
       setDeviceCode(null)
       const name = CATALOG.find(item => item.id === event.payload.integrationId)?.name ?? event.payload.integrationId
@@ -72,6 +80,7 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     listen<string>('integration-oauth-error', async event => {
       setPendingOAuth(null)
       setConnectingToken(null)
+      setConnectingSsh(null)
       setDeviceCode(null)
       setStatus(event.payload)
       await refreshStatuses()
@@ -83,6 +92,10 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
   const openConnectPanel = async (integration: IntegrationDef) => {
     setConnectPanelId(integration.id)
     setStatus('')
+    setAuthModeForms(current => ({
+      ...current,
+      [integration.id]: current[integration.id] ?? defaultAuthMode(integration),
+    }))
     const existing = await getOAuthClientConfig(integration.id).catch(() => null)
     setOauthForms(current => ({
       ...current,
@@ -93,7 +106,7 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     }))
   }
 
-  const handleConnect = async (integration: IntegrationDef) => {
+  const handleStartOAuth = async (integration: IntegrationDef) => {
     setStatus('')
     setDeviceCode(null)
     try {
@@ -111,9 +124,7 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
       } else if (result.mode === 'setup') {
         setPendingOAuth(null)
         setStatus(setupStatusMessage(integration, t))
-        if (integration.oauthProvider !== 'monday') {
-          await openConnectPanel(integration)
-        }
+        await openConnectPanel(integration)
       } else {
         setStatus(t('integrations.authorizeInBrowser', { name: integration.name }))
       }
@@ -121,10 +132,27 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
       setPendingOAuth(null)
       setStatus(errorMessage(error))
       const info = statuses[integration.id]
-      if (integration.oauthProvider !== 'monday' && !info?.oauthClientConfigured && !info?.deviceFlowAvailable) {
+      if (!info?.oauthClientConfigured && !info?.deviceFlowAvailable) {
         await openConnectPanel(integration)
       }
     }
+  }
+
+  const handleConnect = async (integration: IntegrationDef) => {
+    if (integration.tokenOnly) {
+      await openConnectPanel(integration)
+      return
+    }
+    const authMode = authModeForms[integration.id] ?? defaultAuthMode(integration)
+    if (integration.authModes?.includes('ssh') && authMode === 'ssh') {
+      await openConnectPanel(integration)
+      return
+    }
+    if (integration.authModes?.includes('oauth') && integration.authModes.length > 1) {
+      await openConnectPanel(integration)
+      return
+    }
+    await handleStartOAuth(integration)
   }
 
   const handleSaveOAuthAndConnect = async (integration: IntegrationDef) => {
@@ -177,6 +205,21 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     }
   }
 
+  const handleConnectWithSsh = async (integration: IntegrationDef) => {
+    setStatus('')
+    try {
+      setConnectingSsh(integration.id)
+      const form = tokenForms[integration.id]
+      await connectIntegrationSsh(
+        integration.id,
+        form?.label.trim() || undefined,
+      )
+    } catch (error) {
+      setConnectingSsh(null)
+      setStatus(errorMessage(error))
+    }
+  }
+
   const handleDisconnect = async (integration: IntegrationDef) => {
     if (!await dialog.confirm({ message: t('integrations.disconnectConfirm', { name: integration.name }), confirmLabel: t('integrations.disconnect'), destructive: true })) return
     await disconnectIntegration(integration.id)
@@ -192,7 +235,9 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     connectPanelId,
     oauthForms,
     tokenForms,
+    authModeForms,
     connectingToken,
+    connectingSsh,
     status,
     setStatus,
     setDeviceCode,
@@ -200,11 +245,14 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
     setConnectPanelId,
     setOauthForms,
     setTokenForms,
+    setAuthModeForms,
     refreshStatuses,
     openConnectPanel,
     handleConnect,
+    handleStartOAuth,
     handleSaveOAuthAndConnect,
     handleConnectWithToken,
+    handleConnectWithSsh,
     handleDisconnect,
   }
 }

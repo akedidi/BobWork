@@ -22,7 +22,7 @@ describe('Bob Work — création de skills', () => {
   it('propose le chat en premier, plus l’import Claude et le formulaire', async () => {
     await clickSidebar('Skills')
     await expect($('button=+ Nouveau skill')).toBeDisplayed()
-    await expect($('button=Importer Claude')).toBeDisplayed()
+    await expect($('button=Importer un skill')).toBeDisplayed()
     await expect($('button=Formulaire')).toBeDisplayed()
     await expect($('[role="dialog"][aria-labelledby="skill-create-title"]')).not.toExist()
   })

@@ -10,12 +10,14 @@ import { GrowingPromptInput } from '../components/GrowingPromptInput'
 import { NoProjectIcon } from '../components/NoProjectIcon'
 import { PromptAutocompleteList } from '../components/PromptAutocompleteList'
 import { SelectedPluginChips } from '../components/SelectedPluginChips'
+import { TaskPermissionsList } from '../components/TaskPermissionsList'
 import { ConnectionStatusBar } from '../components/ConnectionStatusBar'
 import { AppContext } from '../context/AppContext'
 import { isConnectionFailure } from '../api'
 import { modeLabel } from '../labels'
 import { addPluginReference, removePluginReference } from '../pluginReferences'
 import { applyPromptAutocomplete, buildPromptAutocompleteItems, detectPromptAutocomplete, type PromptAutocompleteItem } from '../promptAutocomplete'
+import { getTaskApprovalSnapshot, hydrateTaskPermissionStore, useTaskApprovalStore } from '../taskPermissionStore'
 import { colors, commonStyles } from '../theme'
 import type { BobSlashCommand, Catalog, Conversation, ConversationItem, ModeOption, Project, PromptAttachment } from '../types'
 import { formatDate } from '../i18n'
@@ -168,6 +170,7 @@ function ProjectChoices({ projects, selected, onSelect, noProject }: { projects:
 
 function QuickPromptComposer({ projectId, onOpen }: { projectId?: string; onOpen: (conversation: Conversation) => void }) {
   const { api, bootstrap, connected, history, refreshHistory, t } = useContext(AppContext)
+  const taskApproval = useTaskApprovalStore()
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState(bootstrap?.settings.defaultMode || 'agent')
   const [modes, setModes] = useState<ModeOption[]>([{ id: 'agent', name: 'agent' }, { id: 'plan', name: 'plan' }, { id: 'ask', name: 'ask' }])
@@ -191,6 +194,7 @@ function QuickPromptComposer({ projectId, onOpen }: { projectId?: string; onOpen
   const project = projects.find(item => item.id === selectedProjectId) ?? null
 
   useEffect(() => { setSelectedProjectId(projectId ?? '') }, [projectId])
+  useEffect(() => { void hydrateTaskPermissionStore() }, [])
 
   useEffect(() => {
     let mounted = true
@@ -291,7 +295,17 @@ function QuickPromptComposer({ projectId, onOpen }: { projectId?: string; onOpen
     try {
       const selectedProject = selectedProjectId || undefined
       conversation = await api.createConversation({ title, projectId: selectedProject, mode })
-      await api.sendPrompt(conversation.id, { prompt: content, mode, projectId: selectedProject, pluginIds, skillSlugs, mcpNames, dbNames, attachments })
+      await api.sendPrompt(conversation.id, {
+        prompt: content,
+        mode,
+        projectId: selectedProject,
+        pluginIds,
+        skillSlugs,
+        mcpNames,
+        dbNames,
+        attachments,
+        taskApproval: getTaskApprovalSnapshot(),
+      })
       setPrompt('')
       setAttachments([])
       await refreshHistory()
@@ -340,14 +354,43 @@ function QuickPromptComposer({ projectId, onOpen }: { projectId?: string; onOpen
         <Pressable style={[styles.quickSend, !canSend && styles.quickDisabled]} onPress={() => void send()} disabled={!canSend} accessibilityLabel={t('send')}>{sending ? <ActivityIndicator size="small" color={colors.white} /> : <Ionicons name="arrow-up" size={21} color={colors.white} />}</Pressable>
       </View>
       <View style={styles.quickMetaRow}>
-        <Pressable style={styles.modeChip} onPress={() => setModeModal(true)}><Ionicons name="sparkles-outline" size={14} color={colors.accent} /><Text style={styles.modeChipText}>{modeLabel(mode, t)}</Text><Ionicons name="chevron-up" size={13} color={colors.textMuted} /></Pressable>
+        <Pressable style={styles.modeChip} onPress={() => setModeModal(true)} accessibilityLabel={t('modeAndPermissions')}>
+          <Ionicons name="sparkles-outline" size={14} color={colors.accent} />
+          <Text style={styles.modeChipText}>{modeLabel(mode, t)}</Text>
+          <Text style={styles.permChipText}>
+            {taskApproval.autoApprovalEnabled && taskApproval.allowedPermissions.length > 0
+              ? t('permStatusAuto')
+              : t('permStatusAsk')}
+          </Text>
+          <Ionicons name="chevron-up" size={13} color={colors.textMuted} />
+        </Pressable>
         <Pressable style={[styles.modeChip, styles.projectChip]} onPress={() => setProjectModal(true)}>{project ? <Ionicons name="folder-outline" size={14} color={colors.accent} /> : <NoProjectIcon size={16} color={colors.accent} />}<Text style={styles.modeChipText} numberOfLines={1}>{project?.name ?? t('noProject')}</Text><Ionicons name="chevron-up" size={13} color={colors.textMuted} /></Pressable>
         {recorderState.isRecording ? <View style={styles.recordingStatus}><View style={styles.recordingDot} /><Text style={styles.recordingText}>{t('recording')} · {Math.floor(recordingSeconds / 60)}:{String(recordingSeconds % 60).padStart(2, '0')}</Text></View> : selectedTools > 0 ? <Text style={styles.quickSelectionText}>{t('selectedResources', { count: selectedTools })}</Text> : null}
       </View>
     </View>
 
-    <AppModal visible={modeModal} title={t('mode')} onClose={() => setModeModal(false)}>
-      <ScrollView showsVerticalScrollIndicator={false}>{modes.map(item => <Pressable key={item.id} style={styles.quickSelectorRow} onPress={() => { setMode(item.id); setModeModal(false) }}><View style={styles.quickSelectorText}><Text style={styles.quickSelectorName}>{modeLabel(item.id, t)}</Text>{item.description ? <Text style={styles.quickSelectorDescription}>{item.description}</Text> : null}</View>{mode === item.id ? <Ionicons name="checkmark-circle" size={22} color={colors.accent} /> : null}</Pressable>)}</ScrollView>
+    <AppModal visible={modeModal} title={t('modeAndPermissions')} onClose={() => setModeModal(false)}>
+      <ScrollView showsVerticalScrollIndicator={false}>
+        <Text style={styles.quickSectionTitle}>{t('mode')}</Text>
+        {modes.map(item => (
+          <Pressable key={item.id} style={styles.quickSelectorRow} onPress={() => setMode(item.id)}>
+            <View style={styles.quickSelectorText}>
+              <Text style={styles.quickSelectorName}>{modeLabel(item.id, t)}</Text>
+              {item.description ? <Text style={styles.quickSelectorDescription}>{item.description}</Text> : null}
+            </View>
+            {mode === item.id ? <Ionicons name="checkmark-circle" size={22} color={colors.accent} /> : null}
+          </Pressable>
+        ))}
+        <TaskPermissionsList
+          mode={mode}
+          mcpEnabled={bootstrap?.settings.mcpEnabled !== false}
+          subagentsEnabled={bootstrap?.settings.subagentsEnabled !== false}
+          t={t}
+        />
+        <Pressable style={[commonStyles.primaryButton, styles.quickDone]} onPress={() => setModeModal(false)}>
+          <Text style={commonStyles.primaryButtonText}>{t('done')}</Text>
+        </Pressable>
+      </ScrollView>
     </AppModal>
 
     <AppModal visible={projectModal} title={t('projects')} onClose={() => setProjectModal(false)}>
@@ -399,7 +442,7 @@ const styles = StyleSheet.create({
   quickComposer: { flexShrink: 0, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 7 },
   quickPromptRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 7 }, quickSquareButton: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceRaised }, quickRecordingButton: { backgroundColor: colors.danger }, quickSend: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent }, quickDisabled: { opacity: .42 }, quickPrompt: { flex: 1, minWidth: 0, minHeight: 40, borderRadius: 13, backgroundColor: colors.surfaceRaised, color: colors.text, paddingHorizontal: 11, paddingTop: 10, paddingBottom: 9, fontSize: 14 },
   quickBadge: { position: 'absolute', right: -4, top: -4, minWidth: 17, height: 17, borderRadius: 9, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent }, quickBadgeText: { color: colors.white, fontSize: 9, fontWeight: '900' },
-  quickMetaRow: { minHeight: 29, flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 5 }, modeChip: { minHeight: 26, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 9, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border }, projectChip: { maxWidth: 150 }, modeChipText: { flexShrink: 1, color: colors.text, fontSize: 10, fontWeight: '800' }, quickSelectionText: { flex: 1, color: colors.textMuted, fontSize: 9, textAlign: 'right' }, recordingStatus: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 5 }, recordingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.danger }, recordingText: { color: colors.danger, fontSize: 10, fontWeight: '800' },
+  quickMetaRow: { minHeight: 29, flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 5 }, modeChip: { minHeight: 26, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 9, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border }, projectChip: { maxWidth: 150 }, modeChipText: { flexShrink: 1, color: colors.text, fontSize: 10, fontWeight: '800' }, permChipText: { color: colors.textMuted, fontSize: 9, fontWeight: '700' }, quickSelectionText: { flex: 1, color: colors.textMuted, fontSize: 9, textAlign: 'right' }, recordingStatus: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 5 }, recordingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.danger }, recordingText: { color: colors.danger, fontSize: 10, fontWeight: '800' },
   quickAttachmentScroller: { height: 34, flexGrow: 0, flexShrink: 0 }, quickAttachments: { height: 34, alignItems: 'flex-start', gap: 6, paddingBottom: 6 }, quickAttachment: { maxWidth: 210, minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 9, backgroundColor: colors.background }, quickAttachmentName: { maxWidth: 150, color: colors.text, fontSize: 10 },
   quickActionRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 11, borderBottomWidth: 1, borderBottomColor: colors.border }, quickActionIcon: { width: 40, height: 40, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accentSoft }, quickActionText: { flex: 1, color: colors.text, fontSize: 14, fontWeight: '800' }, quickCatalogSearch: { minHeight: 42, marginTop: 13, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 11, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceRaised }, quickCatalogSearchInput: { flex: 1, minWidth: 0, color: colors.text, fontSize: 13, paddingVertical: 8 },
   quickSectionTitle: { marginTop: 15, marginBottom: 3, color: colors.textMuted, fontSize: 10, fontWeight: '900', textTransform: 'uppercase', letterSpacing: .7 }, quickSelectorRow: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border }, quickSelectorText: { flex: 1, minWidth: 0 }, quickSelectorName: { color: colors.text, fontSize: 13, fontWeight: '800' }, quickSelectorDescription: { color: colors.textMuted, fontSize: 10, lineHeight: 15, marginTop: 3 }, quickEmpty: { color: colors.textMuted, fontSize: 12, paddingVertical: 9 }, quickDone: { marginTop: 18 },

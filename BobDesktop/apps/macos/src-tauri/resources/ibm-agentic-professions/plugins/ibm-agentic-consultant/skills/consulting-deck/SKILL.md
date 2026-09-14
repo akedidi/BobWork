@@ -1,44 +1,52 @@
 ---
 name: consulting-deck
-description: "Produire un deck de conseil prêt pour une réunion exécutive."
+description: "Produce a consulting deck ready for an executive meeting."
 icon: consultant
 ---
 
 # consulting-deck
 
-Utiliser ce skill pour produire un deck de conseil prêt pour une réunion exécutive.
+Use this skill to produce a consulting deck ready for an executive meeting.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Confirmer audience, décision, durée, format et template.
-2. Créer storyline puis storyboard avant la mise en page.
-3. Construire graphiques et tableaux à partir de données sourcées.
-4. Ajouter annexes, hypothèses, sources et notes orateur nécessaires.
+1. Confirm audience, decision, duration, format, and template.
+2. Create storyline then storyboard before layout.
+3. Build charts and tables from sourced data.
+4. Add appendices, assumptions, sources, and speaker notes as needed.
 
-## Livrable
+## Deliverable
 
-Deck exécutif avec synthèse, corps, plan d’action et annexes.
+Executive deck with summary, body, action plan, and appendices.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Titres conclusifs et lisibles.
-- Sources et unités sur chaque analyse.
-- Aucun élément décoratif ne masque le message.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Conclusive, readable slide titles.
+- Sources and units on every analysis.
+- No decorative element obscures the message.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

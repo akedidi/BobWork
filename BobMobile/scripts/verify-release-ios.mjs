@@ -18,6 +18,14 @@ if (plistValue('CFBundleShortVersionString') !== config.version) throw new Error
 const executableName = plistValue('CFBundleExecutable')
 const executable = join(bundle, executableName)
 statSync(executable)
+
+// Expo SecureStore uses the Apple keychain. An unsigned simulator build can
+// reach the desktop API but then fails with errSecMissingEntitlement (-34018)
+// while saving the connection, which the UI previously reported as a network
+// failure. Reject unsigned or invalid bundles before they can be installed.
+// Simulator ad-hoc signatures legitimately have an empty entitlement plist;
+// codesign verification is the reliable check for that target.
+execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'pipe' })
 const forbidden = []
 const files = []
 const walk = directory => {

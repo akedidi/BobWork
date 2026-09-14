@@ -46,10 +46,22 @@ TOOLS = [
 ]
 
 
+def github_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "bob-work-github-mcp",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
 def handle_call(name: str, arguments: dict) -> dict:
     token = token_from_env("GITHUB_TOKEN", "GH_TOKEN")
     if not token:
-        raise RuntimeError("GITHUB_TOKEN or GH_TOKEN is required")
+        raise RuntimeError(
+            "GITHUB_TOKEN or GH_TOKEN is missing in the MCP process. "
+            "Reconnect GitHub in Bob Work → Integrations (on this app: Bob Work vs Bob Work-test), "
+            "disable Sandbox if it is on, then retry."
+        )
 
     if e2e_mode("GITHUB_TOKEN", "GH_TOKEN"):
         if name == "github_list_repos":
@@ -78,13 +90,15 @@ def handle_call(name: str, arguments: dict) -> dict:
             )
         raise KeyError(name)
 
+    headers = github_headers()
     if name == "github_list_repos":
-        limit = int(arguments.get("limit") or 30)
+        limit = int(arguments.get("limit") or 10)
         data = http_json(
             "GET",
             f"https://api.github.com/user/repos?per_page={limit}&sort=updated",
             token,
-            headers={"User-Agent": "bob-work-github-mcp"},
+            headers=headers,
+            timeout=20,
         )
         repos = [
             {"full_name": item.get("full_name"), "private": item.get("private"), "url": item.get("html_url")}
@@ -96,7 +110,7 @@ def handle_call(name: str, arguments: dict) -> dict:
         query = str(arguments.get("query", "")).strip()
         limit = int(arguments.get("limit") or 10)
         url = f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}&per_page={limit}"
-        data = http_json("GET", url, token, headers={"User-Agent": "bob-work-github-mcp"})
+        data = http_json("GET", url, token, headers=headers, timeout=20)
         items = [
             {
                 "title": item.get("title"),
@@ -113,7 +127,7 @@ def handle_call(name: str, arguments: dict) -> dict:
         repo = str(arguments.get("repo", "")).strip()
         number = int(arguments.get("number"))
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
-        data = http_json("GET", url, token, headers={"User-Agent": "bob-work-github-mcp"})
+        data = http_json("GET", url, token, headers=headers, timeout=20)
         return tool_result(
             {
                 "title": data.get("title"),

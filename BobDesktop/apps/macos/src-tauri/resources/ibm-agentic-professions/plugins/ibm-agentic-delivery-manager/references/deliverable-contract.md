@@ -1,25 +1,33 @@
-# Contrat commun de livraison
+# Shared deliverable contract
 
-## En-tête
+## Language
 
-- objectif et décision attendue ;
-- audience, périmètre, date et version ;
-- propriétaire et contributeurs ;
-- niveau de confidentialité si connu.
+- **Skill files** in this plugin are authored in English.
+- **Deliverables** must be written entirely in the same language as the user's prompt (the message that invoked the skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence — not the source document language alone.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful in the output language.
 
-## Corps
+## Header
 
-- résumé décisionnel ;
-- faits et preuves avec sources ;
-- analyse et options ;
-- recommandation et rationnel ;
-- hypothèses, limites, risques et dépendances ;
-- actions, responsables, échéances et critères de succès.
+- goal and expected decision;
+- audience, scope, date, and version;
+- owner and contributors;
+- confidentiality level when known.
 
-## Traçabilité
+## Body
 
-Utiliser des identifiants stables pour relier exigences, insights, décisions, risques, actions et artefacts. Une estimation doit préciser son unité, son horizon et sa base. Une information externe susceptible d’évoluer doit préciser sa source et sa date de consultation.
+- decision summary;
+- facts and evidence with sources;
+- analysis and options;
+- recommendation and rationale;
+- assumptions, limits, risks, and dependencies;
+- actions, owners, deadlines, and success criteria.
 
-## Revue avant livraison
+## Traceability
 
-Contrôler exactitude, complétude, cohérence, confidentialité, accessibilité, lisibilité et absence de contenu inventé. Signaler explicitement ce qui n’a pas été vérifié. Pour un fichier généré, vérifier qu’il s’ouvre et fournir son chemin ou son lien de téléchargement.
+Use stable identifiers to link requirements, insights, decisions, risks, actions, and artifacts. An estimate must state its unit, horizon, and basis. External information that may change must cite its source and consultation date.
+
+## Pre-delivery review
+
+Check accuracy, completeness, consistency, confidentiality, accessibility, readability, and absence of fabricated content. Explicitly flag what was not verified. For a generated file, verify it opens and provide its path or download link.

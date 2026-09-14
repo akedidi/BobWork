@@ -41,6 +41,16 @@ Déclaration selon le type :
 - `privateDependencies[].entrypoint` = chemin relatif sûr dans ce schéma.
 - `permissions` déclare au minimum `command.execute` pour un processus, `network.request` pour le réseau, et les permissions fichiers réellement nécessaires.
 
+Contrat d'import exact pour `.bob-work-plugin.json` :
+- `category` vaut exclusivement `recipe`, `integration` ou `executable`. Utilise `executable` dès que le plugin lance un script, une CLI, un MCP local ou un binaire. La portée personnelle est portée par Bob Work ; `personal` n'est jamais une catégorie.
+- `permissions` est un tableau d'objets, par exemple `[{ "type": "command.execute" }]`, jamais un tableau de chaînes.
+- `entrypoints` est un tableau d'objets `{ "name": "bonjour", "runtime": "sh", "path": "scripts/bonjour.sh" }`.
+- Les seuls runtimes d'entrypoint acceptés sont `python3`, `bash`, `sh`, `zsh`, `node` et `binary`.
+- Un entrypoint utilise toujours `runtime` + `path`. Les clés `type`, `command` et `args` ne font pas partie de ce contrat.
+- Chaque `path` est relatif au bundle, se trouve sous `scripts/`, `bin/`, `vendor/`, `mcp/` ou `skills/`, existe réellement et n'est pas un lien symbolique.
+
+Avant d'annoncer la réussite, relis le manifeste avec ces règles exactes, vérifie chaque fichier référencé et exécute chaque entrypoint local avec succès. Ne qualifie jamais le bundle de « validé » si une catégorie, permission, clé d'entrypoint ou cible ne respecte pas ce contrat.
+
 Bob Work exécute le chemin absolu résolu avec un environnement minimal. Le plugin A ne voit jamais le runtime privé du plugin B. Les moteurs partagés (D2, Mermaid, Graphviz, ECharts, Plotly, Three.js) ne doivent pas être recopiés dans un plugin."#
 }
 
@@ -109,7 +119,7 @@ mod tests {
         validate_entrypoint_path("python3", "scripts/d2_runtime.py").unwrap();
         validate_entrypoint_path(
             "python3",
-            "skills/senior-cloud-architect/scripts/validate_architecture.py",
+            "skills/cloud-architect/scripts/validate_architecture.py",
         )
         .unwrap();
         validate_entrypoint_path("binary", "bin/echo-tool").unwrap();

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { save as chooseSavePath } from '@tauri-apps/plugin-dialog'
-import { exportLiveCanvasZip, getLivePreviewRevision, prepareFittedHtmlPreview, readHtmlPreview } from '../lib/ipc'
+import { exportLiveCanvasZip, getLivePreviewRevision, openExternalHtmlPreview, prepareFittedHtmlPreview, readHtmlPreview } from '../lib/ipc'
 import { useT } from '../i18n'
 
 type IntrinsicSize = { width: number; height: number }
@@ -25,9 +25,8 @@ export function detectHtmlFrameSizing(value: string): FrameSizing {
 export function isCanvasFrameSource(
   source: MessageEventSource | null,
   current: Window | null | undefined,
-  previous: Window | null | undefined,
 ) {
-  return Boolean(source && (source === current || source === previous))
+  return Boolean(source && source === current)
 }
 
 export function calculateFittedFrameLayout(
@@ -35,6 +34,7 @@ export function calculateFittedFrameLayout(
   containerSize: IntrinsicSize,
   mode: FrameMode,
   sizing: FrameSizing = 'fit',
+  zoom = 1,
 ) {
   const targetHeight = mode === 'inline'
     ? Math.min(680, Math.max(420, Math.round(containerSize.width * 0.68)))
@@ -53,10 +53,10 @@ export function calculateFittedFrameLayout(
   const fittedScale = mode === 'inline' && conversationFitScale >= 0.68
     ? conversationFitScale
     : widthScale
-  const scale = sizing === 'natural' ? 1 : fittedScale
+  const scale = (sizing === 'natural' ? 1 : fittedScale) * zoom
   const scaledHeight = intrinsic ? Math.max(1, Math.ceil(intrinsic.height * scale)) : targetHeight
   const scaledWidth = intrinsic ? Math.max(1, Math.ceil(intrinsic.width * scale)) : containerSize.width
-  const shouldScrollX = Boolean(intrinsic && hasUsableViewport && sizing === 'natural' && scaledWidth > containerSize.width + 1)
+  const shouldScrollX = Boolean(intrinsic && hasUsableViewport && scaledWidth > containerSize.width + 1)
   const shouldScrollY = Boolean(intrinsic && hasUsableViewport && scaledHeight > targetHeight + 1)
   const shouldScroll = shouldScrollX || shouldScrollY
 
@@ -149,12 +149,16 @@ const sizeReporter = `<script>
 
 const threeCdnScript = /<script\b[^>]*\bsrc=["']https:\/\/cdn\.jsdelivr\.net\/npm\/three@[^"']*["'][^>]*><\/script>\s*/gi
 const echartsCdnScript = /<script\b[^>]*\bsrc=["']https:\/\/cdn\.jsdelivr\.net\/npm\/echarts@[^"']*["'][^>]*><\/script>\s*/gi
+const staleLocalRuntimeScript = /<script\b[^>]*\bsrc=["'](?:\.\/)?three-embed-bridge\.js["'][^>]*><\/script>\s*/gi
 const threeRuntimeUrl = new URL('/runtime/three-embed-bridge.js', window.location.href).href
 
 export function withLocalThreeRuntime(value: string, localThreeRuntime: string | null): string {
   if (!/https:\/\/cdn\.jsdelivr\.net\/npm\/(?:three|echarts)@/i.test(value)) return value
   if (!localThreeRuntime) return value
-  const withoutCdn = value.replace(threeCdnScript, '').replace(echartsCdnScript, '')
+  const withoutCdn = value
+    .replace(threeCdnScript, '')
+    .replace(echartsCdnScript, '')
+    .replace(staleLocalRuntimeScript, '')
   // The sandbox inherits the host CSP and consequently cannot fetch a script
   // URL, even one served by the local Tauri origin.  An inline bridge is safe
   // here: it is produced at build time from Bob Work's packaged dependency.
@@ -163,6 +167,16 @@ export function withLocalThreeRuntime(value: string, localThreeRuntime: string |
     return withoutCdn.replace(/<head(?:\s[^>]*)?>/i, match => `${match}${bridge}`)
   }
   return `<!doctype html><html><head>${bridge}</head><body>${withoutCdn}</body></html>`
+}
+
+/** Open the same self-contained document used by Bob Work in the default browser. */
+export async function openHtmlPreviewExternally(sourcePath: string): Promise<void> {
+  const [value, runtimeResponse] = await Promise.all([
+    readHtmlPreview(sourcePath),
+    fetch(threeRuntimeUrl).catch(() => null),
+  ])
+  const localRuntime = runtimeResponse?.ok ? await runtimeResponse.text() : null
+  await openExternalHtmlPreview(sourcePath, withLocalThreeRuntime(value, localRuntime))
 }
 
 function fittedDocument(value: string, sourcePath: string, localThreeRuntime: string | null) {
@@ -191,19 +205,15 @@ async function canvasDocument(value: string, sourcePath: string) {
   return value
 }
 
-export function FittedHtmlFrame({ src, title, mode }: { src: string; title: string; mode: FrameMode }) {
+export function FittedHtmlFrame({ src, title, mode, zoom = 1 }: { src: string; title: string; mode: FrameMode; zoom?: number }) {
   const t = useT()
   const containerRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
-  const previousFrameRef = useRef<HTMLIFrameElement>(null)
   const [frameSource, setFrameSource] = useState<string | null>(null)
-  const [previousFrameSource, setPreviousFrameSource] = useState<string | null>(null)
-  const frameSourceRef = useRef<string | null>(null)
   const revisionRef = useRef('')
   const [reloadToken, setReloadToken] = useState(0)
   const [live, setLive] = useState(true)
   const [inspector, setInspector] = useState(false)
-  const [comparison, setComparison] = useState(false)
   const [selection, setSelection] = useState('')
   const [exporting, setExporting] = useState(false)
   const [localThreeRuntime, setLocalThreeRuntime] = useState<string | null>(null)
@@ -238,7 +248,7 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
       })
       .then(value => fittedDocument(value, src, localThreeRuntime))
       .then(value => prepareFittedHtmlPreview(src, value))
-      .then(path => { if (!disposed) { const next=convertFileSrc(path); if (frameSourceRef.current && frameSourceRef.current !== next) setPreviousFrameSource(frameSourceRef.current); frameSourceRef.current=next; setFrameSource(next) } })
+      .then(path => { if (!disposed) setFrameSource(convertFileSrc(path)) })
       .catch(() => undefined)
     return () => { disposed = true }
   }, [src, localThreeRuntime, reloadToken])
@@ -274,7 +284,7 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
 
   useEffect(() => {
     const receiveSize = (event: MessageEvent) => {
-      if (!isCanvasFrameSource(event.source, frameRef.current?.contentWindow, previousFrameRef.current?.contentWindow) || typeof event.data !== 'string') return
+      if (!isCanvasFrameSource(event.source, frameRef.current?.contentWindow) || typeof event.data !== 'string') return
       try {
         const message = JSON.parse(event.data) as { type?: string; width?: unknown; height?: unknown }
         if (message.type === 'bob-visual-size' && typeof message.width === 'number' && typeof message.height === 'number') {
@@ -294,13 +304,12 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
     ? { ...containerSize, height: Math.max(1, containerSize.height - 34 - (selection ? 27 : 0)) }
     : containerSize
   const sizing = sizingChoice === 'auto' ? detectedSizing : sizingChoice
-  const { frameHeight, hasUsableViewport, scale, shouldScrollX, shouldScrollY } = calculateFittedFrameLayout(intrinsic, canvasViewport, mode, sizing)
+  const { frameHeight, hasUsableViewport, scale, shouldScrollX, shouldScrollY } = calculateFittedFrameLayout(intrinsic, canvasViewport, mode, sizing, zoom)
 
   const sendFit = () => {
     if (!hasUsableViewport) return
     const message = JSON.stringify({ type: 'bob-visual-fit', scale, scrollX: shouldScrollX, scrollY: shouldScrollY })
     frameRef.current?.contentWindow?.postMessage(message, '*')
-    previousFrameRef.current?.contentWindow?.postMessage(message, '*')
   }
 
   useEffect(() => {
@@ -310,12 +319,11 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
   const sendInspector = () => {
     const message = JSON.stringify({ type: 'bob-dom-inspector', enabled: inspector })
     frameRef.current?.contentWindow?.postMessage(message, '*')
-    previousFrameRef.current?.contentWindow?.postMessage(message, '*')
   }
 
   useEffect(() => {
     sendInspector()
-  }, [inspector, frameSource, previousFrameSource, comparison])
+  }, [inspector, frameSource])
 
   const onFrameLoad = () => {
     sendFit()
@@ -330,10 +338,9 @@ export function FittedHtmlFrame({ src, title, mode }: { src: string; title: stri
 
   return (
     <div ref={containerRef} className={`fitted-html-frame fitted-html-frame--${mode}`}>
-      <div className="live-canvas-toolbar"><span className={live?'is-live':''}>● {live?t('canvas.live'):t('canvas.paused')}</span><button type="button" aria-pressed={sizing === 'fit'} className={sizing === 'fit'?'active':''} onClick={()=>setSizingChoice('fit')}>{t('canvas.fit')}</button><button type="button" aria-pressed={sizing === 'natural'} className={sizing === 'natural'?'active':''} onClick={()=>setSizingChoice('natural')}>{t('canvas.actualSize')}</button><button type="button" onClick={()=>setLive(value=>!value)}>{live?t('canvas.pause'):t('canvas.resume')}</button><button type="button" aria-pressed={inspector} className={inspector?'active':''} onClick={()=>{ setSelection(''); setInspector(value=>!value) }}>{t('canvas.inspect')}</button><button type="button" disabled={!previousFrameSource} className={comparison?'active':''} onClick={()=>setComparison(value=>!value)}>{t('canvas.diff')}</button><button type="button" disabled={exporting} onClick={()=>void exportZip()}>{exporting?'…':t('canvas.export')}</button></div>
+      <div className="live-canvas-toolbar"><span className={live?'is-live':''}>● {live?t('canvas.live'):t('canvas.paused')}</span><button type="button" aria-pressed={sizing === 'fit'} className={sizing === 'fit'?'active':''} onClick={()=>setSizingChoice('fit')}>{t('canvas.fit')}</button><button type="button" aria-pressed={sizing === 'natural'} className={sizing === 'natural'?'active':''} onClick={()=>setSizingChoice('natural')}>{t('canvas.actualSize')}</button><button type="button" onClick={()=>setLive(value=>!value)}>{live?t('canvas.pause'):t('canvas.resume')}</button><button type="button" aria-pressed={inspector} className={inspector?'active':''} onClick={()=>{ setSelection(''); setInspector(value=>!value) }}>{t('canvas.inspect')}</button><button type="button" disabled={exporting} onClick={()=>void exportZip()}>{exporting?'…':t('canvas.export')}</button></div>
       {(inspector || selection) && <div className={`live-canvas-selection${inspector&&!selection?' is-hint':''}`} role="status" title={selection || t('canvas.inspectHint')}>{selection || t('canvas.inspectHint')}</div>}
-      <div className={`live-canvas-frames ${comparison&&previousFrameSource?'is-comparing':''}`}>
-      {comparison && previousFrameSource && <iframe ref={previousFrameRef} src={previousFrameSource} title={`${title} — ${t('canvas.before')}`} sandbox="allow-scripts" referrerPolicy="no-referrer" scrolling="auto" style={{height:frameHeight}} onLoad={onFrameLoad} />}
+      <div className="live-canvas-frames">
       <iframe
         ref={frameRef}
         src={frameSource ?? 'about:blank'}

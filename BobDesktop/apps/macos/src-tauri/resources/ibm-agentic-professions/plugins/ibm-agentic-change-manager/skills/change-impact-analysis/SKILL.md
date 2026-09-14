@@ -1,44 +1,52 @@
 ---
 name: change-impact-analysis
-description: "Évaluer précisément ce qui change pour chaque population."
+description: "Assess precisely what changes for each population."
 icon: change
 ---
 
 # change-impact-analysis
 
-Utiliser ce skill pour évaluer précisément ce qui change pour chaque population.
+Use this skill to assess precisely what changes for each population.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir état actuel, état futur, date et périmètre.
-2. Analyser processus, rôles, comportements, compétences, outils, données et contrôles.
-3. Évaluer ampleur, fréquence, complexité, sentiment et risque.
-4. Définir actions de mitigation et responsables par impact.
+1. Define current state, future state, date, and scope.
+2. Analyze process, roles, behaviors, skills, tools, data, and controls.
+3. Assess magnitude, frequency, complexity, sentiment, and risk.
+4. Define mitigation actions and owners per impact.
 
-## Livrable
+## Deliverable
 
-Matrice impacts-populations et plan de mitigation.
+Impact-population matrix and mitigation plan.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Les impacts sont décrits du point de vue utilisateur.
-- Les populations indirectes sont incluses.
-- Chaque impact élevé a une action.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Impacts are described from the user perspective.
+- Indirect populations are included.
+- Every high impact has an action.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

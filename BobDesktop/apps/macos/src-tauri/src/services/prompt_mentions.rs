@@ -16,14 +16,20 @@ pub fn plugin_reference_ids(db: &Database) -> AppResult<Vec<String>> {
     for plugin in PluginService::new().get_all(db)? {
         ids.insert(plugin.id.clone());
         ids.insert(canonical_plugin_mention_id(&plugin.id).to_string());
-        if plugin.scope == "personal" {
-            if let Some(slug) = plugin
-                .manifest
-                .get("slug")
-                .and_then(serde_json::Value::as_str)
-            {
-                ids.insert(slug.to_string());
+        if let Some(slug) = plugin
+            .manifest
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+        {
+            // Builtins and personal plugins: accept @plugin:<slug> and stripped
+            // variants (visualize, powerpoint, bob-work-microsoft-powerpoint…).
+            for key in crate::services::plugin::catalog_slug_keys(slug) {
+                ids.insert(key);
             }
+        }
+        // Also accept catalog keys derived from the registry id itself.
+        for key in crate::services::plugin::catalog_slug_keys(&plugin.id) {
+            ids.insert(key);
         }
     }
     ids.insert("agentic-senior-cloud-architect".into());

@@ -42,7 +42,7 @@ describe('Bob Work — overlay d’approbation', () => {
       commandOrChange: 'edit workspace-e2e.md',
     })
     const dialog = await expectApprovalOverlay(description)
-    await dialog.$('button=Pour cette tâche').click()
+    await dialog.$('button=Autoriser Edit').click()
     await expect($('.approval-overlay')).not.toExist()
 
     await openSettingsTab('Permissions')

@@ -1,44 +1,52 @@
 ---
 name: prioritization
-description: "Comparer des opportunités avec critères explicites et gouvernance."
+description: "Compare opportunities with explicit criteria and governance."
 icon: product
 ---
 
 # prioritization
 
-Utiliser ce skill pour comparer des opportunités avec critères explicites et gouvernance.
+Use this skill to compare opportunities with explicit criteria and governance.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- Expected goal or decision;
+- Scope, audience, deadline, and constraints;
+- Available sources, assumptions, and confidence level;
+- Output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir unité de comparaison et horizon.
-2. Choisir critères liés aux objectifs, risques et contraintes.
-3. Normaliser les preuves et éviter la double comptabilisation.
-4. Documenter décision finale, exceptions et coût d’opportunité.
+1. Define comparison unit and horizon.
+2. Choose criteria linked to goals, risks, and constraints.
+3. Normalize evidence and avoid double counting.
+4. Document final decision, exceptions, and opportunity cost.
 
-## Livrable
+## Deliverable
 
-Backlog priorisé, critères, scores, dépendances et journal de décision.
+Prioritized backlog, criteria, scores, dependencies, and decision log.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Les éléments comparés ont une granularité compatible.
-- Le score n’efface pas le jugement.
-- Les contraintes obligatoires sont traitées séparément.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Compared items have compatible granularity.
+- The score does not replace judgment.
+- Mandatory constraints are handled separately.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, a client reference, a compliance claim, or an approval.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points only — do not reproduce their protected materials.

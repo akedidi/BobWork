@@ -6,6 +6,7 @@ import { statusTone } from '../lib/statusTone'
 
 import { useIntegrations } from '../hooks/useIntegrations'
 import { useMcpServers } from '../hooks/useMcpServers'
+import { userConfigurableMcpServers } from '../lib/mcpVisibility'
 import { useDbConnections } from '../hooks/useDbConnections'
 import { useConnectorForms, slugifyName } from '../hooks/useConnectorForms'
 import { testMcpServer } from '../lib/ipc'
@@ -15,10 +16,10 @@ import { IntegrationsCatalogTab } from './IntegrationsTabs/IntegrationsCatalogTa
 import { ApisTab } from './IntegrationsTabs/ApisTab'
 import { McpProtocolsTab } from './IntegrationsTabs/McpProtocolsTab'
 import { DbConnectionsTab } from './IntegrationsTabs/DbConnectionsTab'
-import { CATALOG } from './IntegrationsTabs/catalogData'
+import { visibleCatalog, visibleIntegrationGroups } from './IntegrationsTabs/catalogData'
 
 export type PageTab = 'integrations' | 'apis' | 'mcp' | 'db'
-export type IntegrationFilter = 'all' | 'productivity' | 'developer'
+export type IntegrationFilter = 'all' | 'developer'
 
 export default function IntegrationsView() {
   const t = useT()
@@ -41,6 +42,7 @@ export default function IntegrationsView() {
     setMcpTestBusy,
     classified,
   } = useMcpServers({ setStatus: (s) => setStatus(s) }) // will fix this circular dep by wrapping in a ref or moving state down
+  const configurableMcpServers = userConfigurableMcpServers(servers)
 
   const {
     connections: dbConnections,
@@ -60,6 +62,8 @@ export default function IntegrationsView() {
     oauthForms,
     tokenForms,
     connectingToken,
+    connectingSsh,
+    authModeForms,
     status,
     setStatus,
     setDeviceCode,
@@ -67,11 +71,14 @@ export default function IntegrationsView() {
     setConnectPanelId,
     setOauthForms,
     setTokenForms,
+    setAuthModeForms,
     refreshStatuses,
     openConnectPanel,
     handleConnect,
+    handleStartOAuth,
     handleSaveOAuthAndConnect,
     handleConnectWithToken,
+    handleConnectWithSsh,
     handleDisconnect,
   } = useIntegrations({ reloadMcp: loadMcp })
 
@@ -134,7 +141,6 @@ export default function IntegrationsView() {
         ...current,
         name: slugifyName(preset.name || current.name || 'api'),
         url: preset.url ?? current.url,
-        transport: preset.transport || current.transport,
         authMode: preset.authMode || 'env',
         envName: preset.envName || current.envName || 'API_KEY',
         secret: '',
@@ -201,19 +207,13 @@ export default function IntegrationsView() {
     }
   }
 
-  const visible = filter === 'all'
-    ? CATALOG
-    : filter === 'developer'
-      ? CATALOG.filter(item => item.group === 'developer')
-      : CATALOG.filter(item => item.group === 'microsoft')
+  const catalogVisible = visibleCatalog()
+  const integrationGroups = visibleIntegrationGroups()
+  const visible = filter === 'developer'
+    ? catalogVisible.filter(item => item.group === 'developer')
+    : catalogVisible
 
-  const connectedCount = CATALOG.filter(item => statuses[item.id]?.connected).length
-  const microsoftNeedsEntra = !loading && !loadError && CATALOG
-    .filter(item => item.oauthProvider === 'microsoft')
-    .every(item => {
-      const info = statuses[item.id]
-      return info && !info.connected && !info.oauthClientConfigured
-    })
+  const connectedCount = catalogVisible.filter(item => statuses[item.id]?.connected).length
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -244,22 +244,27 @@ export default function IntegrationsView() {
         <IntegrationsCatalogTab
           filter={filter}
           setFilter={setFilter}
-          microsoftNeedsEntra={microsoftNeedsEntra}
+          integrationGroups={integrationGroups}
           visible={visible}
           statuses={statuses}
           pendingOAuth={pendingOAuth}
           connectingToken={connectingToken}
+          connectingSsh={connectingSsh}
           connectPanelId={connectPanelId}
           oauthForms={oauthForms}
           tokenForms={tokenForms}
+          authModeForms={authModeForms}
           highlightProvider={highlightProvider}
           deviceCode={deviceCode}
           mcpTestBusy={mcpTestBusy}
           setOauthForms={setOauthForms}
           setTokenForms={setTokenForms}
+          setAuthModeForms={setAuthModeForms}
           handleConnect={handleConnect}
+          handleStartOAuth={handleStartOAuth}
           handleSaveOAuthAndConnect={handleSaveOAuthAndConnect}
           handleConnectWithToken={handleConnectWithToken}
+          handleConnectWithSsh={handleConnectWithSsh}
           handleDisconnect={handleDisconnect}
           openConnectPanel={openConnectPanel}
           setConnectPanelId={setConnectPanelId}
@@ -277,6 +282,7 @@ export default function IntegrationsView() {
           classified={classified}
           mcpTestBusy={mcpTestBusy}
           testServerMcp={testServerMcp}
+          loadMcp={loadMcp}
           publicApiForm={publicApiForm}
           setPublicApiForm={setPublicApiForm}
           persistPublicApi={persistPublicApi}
@@ -294,7 +300,7 @@ export default function IntegrationsView() {
 
       {tab === 'mcp' && !loading && !loadError && (
         <McpProtocolsTab
-          servers={servers}
+          servers={configurableMcpServers}
           mcpTestBusy={mcpTestBusy}
           testServerMcp={testServerMcp}
           loadMcp={loadMcp}

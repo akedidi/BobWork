@@ -168,7 +168,10 @@ pub fn send(
         state => state,
     };
     if !auth.is_granted() {
-        return Err("Les notifications système sont désactivées pour Bob Work dans Réglages Système → Notifications.".into());
+        let app_name = crate::app_identity::app_display_name();
+        return Err(format!(
+            "Les notifications système sont désactivées pour {app_name} dans Réglages Système → Notifications."
+        ));
     }
     // Required to opt into Banner/List/Sound while Bob Work is foregrounded.
     install_delegate();
@@ -220,7 +223,8 @@ pub fn send(
 
 pub fn notification_identifier(conversation_id: Option<&str>, task_id: Option<&str>) -> String {
     format!(
-        "bob-work|{}|{}|{}",
+        "{}{}|{}|{}",
+        crate::app_identity::notification_id_prefix(),
         conversation_id.unwrap_or(""),
         task_id.unwrap_or(""),
         monotonic_nanos()
@@ -228,7 +232,10 @@ pub fn notification_identifier(conversation_id: Option<&str>, task_id: Option<&s
 }
 
 pub fn parse_notification_open(identifier: &str) -> NotificationOpen {
-    let Some(rest) = identifier.strip_prefix("bob-work|") else {
+    let rest = identifier
+        .strip_prefix("bob-work-test|")
+        .or_else(|| identifier.strip_prefix("bob-work|"));
+    let Some(rest) = rest else {
         return NotificationOpen::default();
     };
     let mut parts = rest.splitn(3, '|');
@@ -343,6 +350,17 @@ mod tests {
             NotificationOpen {
                 conversation_id: Some("conv-1".into()),
                 task_id: Some("task-9".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_test_app_notification_prefix() {
+        assert_eq!(
+            parse_notification_open("bob-work-test|conv-2|task-3|456"),
+            NotificationOpen {
+                conversation_id: Some("conv-2".into()),
+                task_id: Some("task-3".into()),
             }
         );
     }

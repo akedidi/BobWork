@@ -16,6 +16,8 @@ pub struct Conversation {
     pub summary: Option<String>,
     pub bob_context_state: serde_json::Value,
     pub archived: bool,
+    #[serde(default)]
+    pub plan_activities: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

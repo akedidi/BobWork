@@ -51,6 +51,20 @@ describe('calculateFittedFrameLayout', () => {
     expect(layout.frameHeight).toBe(layout.targetHeight)
   })
 
+  it('applique le zoom utilisateur au contenu et active son défilement', () => {
+    const layout = calculateFittedFrameLayout(
+      { width: 960, height: 600 },
+      { width: 480, height: 700 },
+      'panel',
+      'fit',
+      1.5,
+    )
+
+    expect(layout.scale).toBeCloseTo(0.75)
+    expect(layout.shouldScrollX).toBe(true)
+    expect(layout.frameHeight).toBe(450)
+  })
+
   it('détecte les pages web et respecte une déclaration explicite du mode aperçu', () => {
     expect(detectHtmlFrameSizing('<html><body><header/><main/><footer/></body></html>')).toBe('natural')
     expect(detectHtmlFrameSizing('<meta name="bob-preview-mode" content="full-page"><div/>')).toBe('natural')
@@ -69,21 +83,20 @@ describe('calculateFittedFrameLayout', () => {
   })
 
   it('remplace les CDN Three.js et ECharts par le bridge local embarqué', () => {
-    const source = '<html><head><script src="https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.min.js"></script><script src="https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js"></script></head><body></body></html>'
+    const source = '<html><head><script src="https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.min.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.185.1/examples/js/controls/OrbitControls.js"></script><script src="./three-embed-bridge.js"></script><script src="https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js"></script></head><body></body></html>'
     const result = withLocalThreeRuntime(source, 'window.THREE={};window.echarts={};')
 
     expect(result).not.toContain('cdn.jsdelivr.net')
+    expect(result).not.toContain('three-embed-bridge.js')
     expect(result).toContain('window.THREE={};window.echarts={};')
     expect(result.indexOf('window.THREE')).toBeLessThan(result.indexOf('</head>'))
   })
 
-  it('accepte les événements DOM des deux versions du diff visuel', () => {
+  it('accepte uniquement les événements DOM de la frame active', () => {
     const current = {} as Window
-    const previous = {} as Window
 
-    expect(isCanvasFrameSource(current, current, previous)).toBe(true)
-    expect(isCanvasFrameSource(previous, current, previous)).toBe(true)
-    expect(isCanvasFrameSource({} as Window, current, previous)).toBe(false)
-    expect(isCanvasFrameSource(null, current, previous)).toBe(false)
+    expect(isCanvasFrameSource(current, current)).toBe(true)
+    expect(isCanvasFrameSource({} as Window, current)).toBe(false)
+    expect(isCanvasFrameSource(null, current)).toBe(false)
   })
 })

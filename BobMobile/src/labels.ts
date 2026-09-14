@@ -25,15 +25,6 @@ export function scheduleStateLabel(state: string, t: Translate): string {
   return state
 }
 
-export function permissionPolicyLabel(policy: string | null | undefined, t: Translate): string {
-  if (!policy) return '—'
-  if (policy === 'always_ask') return t('policyAlwaysAsk')
-  if (policy === 'ask_for_important') return t('policyAskImportant')
-  if (policy === 'ask_for_modifications') return t('policyAskModifications')
-  if (policy === 'never_ask') return t('policyNeverAsk')
-  return policy
-}
-
 export function riskLevelLabel(level: string, t: Translate): string {
   return ({
     low: t('riskLow'), medium: t('riskMedium'), high: t('riskHigh'), critical: t('riskCritical')

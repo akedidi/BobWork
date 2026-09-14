@@ -9,6 +9,11 @@ from integration_mcp_base import e2e_mode, http_json, run_stdio_server, token_fr
 
 TOOLS = [
     {
+        "name": "graph_get_profile",
+        "description": "Get the connected Microsoft 365 account profile and email address.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "graph_search_mail",
         "description": "Search Outlook mail messages via Microsoft Graph.",
         "inputSchema": {
@@ -69,6 +74,16 @@ def handle_call(name: str, arguments: dict) -> dict:
         raise RuntimeError("MICROSOFT_GRAPH_ACCESS_TOKEN is required")
 
     if e2e_mode("MICROSOFT_GRAPH_ACCESS_TOKEN"):
+        if name == "graph_get_profile":
+            return tool_result(
+                {
+                    "displayName": "E2E User",
+                    "mail": "user@contoso.com",
+                    "userPrincipalName": "user@contoso.com",
+                    "id": "user-1",
+                    "mode": "e2e",
+                }
+            )
         if name == "graph_search_mail":
             return tool_result(
                 {
@@ -90,6 +105,21 @@ def handle_call(name: str, arguments: dict) -> dict:
                 }
             )
         raise KeyError(name)
+
+    if name == "graph_get_profile":
+        data = graph_get(
+            token,
+            "/me",
+            {"$select": "displayName,mail,userPrincipalName,id"},
+        )
+        return tool_result(
+            {
+                "displayName": data.get("displayName"),
+                "mail": data.get("mail"),
+                "userPrincipalName": data.get("userPrincipalName"),
+                "id": data.get("id"),
+            }
+        )
 
     if name == "graph_search_mail":
         query = str(arguments.get("query", "")).strip()

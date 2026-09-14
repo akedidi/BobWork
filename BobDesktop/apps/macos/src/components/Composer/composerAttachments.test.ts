@@ -9,6 +9,8 @@ import {
   getFileTypeLabel,
   getFileVisualKind,
   getSuggestedBuiltinPluginId,
+  attachmentsUseDefaultDocumentsPlugin,
+  usesDefaultDocumentsPlugin,
   mergeAttachmentPaths,
   removeComposerMention,
 } from './composerAttachments'
@@ -31,13 +33,20 @@ describe('composerAttachments', () => {
   })
 
   it('deduplicates attachment paths', () => {
-    expect(mergeAttachmentPaths(['/a', '/b'], ['/b', '/c'])).toEqual(['/a', '/b', '/c'])
+    expect(mergeAttachmentPaths(
+      [{ path: '/a', isDirectory: false }, { path: '/b', isDirectory: false }],
+      [{ path: '/b', isDirectory: false }, { path: '/c', isDirectory: true }],
+    )).toEqual([
+      { path: '/a', isDirectory: false },
+      { path: '/b', isDirectory: false },
+      { path: '/c', isDirectory: true },
+    ])
   })
 
   it('returns extension labels for chips', () => {
     expect(getFileExtension('/tmp/report.pdf')).toBe('pdf')
     expect(getFileTypeLabel('/tmp/report.pdf')).toBe('PDF')
-    expect(getFileTypeLabel('/tmp/project', true)).toBe('DOSSIER')
+    expect(getFileTypeLabel('/tmp/project')).toBe('')
     expect(getFileTypeLabel('/tmp/a.PDF')).toBe('PDF')
   })
 
@@ -45,10 +54,18 @@ describe('composerAttachments', () => {
     expect(getSuggestedBuiltinPluginId('/tmp/report.docx')).toBe('builtin-word')
     expect(getSuggestedBuiltinPluginId('/tmp/data.xlsx')).toBe('builtin-excel')
     expect(getSuggestedBuiltinPluginId('/tmp/deck.pptx')).toBe('builtin-powerpoint')
-    expect(getSuggestedBuiltinPluginId('/tmp/notes.pdf')).toBe('builtin-documents')
+    expect(getSuggestedBuiltinPluginId('/tmp/notes.pdf')).toBeNull()
     expect(getSuggestedBuiltinPluginId('/tmp/scan.png')).toBe('builtin-docling')
     expect(getSuggestedBuiltinPluginId('/tmp/image.jpg')).toBe('builtin-docling')
     expect(getSuggestedBuiltinPluginId('/tmp/image.gif')).toBeNull()
+  })
+
+  it('marks document attachments for the default Documents plugin without auto-mention', () => {
+    expect(usesDefaultDocumentsPlugin('/tmp/notes.pdf')).toBe(true)
+    expect(usesDefaultDocumentsPlugin('/tmp/readme.md')).toBe(true)
+    expect(usesDefaultDocumentsPlugin('/tmp/report.docx')).toBe(false)
+    expect(attachmentsUseDefaultDocumentsPlugin(['/tmp/a.txt', '/tmp/b.png'])).toBe(true)
+    expect(attachmentsUseDefaultDocumentsPlugin(['/tmp/report.docx'])).toBe(false)
   })
 
   it('detects active plugin mentions in composer text', () => {

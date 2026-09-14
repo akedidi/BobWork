@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getSettings, peekCachedSettings, updateSettings, checkForUpdates, installAvailableUpdate, type UpdateCheckResult, getNotificationAuthState, isNotificationAuthGranted, requestNotificationAuthorization, openMacosPrivacyPane, listDatabaseBackups, type DatabaseBackup, getChromeControlStatus, getComputerUseStatus, testMcpServer } from '../lib/ipc'
+import { getSettings, peekCachedSettings, updateSettings, checkForUpdates, installAvailableUpdate, type UpdateCheckResult, getAppInfo, getNotificationAuthState, isNotificationAuthGranted, requestNotificationAuthorization, openMacosPrivacyPane, listDatabaseBackups, type DatabaseBackup, getChromeControlStatus, getComputerUseStatus, getOrcaCliStatus, testMcpServer } from '../lib/ipc'
+import { useUpdateStore } from '../stores/updateStore'
 import { useAppStore } from '../stores/appStore'
 import { DEFAULT_APP_SETTINGS } from '../lib/ipc'
-import type { AppSettings, MacosChromeControlStatus, MacosComputerUseStatus, PluginMcpTestResult } from '@bob-work/shared-types'
+import type { AppSettings, MacosChromeControlStatus, MacosComputerUseStatus, OrcaCliStatus, PluginMcpTestResult } from '@bob-work/shared-types'
 import { useT } from '../i18n'
 import { errorMessage } from '../lib/errorMessage'
 import { useLocation } from 'react-router-dom'
@@ -38,9 +39,14 @@ export function useSettingsData() {
   const [computerUseLoading, setComputerUseLoading] = useState(false)
   const [computerUseError, setComputerUseError] = useState<unknown>(null)
   const [computerUseTools, setComputerUseTools] = useState<PluginMcpTestResult | null>(null)
+  const [orcaCliStatus, setOrcaCliStatus] = useState<OrcaCliStatus | null>(null)
+  const [orcaCliLoading, setOrcaCliLoading] = useState(false)
+  const [orcaCliError, setOrcaCliError] = useState<unknown>(null)
   const [chromeTools, setChromeTools] = useState<PluginMcpTestResult | null>(null)
   const [notificationBundleHint, setNotificationBundleHint] = useState('')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
+  const [appName, setAppName] = useState('Bob Work')
   const [updateBusy, setUpdateBusy] = useState(false)
   const [status, setStatus] = useState('')
 
@@ -62,6 +68,7 @@ export function useSettingsData() {
     setUpdateBusy(true)
     try {
       const result = await checkForUpdates()
+      useUpdateStore.getState().applyResult(result)
       setUpdateInfo(result)
       setStatus(result.available
         ? t('settings.updateAvailable', { version: result.version ?? '' })
@@ -111,19 +118,30 @@ export function useSettingsData() {
   }, [])
 
   useEffect(() => {
+    getAppInfo()
+      .then(info => {
+        setAppVersion(info.appVersion)
+        if (info.appName.trim()) setAppName(info.appName.trim())
+      })
+      .catch(() => setAppVersion(null))
+  }, [])
+
+  useEffect(() => {
     getNotificationAuthState()
       .then(state => {
-        setNotificationBundleHint(state === 'unavailable' ? t('settings.notificationsUnavailable') : '')
+        setNotificationBundleHint(state === 'unavailable' ? t('settings.notificationsUnavailable', { appName }) : '')
       })
       .catch(() => setNotificationBundleHint(''))
-  }, [t])
+  }, [t, appName])
 
   useEffect(() => {
     if (tab !== 'extensions') return
     setChromeLoading(true)
     setComputerUseLoading(true)
+    setOrcaCliLoading(true)
     setChromeError(null)
     setComputerUseError(null)
+    setOrcaCliError(null)
     
     getChromeControlStatus()
       .then(status => {
@@ -146,6 +164,17 @@ export function useSettingsData() {
         setComputerUseError(error)
       })
       .finally(() => setComputerUseLoading(false))
+
+    getOrcaCliStatus()
+      .then(status => {
+        setOrcaCliError(null)
+        setOrcaCliStatus(status)
+      })
+      .catch(error => {
+        setOrcaCliStatus(null)
+        setOrcaCliError(error)
+      })
+      .finally(() => setOrcaCliLoading(false))
       
     if (settings?.computerUseEnabled) {
       void testMcpServer('bob-work-computer-use').then(setComputerUseTools).catch(() => setComputerUseTools(null))
@@ -185,6 +214,20 @@ export function useSettingsData() {
     finally { setComputerUseLoading(false) }
   }
 
+  const refreshOrcaCliStatus = async () => {
+    setOrcaCliLoading(true)
+    setOrcaCliError(null)
+    try {
+      setOrcaCliStatus(await getOrcaCliStatus())
+      setOrcaCliError(null)
+    } catch (error) {
+      setOrcaCliStatus(null)
+      setOrcaCliError(error)
+    } finally {
+      setOrcaCliLoading(false)
+    }
+  }
+
   const persistSettings = useCallback(async (nextSettings: AppSettings) => {
     try {
       const toSave = nextSettings
@@ -192,7 +235,7 @@ export function useSettingsData() {
         try {
           let state = await getNotificationAuthState()
           if (state === 'unavailable') {
-            setNotificationBundleHint(t('settings.notificationsUnavailable'))
+            setNotificationBundleHint(t('settings.notificationsUnavailable', { appName }))
           } else if (!isNotificationAuthGranted(state)) {
             state = await requestNotificationAuthorization()
             if (!isNotificationAuthGranted(state) && state === 'denied') {
@@ -200,7 +243,7 @@ export function useSettingsData() {
             }
           }
         } catch {
-          setNotificationBundleHint(t('settings.notificationsUnavailable'))
+          setNotificationBundleHint(t('settings.notificationsUnavailable', { appName }))
         }
       }
       await updateSettings(toSave)
@@ -208,7 +251,7 @@ export function useSettingsData() {
       window.dispatchEvent(new CustomEvent('bob-settings-updated', { detail: toSave }))
       showTransientStatus(t('settings.saved'))
     } catch (error) { setStatus(String(error)) }
-  }, [showTransientStatus, t])
+  }, [showTransientStatus, t, appName])
 
   const enqueueSettingsSave = useCallback((nextSettings: AppSettings) => {
     pendingSavesRef.current.push(nextSettings)
@@ -282,6 +325,8 @@ export function useSettingsData() {
     chromeTools,
     notificationBundleHint,
     updateInfo,
+    appVersion,
+    appName,
     updateBusy,
     status,
     setStatus,
@@ -290,6 +335,10 @@ export function useSettingsData() {
     installUpdate,
     refreshChromeStatus,
     refreshComputerUseStatus,
+    orcaCliStatus,
+    orcaCliLoading,
+    orcaCliError,
+    refreshOrcaCliStatus,
     change
   }
 }

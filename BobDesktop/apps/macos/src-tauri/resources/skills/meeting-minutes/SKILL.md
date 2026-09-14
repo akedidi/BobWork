@@ -1,50 +1,82 @@
 ---
-name: Compte rendu professionnel
-description: "Crée un compte rendu professionnel à partir de notes, d’une conversation ou d’un enregistrement audio joint."
+name: Meeting minutes
+description: "Produce professional meeting minutes from notes, a conversation, or an audio recording — in the user's prompt language."
 icon: meeting
 user-invocable: true
 ---
 
-# Compte rendu professionnel
+# Meeting minutes
 
-Crée un compte rendu directement exploitable, fidèle aux éléments fournis, notamment un enregistrement audio joint. Extrais les informations utiles avant de rédiger et ne présente jamais une hypothèse comme un fait.
+Produce polished, faithful meeting minutes from notes, a transcript, or an attached audio recording. Extract facts before writing. Never present a guess as a fact.
 
-## Règles
+## Language (mandatory)
 
-- Commence par un titre précis, puis va directement au contexte et à la synthèse utile. N’ajoute pas de bloc administratif par défaut.
-- Omet toute information absente. N’écris jamais « Non précisé », « À définir », « inconnu », « noms non précisés », « Participant 1/2 » ni une remarque sur les limites de la source.
-- N’ajoute pas de section « Participants » par défaut. Mentionne une personne uniquement lorsqu’elle est réellement identifiée et que son rôle est utile pour attribuer une décision ou une action.
-- Organise les échanges par sujet et sépare clairement constats, décisions, actions et véritables points ouverts. Ne répète pas la même information dans plusieurs sections.
-- Conserve les désaccords, risques et dépendances qui influencent réellement la suite ; ne transforme pas une métadonnée absente en risque.
-- Transforme chaque engagement explicite en action. Ajoute le responsable ou l’échéance seulement lorsqu’ils sont connus ; sinon, formule simplement l’action sans colonne ni valeur de remplissage.
-- Utilise la langue demandée, ou à défaut celle du contenu source. Adopte un ton factuel, fluide, concis et professionnel.
+- **Write the entire output in the same language as the user's prompt** (the message that invoked this skill), including:
+  - the document title
+  - every section heading
+  - labels, table headers, and bullet text
+- If the prompt is in **English**, the minutes must be **100% English** — do not use French headings such as « Synthèse », « Points clés », « Décisions », or « Actions ».
+- If the prompt is in **French**, the minutes must be **100% French** — do not use English headings such as « Executive summary », « Key discussion points », or « Action items ».
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence, not the source audio language alone.
+- Never mix languages in a single document.
 
-## Format de sortie
+### Heading reference (use the column that matches the prompt language)
 
-# [Titre de la réunion]
+| English | Français | Español |
+|---------|----------|---------|
+| Executive summary | Synthèse | Resumen ejecutivo |
+| Key discussion points | Points clés | Puntos clave |
+| Decisions | Décisions | Decisiones |
+| Action items | Actions | Acciones |
+| Open items | Points à clarifier | Puntos abiertos |
 
-[Un court paragraphe de contexte allant directement à l’objet de la réunion et à son enjeu.]
+## Content rules
 
-## Synthèse
+- Open with a precise title, then a short context paragraph that states the meeting purpose and stakes. Do not add administrative boilerplate by default.
+- Omit any information that is absent. Never write placeholders such as « TBD », « Not specified », « Unknown », « Participant 1/2 », or comments about missing metadata.
+- Do not add a « Participants » section by default. Name someone only when they are clearly identified and their role matters for a decision or action.
+- Group discussion by topic. Separate facts, decisions, actions, and genuinely open questions. Do not repeat the same point across sections.
+- Keep disagreements, risks, and dependencies that affect next steps; do not invent risks from missing metadata.
+- Turn every explicit commitment into an action. Add owner and due date only when known; otherwise state the action alone.
 
-- [résultat, constat ou enjeu essentiel]
+## Output format
 
-## Points clés
+Use this structure. **Translate every heading** to the prompt language using the table above.
 
-### [Sujet utile]
+```markdown
+# [Meeting title]
 
-- [fait ou échange important]
+[Optional one-line metadata only when known, e.g. **Date:** 9 September 2025 · **Format:** Weekly sync]
 
-## Décisions
+## [Executive summary / Synthèse / …]
 
-- [décision actée et son impact utile]
+[2–4 sentences: purpose, main outcomes, and what matters next.]
 
-## Actions
+## [Key discussion points / Points clés / …]
 
-- **[action concrète]** — [responsable et/ou échéance uniquement s’ils sont connus]
+### [Topic]
 
-## Points à clarifier
+- [Important fact, argument, or exchange]
 
-- [question effectivement laissée ouverte pendant la réunion]
+## [Decisions / Décisions / …]
 
-Supprime toute section vide. Un tableau d’actions est possible seulement si chaque colonne contient une information utile pour toutes les lignes ; sinon, préfère les puces. Ne termine pas par une liste de métadonnées manquantes.
+- [Decision made and its practical effect]
+
+## [Action items / Actions / …]
+
+| Action | Owner | Due |
+|--------|-------|-----|
+| [Concrete task] | [Name, if known] | [Date, if known] |
+
+Use the table only when at least one row has useful Owner or Due values; otherwise use bullets:
+
+- **[Action]** — [Owner and/or due date, only if known]
+
+## [Open items / Points à clarifier / …]
+
+- [Question or topic left unresolved in the meeting]
+```
+
+- Remove any empty section.
+- Do not end with a list of missing metadata or source limitations.
+- Keep a factual, concise, professional tone suitable for sharing with stakeholders.

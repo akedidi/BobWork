@@ -230,6 +230,10 @@ export interface CatalogSkill {
   favorite: boolean
   updatedAt?: string
   icon?: string
+  parentSlug?: string | null
+  relativePath?: string
+  nestedCount?: number
+  childSkills?: CatalogSkill[]
 }
 
 export interface Catalog {
@@ -301,6 +305,7 @@ export interface QueuedPrompt {
   dbNames: string[]
   attachments: PromptAttachment[]
   editMessageId?: string
+  taskApproval?: { autoApprovalEnabled: boolean; allowedPermissions: string[] }
 }
 
 export interface Bootstrap {

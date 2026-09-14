@@ -1,5 +1,5 @@
 /** Document / deliverable extensions Bob Work can preview or open. */
-const DELIVERABLE_EXT = 'pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers'
+const DELIVERABLE_EXT = 'tex|bib|epub|odt|rtf|pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers'
 
 /**
  * Matches absolute or ~/ paths ending with a deliverable extension.
@@ -12,10 +12,17 @@ const ABSOLUTE_PATH_RE = new RegExp(
 )
 
 function cleanCandidate(raw: string): string {
-  return raw
-    .replace(/^file:\/\//i, '')
-    .replace(/[),.;:]+$/g, '')
-    .trim()
+  let cleaned = raw.replace(/[),.;:]+$/g, '').trim()
+  // `file:///Users/...` and accidental `///Users/...` (regex matched after `file:`)
+  // must become a real absolute path or the UI existence check drops the preview.
+  if (/^file:/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^file:\/\//i, '')
+    cleaned = cleaned.replace(/^localhost/i, '')
+  }
+  if (/^\/{2,}/.test(cleaned)) {
+    cleaned = cleaned.replace(/^\/+/, '/')
+  }
+  return cleaned
 }
 
 function followsWebUrlScheme(text: string, pathStart: number): boolean {

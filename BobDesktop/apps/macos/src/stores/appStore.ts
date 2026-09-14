@@ -28,6 +28,18 @@ export interface AppNotification {
   read: boolean
 }
 
+export interface UnreadCompletedTask {
+  taskId: string
+  conversationId: string
+}
+
+export function completedTaskUnreadCount(state: Pick<AppState, 'unreadConversationIds' | 'unreadCompletedTasks'>): number {
+  const tasks = state.unreadCompletedTasks ?? []
+  const representedConversations = new Set(tasks.map(item => item.conversationId))
+  return tasks.length
+    + state.unreadConversationIds.filter(id => !representedConversations.has(id)).length
+}
+
 // ── App Store ─────────────────────────────────────────────────
 
 interface AppState {
@@ -52,6 +64,7 @@ interface AppState {
   notificationsOpen: boolean;
   builderSession: BuilderSession | null;
   unreadConversationIds: string[];
+  unreadCompletedTasks: UnreadCompletedTask[];
 
   // UI State
   settings: AppSettings | null;
@@ -100,6 +113,8 @@ interface AppState {
   markNotificationsRead: () => void;
   clearNotifications: () => void;
   markConversationUnread: (id: string) => void;
+  markCompletedTaskUnread: (taskId: string, conversationId: string) => void;
+  markAllCompletedTasksRead: () => void;
   markConversationRead: (id: string) => void;
   setSettings: (settings: AppSettings) => void;
   setLoading: (loading: boolean) => void;
@@ -132,6 +147,7 @@ export const useAppStore = create<AppState>()(
       notificationsOpen: false,
       builderSession: null,
       unreadConversationIds: [],
+      unreadCompletedTasks: [],
       settings: null,
       isLoading: false,
       globalError: null,
@@ -205,8 +221,20 @@ export const useAppStore = create<AppState>()(
       markConversationUnread: (id) => set((s) => ({
         unreadConversationIds: [id, ...s.unreadConversationIds.filter(item => item !== id)].slice(0, 50),
       })),
+      markCompletedTaskUnread: (taskId, conversationId) => set((s) => ({
+        unreadConversationIds: [conversationId, ...s.unreadConversationIds.filter(item => item !== conversationId)].slice(0, 50),
+        unreadCompletedTasks: [
+          { taskId, conversationId },
+          ...(s.unreadCompletedTasks ?? []).filter(item => item.taskId !== taskId),
+        ].slice(0, 100),
+      })),
+      markAllCompletedTasksRead: () => set({
+        unreadConversationIds: [],
+        unreadCompletedTasks: [],
+      }),
       markConversationRead: (id) => set((s) => ({
         unreadConversationIds: s.unreadConversationIds.filter(item => item !== id),
+        unreadCompletedTasks: (s.unreadCompletedTasks ?? []).filter(item => item.conversationId !== id),
       })),
       setSettings: (settings) => set({ settings }),
       setLoading: (isLoading) => set({ isLoading }),
@@ -238,6 +266,7 @@ export const useAppStore = create<AppState>()(
         inspectorWidth: state.inspectorWidth,
         activeMode: state.activeMode,
         unreadConversationIds: state.unreadConversationIds,
+        unreadCompletedTasks: state.unreadCompletedTasks,
         notifications: state.notifications,
       }),
     }

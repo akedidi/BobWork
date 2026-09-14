@@ -1,44 +1,52 @@
 ---
 name: retrospective
-description: "Améliorer qualité et efficacité par une expérimentation d’équipe sûre."
+description: "Improve quality and efficiency through safe team experimentation."
 icon: delivery
 ---
 
 # retrospective
 
-Utiliser ce skill pour améliorer qualité et efficacité par une expérimentation d’équipe sûre.
+Use this skill to improve quality and efficiency through safe team experimentation.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- Expected goal or decision;
+- Scope, audience, deadline, and constraints;
+- Available sources, assumptions, and confidence level;
+- Output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Créer sécurité et rappeler le cadre de collaboration.
-2. Collecter données, patterns et perspectives diverses.
-3. Choisir une cause contrôlable à traiter.
-4. Définir une petite expérience avec propriétaire, mesure et date de revue.
+1. Create safety and recall the collaboration framework.
+2. Collect data, patterns, and diverse perspectives.
+3. Choose a controllable cause to address.
+4. Define a small experiment with owner, measure, and review date.
 
-## Livrable
+## Deliverable
 
-Synthèse anonymisée et une à trois expériences d’amélioration.
+Anonymized summary and one to three improvement experiments.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Pas de blâme individuel.
-- Les actions sont petites et mesurables.
-- Les actions précédentes sont revues.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- No individual blame.
+- Actions are small and measurable.
+- Previous actions are reviewed.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, a client reference, a compliance claim, or an approval.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points only — do not reproduce their protected materials.

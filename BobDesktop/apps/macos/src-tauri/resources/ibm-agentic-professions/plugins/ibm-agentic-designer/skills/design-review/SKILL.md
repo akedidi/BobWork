@@ -1,44 +1,50 @@
 ---
 name: design-review
-description: "Conduire une revue de conception factuelle avant construction ou release."
+description: "Conduct a factual design review before build or release."
 icon: designer
 ---
 
 # design-review
 
-Utiliser ce skill pour conduire une revue de conception factuelle avant construction ou release.
+Use this skill to conduct a factual design review before build or release.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Fixer périmètre, scénario, critères et maturité attendue.
-2. Rejouer les parcours critiques et les cas limites.
-3. Contrôler cohérence, contenu, accessibilité, faisabilité et mesure.
-4. Classer les constats par sévérité, preuve, responsable et échéance.
+1. Set scope, scenario, criteria, and expected maturity.
+2. Replay critical journeys and edge cases.
+3. Check consistency, content, accessibility, feasibility, and measurement.
+4. Classify findings by severity, evidence, owner, and deadline.
 
-## Livrable
+## Deliverable
 
-Rapport de revue avec verdict, anomalies priorisées et actions.
+Review report with verdict, prioritized anomalies, and actions.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Chaque constat est reproductible.
-- Bloquants distingués des améliorations.
-- La décision go, go sous conditions ou no-go est explicite.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Each finding is reproducible.
+- Blockers are distinguished from improvements.
+- The go, conditional go, or no-go decision is explicit.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
