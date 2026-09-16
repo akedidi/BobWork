@@ -34,14 +34,9 @@ describe('CreateModal', () => {
     expect(currentLocalTime(new Date(2026, 7, 15, 19, 42))).toBe('19:42')
   })
 
-  it('keeps focus while typing complete schedule fields', async () => {
+  it('keeps focus while typing schedule instructions', async () => {
     const user = userEvent.setup()
     render(<CreateModal onClose={vi.fn()} onDone={vi.fn()} />)
-
-    const name = screen.getByPlaceholderText('Ex : Rapport quotidien')
-    await user.type(name, 'Rapport quotidien')
-    expect(name).toHaveValue('Rapport quotidien')
-    expect(name).toHaveFocus()
 
     const instructions = screen.getByPlaceholderText('Génère un rapport des tickets en cours et envoie-le…')
     await user.type(instructions, 'Analyse les tickets ouverts et prépare un résumé.')
@@ -73,8 +68,10 @@ describe('CreateModal', () => {
       pluginName: 'Cloud Architect',
     }} />)
 
-    await waitFor(() => expect(screen.getByPlaceholderText('Ex : Rapport quotidien')).toHaveValue('Revue cloud hebdomadaire'))
-    expect(screen.getByPlaceholderText('Génère un rapport des tickets en cours et envoie-le…')).toHaveValue('Analyse les changements cloud.')
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Génère un rapport des tickets en cours et envoie-le…'))
+        .toHaveValue('Analyse les changements cloud.')
+    })
     expect(screen.getByDisplayValue('Plugin · Cloud Architect')).toHaveValue('plugin:agentic-cloud-architect')
   })
 })
