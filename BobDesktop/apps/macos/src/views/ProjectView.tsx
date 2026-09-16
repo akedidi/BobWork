@@ -11,6 +11,7 @@ import { useT } from '../i18n'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import { errorMessage } from '../lib/errorMessage'
 import { useAppDialog } from '../components/AppDialog'
+import { useTransientStatus } from '../hooks/useTransientStatus'
 
 type Form = {
   name: string; description: string; objective: string; localPath: string; customInstructions: string;
@@ -33,7 +34,7 @@ export default function ProjectView() {
   const [editing, setEditing] = useState(isNew)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useTransientStatus(3000)
   const [loadError, setLoadError] = useState<unknown>(null)
 
   useEffect(() => {

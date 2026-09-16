@@ -81,43 +81,84 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} Go`
 }
 
-const EXTENSION_TO_BUILTIN_PLUGIN: Record<string, string> = {
-  doc: 'builtin-word',
-  docx: 'builtin-word',
-  xls: 'builtin-excel',
-  xlsx: 'builtin-excel',
-  xlsm: 'builtin-excel',
-  csv: 'builtin-excel',
-  tsv: 'builtin-excel',
-  ppt: 'builtin-powerpoint',
-  pptx: 'builtin-powerpoint',
-  png: 'builtin-docling',
-  jpg: 'builtin-docling',
-  jpeg: 'builtin-docling',
-  tiff: 'builtin-docling',
-  tif: 'builtin-docling',
-  webp: 'builtin-docling',
-  bmp: 'builtin-docling',
-  one: 'builtin-onenote',
-  onetoc2: 'builtin-onenote',
+export type ClipboardLike = {
+  files?: ArrayLike<Blob & { name?: string; path?: string; type: string }> | null
+  items?: ArrayLike<{ type: string; getAsFile: () => (Blob & { path?: string; type: string }) | null }> | null
+  types?: ArrayLike<string> | null
 }
 
-/** Document types handled by the built-in Documents plugin without an explicit @plugin mention. */
-const DEFAULT_DOCUMENTS_PLUGIN_EXTENSIONS = new Set([
-  'pdf', 'rtf', 'odt', 'md', 'markdown', 'txt',
-])
-
-export function getSuggestedBuiltinPluginId(path: string): string | null {
-  const ext = getFileExtension(path)
-  return EXTENSION_TO_BUILTIN_PLUGIN[ext] ?? null
+function iterateClipboardFiles(data: ClipboardLike | null | undefined) {
+  return Array.from(data?.files ?? [])
 }
 
-export function usesDefaultDocumentsPlugin(path: string): boolean {
-  return DEFAULT_DOCUMENTS_PLUGIN_EXTENSIONS.has(getFileExtension(path))
+function iterateClipboardItems(data: ClipboardLike | null | undefined) {
+  return Array.from(data?.items ?? [])
 }
 
-export function attachmentsUseDefaultDocumentsPlugin(paths: readonly string[]): boolean {
-  return paths.some(usesDefaultDocumentsPlugin)
+/** True when paste should be treated as attachments (not plain text). */
+export function clipboardLooksLikeAttachments(data: ClipboardLike | null | undefined): boolean {
+  const files = iterateClipboardFiles(data)
+  const items = iterateClipboardItems(data)
+  const types = Array.from(data?.types ?? [])
+  const hasImage = items.some(item => item.type.startsWith('image/'))
+    || files.some(file => file.type.startsWith('image/'))
+  const hasPathFiles = files.some(file => Boolean(file.path))
+  const hasFilesType = types.includes('Files')
+    || types.some(type => /file-?url|uri-list/i.test(type))
+  return hasImage || hasPathFiles || hasFilesType
+}
+
+/**
+ * Resolve absolute attachment paths from a paste event / OS pasteboard.
+ * Finder file copies come from `readClipboardPaths`; screenshot bitmaps are written via `writeImage`.
+ */
+export async function collectPasteAttachmentPaths(
+  clipboardData: ClipboardLike | null | undefined,
+  options: {
+    readClipboardPaths: () => Promise<string[]>
+    writeImage: (bytes: number[], mime: string) => Promise<string>
+  },
+): Promise<string[]> {
+  const paths: string[] = []
+  const imageWrites: Promise<string | null>[] = []
+
+  const queueImageBlob = (blob: Blob & { type: string }, mimeHint?: string) => {
+    imageWrites.push((async () => {
+      try {
+        const buffer = new Uint8Array(await blob.arrayBuffer())
+        return await options.writeImage(Array.from(buffer), mimeHint || blob.type || 'image/png')
+      } catch {
+        return null
+      }
+    })())
+  }
+
+  for (const file of iterateClipboardFiles(clipboardData)) {
+    if (file.path) {
+      paths.push(file.path)
+      continue
+    }
+    if (file.type.startsWith('image/')) queueImageBlob(file, file.type)
+  }
+
+  for (const item of iterateClipboardItems(clipboardData)) {
+    if (!item.type.startsWith('image/')) continue
+    const blob = item.getAsFile()
+    if (!blob || blob.path) continue
+    queueImageBlob(blob, item.type || blob.type)
+  }
+
+  for (const path of await Promise.all(imageWrites)) {
+    if (path) paths.push(path)
+  }
+
+  try {
+    paths.push(...await options.readClipboardPaths())
+  } catch {
+    // Pasteboard read is best-effort.
+  }
+
+  return Array.from(new Set(paths.filter(Boolean)))
 }
 
 export interface ComposerMentionCatalog {

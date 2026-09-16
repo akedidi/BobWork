@@ -1,7 +1,7 @@
 {
   "name": "macos",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "scripts": {
     "dev": "pnpm build:embedded-plugins && pnpm build:pdf-runtime && vite",
@@ -39,7 +39,8 @@
     "smoke:bob": "bash scripts/smoke-bob-shell.sh",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
-    "verify": "pnpm typecheck && pnpm test:coverage && pnpm build",
+    "verify:updater": "node scripts/verify-updater-config.mjs",
+    "verify": "pnpm verify:updater && pnpm typecheck && pnpm test:coverage && pnpm build",
     "build:pdf-runtime": "node scripts/build-pdf-runtime.mjs"
   },
   "dependencies": {

@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { save as chooseSavePath } from '@tauri-apps/plugin-dialog';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
-import { exportPluginZip, comparePluginVersion, getPluginExtensionStatus, getPluginMcpStatus, getPluginResourceStatus, getPluginVersions, getSkills, installPluginUpdate, testPluginMcp } from '../../lib/ipc';
+import { exportPluginZip, getPluginExtensionStatus, getPluginMcpStatus, getPluginResourceStatus, getSkills, testPluginMcp } from '../../lib/ipc';
 import { errorMessage } from '../../lib/errorMessage';
 import { useAppStore } from '../../stores/appStore';
-import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, PluginVersion, PluginVersionDiff, WorkspaceSkill } from '@bob-work/shared-types';
+import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, WorkspaceSkill } from '@bob-work/shared-types';
 import { metadataOf, isEnabled, isProtectedBuiltin, pluginKindLabel, permissionLabel, friendlyCapabilities, pluginSkillsOf, catalogSlugForPluginSkill, PluginMetadata } from '../../lib/pluginUtils';
 import { localizePluginResourceMessage, localizePluginResourceSetupHint } from '../../lib/pluginResourceMessages';
 import { useAppDialog } from '../AppDialog';
@@ -19,7 +19,7 @@ import { isBuiltinPlugin } from '../../lib/builtinCatalog';
 
 type OpenIntegrationsOpts = { tab?: string; highlight?: string; provider?: string };
 
-export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, onToggle, onEdit, onDelete, onStatus, onOpenIntegrations, onUseSchedule, onVersionChanged }: {
+export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, onToggle, onEdit, onDelete, onStatus, onOpenIntegrations, onUseSchedule }: {
   plugin: Plugin
   mcpRevision: number
   toggling: boolean
@@ -30,7 +30,6 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
   onStatus: (message: string) => void
   onOpenIntegrations: (opts?: OpenIntegrationsOpts) => void
   onUseSchedule: (template: PluginScheduleTemplate) => void
-  onVersionChanged: (message: string, expectedVersion?: string) => Promise<void>
 }) {
   const navigate = useNavigate()
   const t = useT()
@@ -138,7 +137,7 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
     {manifest.mcpServers && <PluginMcpSection key={`${plugin.id}-${plugin.installState}-${mcpRevision}`} plugin={plugin} onOpenIntegrations={onOpenIntegrations} />}
     {(Boolean(manifest.integrations?.length) || Boolean(manifest.browserExtensions?.length) || Boolean(manifest.hooks?.length) || Boolean(manifest.scheduledTaskTemplates?.length)) && <PluginExtensionsSection key={`extensions-${plugin.id}-${plugin.installState}-${mcpRevision}`} plugin={plugin} onOpenIntegrations={onOpenIntegrations} onUseSchedule={onUseSchedule} />}
     <section className="skill-detail-section"><h3>Autorisations</h3>{permissions.length ? <ul className="plugin-friendly-list">{permissions.map((value: any) => <li key={value}>{value}</li>)}</ul> : <p>Aucune autorisation supplémentaire.</p>}</section>
-    <PluginVersionsSection plugin={plugin} onVersionChanged={onVersionChanged} />
+    <PluginCurrentVersionSection plugin={plugin} />
     <ManifestReadOnlySection plugin={plugin} />
     {manifest.requiresIntegration && <section className="skill-detail-section"><h3>Connexion</h3><p>Ce plugin nécessite un compte ou un service connecté.</p><button className="link-btn" onClick={() => onOpenIntegrations({ tab: 'integrations' })}>Gérer les connexions</button></section>}
   </aside>
@@ -241,59 +240,13 @@ function PluginSkillsSection({ plugin, manifest }: { plugin: Plugin; manifest: P
   )
 }
 
-function PluginVersionsSection({ plugin, onVersionChanged }: { plugin: Plugin; onVersionChanged: (message: string, expectedVersion?: string) => Promise<void> }) {
-  const [versions, setVersions] = useState<PluginVersion[]>([])
-  const [diff, setDiff] = useState<PluginVersionDiff | null>(null)
-  const [busyVersion, setBusyVersion] = useState<string | null>(null)
-  const [error, setError] = useState('')
-
-  const loadVersions = async () => setVersions(await getPluginVersions(plugin.id))
-  useEffect(() => {
-    setDiff(null)
-    setError('')
-    void loadVersions().catch(error => setError(errorMessage(error)))
-  }, [plugin.id, plugin.version, plugin.availableVersion])
-
-  const inspect = async (version: string) => {
-    setError('')
-    try { setDiff(await comparePluginVersion(plugin.id, version)) } catch (error) { setError(errorMessage(error)) }
-  }
-  const installUpdate = async (version: string) => {
-    setBusyVersion(version)
-    setError('')
-    try {
-      const updated = await installPluginUpdate(plugin.id, version)
-      if (updated.version !== version) {
-        throw new Error(`${plugin.name} est resté en version ${updated.version} (cible ${version} non appliquée).`)
-      }
-      await onVersionChanged(`${plugin.name} a été mis à jour vers la version ${version}.`, version)
-      setDiff(null)
-      await loadVersions()
-    } catch (error) {
-      const message = errorMessage(error)
-      setError(message)
-      await onVersionChanged(`Mise à jour impossible : ${message}`)
-    } finally { setBusyVersion(null) }
-  }
-
-  const available = versions.find(version => version.state === 'available')
-  return <section className="skill-detail-section plugin-versions" aria-label="Versions du plugin">
+function PluginCurrentVersionSection({ plugin }: { plugin: Plugin }) {
+  return <section className="skill-detail-section plugin-versions" aria-label="Version du plugin">
     <h3>Version</h3>
-    <p className="settings-note">Bob Work ne conserve qu’une version active. Les mises à jour remplacent la version précédente — aucune restauration n’est proposée.</p>
     <div className="plugin-version-row">
       <div><strong>Version {plugin.version}</strong><small>Version utilisée actuellement</small></div>
       <span className="plugin-current-version">Actuelle</span>
     </div>
-    {available && <div className="plugin-update-card">
-      <div><strong>Version {available.version} disponible</strong><small>{available.releaseNotes || 'Une nouvelle version locale a été détectée.'}</small></div>
-      <div className="plugin-version-actions"><button type="button" className="link-btn" onClick={() => void inspect(available.version)}>Voir les changements</button><button type="button" className="btn-primary compact" disabled={busyVersion === available.version} onClick={() => void installUpdate(available.version)}>{busyVersion === available.version ? 'Installation…' : 'Mettre à jour'}</button></div>
-    </div>}
-    {diff && <div className="plugin-version-diff" aria-label={`Changements de la version ${diff.toVersion}`}>
-      <strong>{diff.fromVersion} → {diff.toVersion}</strong>
-      <ul>{diff.changes.map(change => <li key={change}>{change}</li>)}</ul>
-      {diff.warnings.map(warning => <p className="plugin-version-warning" key={warning}>{warning}</p>)}
-    </div>}
-    {error && <p className="plugin-version-warning" role="alert">{error}</p>}
   </section>
 }
 

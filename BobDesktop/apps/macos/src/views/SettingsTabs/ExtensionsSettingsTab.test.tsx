@@ -7,12 +7,14 @@ import ExtensionsSettingsTab from './ExtensionsSettingsTab'
 
 const mocks = vi.hoisted(() => ({
   openMacosPrivacyPane: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
+  requestChromeAutomationPermission: vi.fn(),
 }))
 
 vi.mock('../../lib/ipc', () => ({
   openMacosPrivacyPane: mocks.openMacosPrivacyPane,
-  requestChromeAutomationPermission: vi.fn(),
-  requestAccessibilityPermission: vi.fn(),
+  requestChromeAutomationPermission: mocks.requestChromeAutomationPermission,
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   importConversations: vi.fn(),
   exportConversations: vi.fn(),
   openDataDir: vi.fn(),
@@ -84,20 +86,73 @@ function renderChromeTab(overrides: Record<string, unknown> = {}) {
   return { setStatus, showTransientStatus, refreshChromeStatus }
 }
 
+function renderComputerUseTab(overrides: Record<string, unknown> = {}) {
+  const setStatus = vi.fn()
+  const showTransientStatus = vi.fn()
+  const refreshComputerUseStatus = vi.fn().mockResolvedValue(undefined)
+  render(
+    <AppDialogProvider>
+      <ExtensionsSettingsTab
+        t={t}
+        settings={{ ...settings, chromeControlEnabled: false, computerUseEnabled: true }}
+        settingsError={null}
+        change={vi.fn()}
+        chromeStatus={null}
+        chromeLoading={false}
+        chromeError={null}
+        chromeTools={null}
+        refreshChromeStatus={vi.fn()}
+        computerUseStatus={{
+          mcpConfigured: true,
+          mcpEnabled: true,
+          accessibility: 'denied',
+          accessibilityMessage: 'Autorisez Bob Work dans Accessibilité.',
+        }}
+        computerUseLoading={false}
+        computerUseError={null}
+        computerUseTools={null}
+        refreshComputerUseStatus={refreshComputerUseStatus}
+        orcaCliStatus={null}
+        orcaCliLoading={false}
+        orcaCliError={null}
+        refreshOrcaCliStatus={vi.fn()}
+        setStatus={setStatus}
+        showTransientStatus={showTransientStatus}
+        appName="Bob Work"
+        {...overrides}
+      />
+    </AppDialogProvider>,
+  )
+  return { setStatus, showTransientStatus, refreshComputerUseStatus }
+}
+
 describe('ExtensionsSettingsTab Chrome automation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.openMacosPrivacyPane.mockResolvedValue(undefined)
   })
 
-  it('shows automation status and points requests to Permissions settings', () => {
+  it('shows request and System Settings actions when Automation is denied', () => {
     renderChromeTab()
 
-    expect(screen.queryByRole('button', { name: 'Demander Automatisation Chrome' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Ouvrir Automatisation (pour Chrome)' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: t('settings.requestAutomation') })).toBeVisible()
+    expect(screen.getByRole('button', { name: t('settings.openAutomationForChrome') })).toBeVisible()
     expect(screen.getByRole('button', { name: t('settings.recheck') })).toBeVisible()
-    expect(screen.getByText(t('settings.managePermissionsInSettings'))).toBeVisible()
-    expect(screen.queryByText(/macOS n’affiche une app qu’après/)).not.toBeInTheDocument()
+    expect(screen.queryByText(t('settings.managePermissionsInSettings'))).not.toBeInTheDocument()
+  })
+
+  it('requests Chrome automation, refreshes status, and opens System Settings when denied', async () => {
+    mocks.requestChromeAutomationPermission.mockRejectedValue(new Error('denied'))
+    const { refreshChromeStatus, showTransientStatus } = renderChromeTab()
+
+    fireEvent.click(screen.getByRole('button', { name: t('settings.requestAutomation') }))
+
+    await waitFor(() => {
+      expect(mocks.requestChromeAutomationPermission).toHaveBeenCalledTimes(1)
+      expect(refreshChromeStatus).toHaveBeenCalledTimes(1)
+      expect(mocks.openMacosPrivacyPane).toHaveBeenCalledWith('automation')
+    })
+    expect(showTransientStatus).toHaveBeenCalledWith(t('settings.automationDenied', { appName: 'Bob Work-test' }))
   })
 
   it('rechecks Chrome automation from Access & control without requesting it there', async () => {
@@ -109,5 +164,34 @@ describe('ExtensionsSettingsTab Chrome automation', () => {
       expect(refreshChromeStatus).toHaveBeenCalled()
     })
     expect(showTransientStatus).not.toHaveBeenCalled()
+    expect(mocks.requestChromeAutomationPermission).not.toHaveBeenCalled()
+  })
+})
+
+describe('ExtensionsSettingsTab macOS Accessibility', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.openMacosPrivacyPane.mockResolvedValue(undefined)
+  })
+
+  it('shows request and System Settings actions when Accessibility is denied', () => {
+    renderComputerUseTab()
+
+    expect(screen.getByRole('button', { name: t('settings.requestAccessibility') })).toBeVisible()
+    expect(screen.getByRole('button', { name: t('settings.openAccessibilityForComputerUse') })).toBeVisible()
+  })
+
+  it('requests Accessibility, refreshes status, and opens System Settings when still denied', async () => {
+    mocks.requestAccessibilityPermission.mockResolvedValue(false)
+    const { refreshComputerUseStatus, showTransientStatus } = renderComputerUseTab()
+
+    fireEvent.click(screen.getByRole('button', { name: t('settings.requestAccessibility') }))
+
+    await waitFor(() => {
+      expect(mocks.requestAccessibilityPermission).toHaveBeenCalledTimes(1)
+      expect(refreshComputerUseStatus).toHaveBeenCalledTimes(1)
+      expect(mocks.openMacosPrivacyPane).toHaveBeenCalledWith('accessibility')
+    })
+    expect(showTransientStatus).toHaveBeenCalledWith(t('settings.accessibilityPrompted', { appName: 'Bob Work' }))
   })
 })

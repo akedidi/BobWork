@@ -17,6 +17,8 @@ interface Props {
   onRemove: () => void
 }
 
+const THUMB_SIZE = 56
+
 export default function AttachmentPreview({ path, isDirectory = false, onRemove }: Props) {
   const t = useT()
   const [isDir, setIsDir] = useState(isDirectory)
@@ -25,6 +27,7 @@ export default function AttachmentPreview({ path, isDirectory = false, onRemove 
 
   useEffect(() => {
     setIsDir(isDirectory)
+    setPreviewFailed(false)
   }, [path, isDirectory])
 
   useEffect(() => {
@@ -45,11 +48,16 @@ export default function AttachmentPreview({ path, isDirectory = false, onRemove 
   const kind = getFileVisualKind(path, isDir)
   const isImage = kind === 'image' && !previewFailed
   const extLabel = getFileTypeLabel(path) || t('composer.file').toUpperCase()
+  const sizeLabel = isDir
+    ? t('composer.folder')
+    : size != null
+      ? formatFileSize(size)
+      : null
 
   return (
     <div
-      className={`composer-attachment composer-attachment--${kind}`}
-      title={path}
+      className={`composer-attachment composer-attachment--${kind}${isImage ? ' composer-attachment--thumb' : ' composer-attachment--chip'}`}
+      title={sizeLabel ? `${name} (${sizeLabel})` : name}
       data-testid="composer-attachment"
     >
       {isImage ? (
@@ -57,28 +65,24 @@ export default function AttachmentPreview({ path, isDirectory = false, onRemove 
           <img
             src={convertFileSrc(path)}
             alt={name}
-            width={48}
-            height={48}
+            width={THUMB_SIZE}
+            height={THUMB_SIZE}
             draggable={false}
             onError={() => setPreviewFailed(true)}
           />
         </div>
-      ) : isDir ? (
-        <div className="composer-attachment-file">
-          <span className="composer-attachment-icon" aria-hidden="true">
-            <Folder size={18} strokeWidth={1.75} />
-          </span>
-          <div className="composer-attachment-meta">
-            <span className="composer-attachment-name">{name}</span>
-            <span className="composer-attachment-size">{t('composer.folder')}</span>
-          </div>
-        </div>
       ) : (
         <div className="composer-attachment-file">
-          <span className="composer-attachment-ext">{extLabel}</span>
+          {isDir ? (
+            <span className="composer-attachment-icon" aria-hidden="true">
+              <Folder size={14} strokeWidth={1.75} />
+            </span>
+          ) : (
+            <span className="composer-attachment-ext">{extLabel}</span>
+          )}
           <div className="composer-attachment-meta">
             <span className="composer-attachment-name">{name}</span>
-            {size != null && <span className="composer-attachment-size">{formatFileSize(size)}</span>}
+            {sizeLabel && <span className="composer-attachment-size">{sizeLabel}</span>}
           </div>
         </div>
       )}
@@ -92,7 +96,7 @@ export default function AttachmentPreview({ path, isDirectory = false, onRemove 
           onRemove()
         }}
       >
-        <X size={12} strokeWidth={2.5} />
+        <X size={11} strokeWidth={2.5} />
       </button>
     </div>
   )

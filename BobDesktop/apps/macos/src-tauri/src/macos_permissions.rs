@@ -299,11 +299,16 @@ end tell"#;
 
 /// Sends an Apple Event from this process → Google Chrome so Automation lists
 /// the running app (Bob Work or Bob Work-test), never osascript / python3.
-pub fn request_chrome_automation() -> Result<(), String> {
-    // Register/prompt via the Automation API first so System Settings lists this
-    // bundle (Bob Work-test must not be conflated with release Bob Work).
-    request_chrome_automation_consent(true)?;
+///
+/// `ask_user` must be `true` only from an explicit UI action ("Request Automation").
+/// Status checks / Recheck must pass `false` so opening Settings never pops TCC.
+pub fn check_chrome_automation(ask_user: bool) -> Result<(), String> {
+    request_chrome_automation_consent(ask_user)?;
     run_applescript(CHROME_AUTOMATION_SCRIPT).map(|_| ())
+}
+
+pub fn request_chrome_automation() -> Result<(), String> {
+    check_chrome_automation(true)
 }
 
 pub fn probe_chrome_automation_in_process() -> (String, String) {
@@ -317,7 +322,7 @@ pub fn probe_chrome_automation_in_process_for_app(app_name: &str) -> (String, St
             "Installez Google Chrome pour utiliser le contrôle navigateur.".into(),
         );
     }
-    classify_chrome_automation(app_name, request_chrome_automation())
+    classify_chrome_automation(app_name, check_chrome_automation(false))
 }
 
 pub fn classify_chrome_automation(app_name: &str, result: Result<(), String>) -> (String, String) {
@@ -336,6 +341,14 @@ pub fn classify_chrome_automation(app_name: &str, result: Result<(), String>) ->
                 || lower.contains("not allowed")
             {
                 ("denied".into(), automation_denied_message(app_name))
+            } else if lower.contains("would require user consent") || lower.contains("(-1744)") {
+                (
+                    "unknown".into(),
+                    format!(
+                        "Automatisation non encore demandée pour {app_name} → Google Chrome. \
+Cliquez « Demander Automatisation » pour afficher l’invite macOS."
+                    ),
+                )
             } else {
                 (
                     "unknown".into(),
@@ -352,7 +365,7 @@ pub fn automation_denied_message(app_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::automation_denied_message;
+    use super::{automation_denied_message, classify_chrome_automation};
 
     #[test]
     fn automation_denied_message_stays_short() {
@@ -360,6 +373,25 @@ mod tests {
         assert!(message.contains("Bob Work-test"));
         assert!(!message.contains("Demander Automatisation"));
         assert!(message.len() < 160);
+    }
+
+    #[test]
+    fn classify_silent_consent_needed_as_unknown_not_denied() {
+        let (state, message) = classify_chrome_automation(
+            "Bob Work",
+            Err("Automation would require user consent for Google Chrome (-1744)".into()),
+        );
+        assert_eq!(state, "unknown");
+        assert!(message.contains("Demander Automatisation"));
+    }
+
+    #[test]
+    fn classify_not_authorized_as_denied() {
+        let (state, _) = classify_chrome_automation(
+            "Bob Work",
+            Err("not authorized to send Apple events to Google Chrome (-1743)".into()),
+        );
+        assert_eq!(state, "denied");
     }
 }
 

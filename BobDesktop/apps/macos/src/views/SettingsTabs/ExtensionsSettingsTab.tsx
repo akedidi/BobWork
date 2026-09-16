@@ -1,10 +1,9 @@
 
-
 import { Suspense, lazy } from 'react'
 import { open as openUrl } from '@tauri-apps/plugin-shell'
 import { open as chooseFile, save as chooseSavePath } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { importConversations, exportConversations, openDataDir, exportDiagnostics, purgeAppCache, createDatabaseBackup, restoreDatabaseBackup, requestNotificationAuthorization, openMacosPrivacyPane, requestVoiceDictationPermission, requestMicrophonePermission } from '../../lib/ipc'
+import { importConversations, exportConversations, openDataDir, exportDiagnostics, purgeAppCache, createDatabaseBackup, restoreDatabaseBackup, requestNotificationAuthorization, openMacosPrivacyPane, requestVoiceDictationPermission, requestMicrophonePermission, requestChromeAutomationPermission, requestAccessibilityPermission } from '../../lib/ipc'
 import { useT } from '../../i18n'
 import { UsageMeter } from '../../components/UsageMeter/UsageMeter'
 import { LoadErrorBanner } from '../../components/LoadErrorBanner'
@@ -21,6 +20,40 @@ export default function ExtensionsSettingsTab(props: any) {
   const dialog = useAppDialog()
   const loadingLabel = t('common.loading')
   const app = appName || 'Bob Work'
+
+  const requestComputerUseAccessibility = () => {
+    void (async () => {
+      try {
+        const trusted = await requestAccessibilityPermission()
+        showTransientStatus(
+          trusted
+            ? t('settings.accessibilityGranted', { appName: app })
+            : t('settings.accessibilityPrompted', { appName: app }),
+        )
+        await refreshComputerUseStatus()
+        if (!trusted) {
+          await openMacosPrivacyPane('accessibility')
+        }
+      } catch (error) {
+        setStatus(errorMessage(error))
+      }
+    })()
+  }
+
+  const requestChromeAutomation = () => {
+    void (async () => {
+      const chromeAppName = chromeStatus?.appName || app
+      try {
+        await requestChromeAutomationPermission()
+        showTransientStatus(t('settings.automationGranted', { appName: chromeAppName }))
+        await refreshChromeStatus()
+      } catch {
+        showTransientStatus(t('settings.automationDenied', { appName: chromeAppName }))
+        void openMacosPrivacyPane('automation').catch(() => undefined)
+        await refreshChromeStatus()
+      }
+    })()
+  }
 
   return (
     <>
@@ -94,9 +127,16 @@ export default function ExtensionsSettingsTab(props: any) {
               ok={Boolean(computerUseTools?.ok)}
             />
             <p className="settings-note">{computerUseStatus.accessibilityMessage}</p>
-            <p className="settings-note">{t('settings.managePermissionsInSettings')}</p>
             <div className="settings-actions">
+              {computerUseStatus.accessibility !== 'granted' && (
+                <button type="button" className="secondary-btn" onClick={requestComputerUseAccessibility}>
+                  {t('settings.requestAccessibility')}
+                </button>
+              )}
               <button className="secondary-btn" onClick={() => void refreshComputerUseStatus()}>{t('settings.recheck')}</button>
+              <button type="button" className="secondary-btn" onClick={() => void openMacosPrivacyPane('accessibility').catch(error => setStatus(errorMessage(error)))}>
+                {t('settings.openAccessibilityForComputerUse')}
+              </button>
             </div>
           </Card>}
           {orcaCliLoading && !orcaCliStatus && !orcaCliError && (
@@ -168,9 +208,16 @@ export default function ExtensionsSettingsTab(props: any) {
             {chromeStatus.automation !== 'denied' && chromeStatus.automationMessage ? (
               <p className="settings-note">{chromeStatus.automationMessage}</p>
             ) : null}
-            <p className="settings-note">{t('settings.managePermissionsInSettings')}</p>
             <div className="settings-actions">
+              {chromeStatus.automation !== 'granted' && (
+                <button type="button" className="secondary-btn" onClick={requestChromeAutomation}>
+                  {t('settings.requestAutomation')}
+                </button>
+              )}
               <button className="secondary-btn" onClick={() => void refreshChromeStatus()}>{t('settings.recheck')}</button>
+              <button type="button" className="secondary-btn" onClick={() => void openMacosPrivacyPane('automation').catch(error => setStatus(errorMessage(error)))}>
+                {t('settings.openAutomationForChrome')}
+              </button>
             </div>
           </Card>}
     </>

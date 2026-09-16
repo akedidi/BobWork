@@ -231,6 +231,44 @@ pub async fn install_bob_shell() -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[tauri::command]
+pub async fn uninstall_bob_shell() -> Result<bool, AppError> {
+    let prefix = dirs::home_dir()
+        .ok_or_else(|| AppError::Io("Dossier utilisateur introuvable".into()))?
+        .join(".local");
+    let uninstall = std::process::Command::new("npm")
+        .args([
+            "uninstall",
+            "-g",
+            "--prefix",
+        ])
+        .arg(&prefix)
+        .arg("bobshell")
+        .output()
+        .map_err(|e| {
+            AppError::BobExecutionFailed(format!("Désinstallation npm impossible : {}", e))
+        })?;
+    if !uninstall.status.success() {
+        let stderr = String::from_utf8_lossy(&uninstall.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&uninstall.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "npm uninstall a échoué".into()
+        };
+        return Err(AppError::BobExecutionFailed(detail));
+    }
+    // Best-effort cleanup if npm left a shim behind.
+    if let Some(bin) = dirs::home_dir().map(|home| home.join(".local").join("bin").join("bob")) {
+        if bin.is_file() {
+            let _ = std::fs::remove_file(bin);
+        }
+    }
+    Ok(true)
+}
+
 // ── send_message ──────────────────────────────────────────────
 //
 // Non-blocking: saves user message to DB, starts a background

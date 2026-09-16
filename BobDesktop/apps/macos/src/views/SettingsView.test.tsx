@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => ({
   updateConversation: vi.fn(),
   deleteConversation: vi.fn(),
   getOrcaCliStatus: vi.fn(),
+  installBobShell: vi.fn(),
+  uninstallBobShell: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -140,7 +142,8 @@ vi.mock('../lib/ipc', () => ({
   restartRemoteControl: vi.fn(),
   requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   requestChromeAutomationPermission: mocks.requestChromeAutomationPermission,
-  installBobShell: vi.fn(),
+  installBobShell: mocks.installBobShell,
+  uninstallBobShell: mocks.uninstallBobShell,
   getAppInfo: vi.fn().mockResolvedValue({ appName: 'Bob Work', appVersion: '0.1.9', tauriVersion: '2.x', os: 'macos', arch: 'aarch64', dataDir: '/tmp', logDir: '/tmp' }),
   openDataDir: vi.fn(),
   exportDiagnostics: vi.fn(),
@@ -702,5 +705,59 @@ describe('SettingsView progressive loading', () => {
     expect(directDisk).toBeChecked()
     expect(sandbox).not.toBeChecked()
     await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ sandboxMode: false })))
+  })
+
+  it('shows a spinning install loader while Bob Shell downloads', async () => {
+    const pendingInstall = deferred<boolean>()
+    mocks.installBobShell.mockReturnValue(pendingInstall.promise)
+    mocks.getBobAuthSnapshot.mockResolvedValue({
+      found: false,
+      path: null,
+      version: null,
+      authenticated: false,
+      authenticationMethod: 'required',
+    })
+    mocks.getBobProfile.mockResolvedValue({
+      detection: { found: false, authenticated: false, path: null, version: null },
+      authenticationMethod: 'required',
+    })
+
+    renderSettings({ tab: 'bob' })
+
+    const installButton = await screen.findByRole('button', { name: 'Installer la version officielle' })
+    fireEvent.click(installButton)
+
+    await waitFor(() => {
+      expect(mocks.installBobShell).toHaveBeenCalled()
+      expect(document.querySelector('.settings-install-busy .task-spinner')).not.toBeNull()
+    })
+    expect(screen.getAllByText(/Téléchargement et vérification SHA-256 de Bob Shell/).length).toBeGreaterThan(1)
+    expect(screen.getByRole('button', { name: /Téléchargement et vérification SHA-256 de Bob Shell/ })).toBeDisabled()
+
+    pendingInstall.resolve(true)
+  })
+
+  it('shows a remove Bob Shell CLI button when it is installed', async () => {
+    mocks.getBobAuthSnapshot.mockResolvedValue({
+      found: true,
+      path: '/Users/me/.local/bin/bob',
+      version: '2.0.0',
+      authenticated: true,
+      authenticationMethod: 'sso_session_detected',
+    })
+    mocks.getBobProfile.mockResolvedValue({
+      detection: { found: true, authenticated: true, path: '/Users/me/.local/bin/bob', version: '2.0.0' },
+      authenticationMethod: 'sso_session_detected',
+    })
+    mocks.uninstallBobShell.mockResolvedValue(true)
+
+    renderSettings({ tab: 'bob' })
+
+    const removeButton = await screen.findByRole('button', { name: 'Supprimer Bob Shell CLI' })
+    expect(screen.queryByRole('button', { name: 'Installer la version officielle' })).not.toBeInTheDocument()
+    fireEvent.click(removeButton)
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer Bob Shell CLI' }))
+
+    await waitFor(() => expect(mocks.uninstallBobShell).toHaveBeenCalled())
   })
 })

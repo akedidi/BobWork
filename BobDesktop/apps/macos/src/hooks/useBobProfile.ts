@@ -2,7 +2,7 @@ import { useUsageUpdated } from "./useTauriEvents";
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { getBobProfile, getPermissionGrants, getUsageStatus, getBobAuthSnapshot, hasSessionSecret, installBobShell, revokePermissionGrant } from '../lib/ipc'
+import { getBobProfile, getPermissionGrants, getUsageStatus, getBobAuthSnapshot, hasSessionSecret, installBobShell, uninstallBobShell, revokePermissionGrant } from '../lib/ipc'
 import { bobAuthService, resolveSessionApiKeyStatus } from '../services/BobAuthService'
 import { useAppStore } from '../stores/appStore'
 import type { BobAuthSnapshot, PermissionGrant, ShellProfile, UsageStatus } from '@bob-work/shared-types'
@@ -37,6 +37,7 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
   const [sessionKeyStatus, setSessionKeyStatus] = useState({ active: false, source: 'none' as 'session' | 'environment' | 'sso' | 'none', vaultKeyPresent: false })
   const [bobExtrasReady, setBobExtrasReady] = useState(false)
   const [installingBob, setInstallingBob] = useState(false)
+  const [uninstallingBob, setUninstallingBob] = useState(false)
   const authSnapshotRef = useRef(authSnapshot)
   const usageRef = useRef(usage)
   const grantsLoadingRef = useRef(grantsLoading)
@@ -131,20 +132,19 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
   }, [tab])
 
   useEffect(() => {
-    if (tab !== 'bob' && !installingBob) return
+    if (tab !== 'bob' && !installingBob && !uninstallingBob) return
     const poll = window.setInterval(() => { void refreshProfile(false, false) }, BOB_SETTINGS_POLL_INTERVAL_MS)
     return () => window.clearInterval(poll)
-  }, [tab, installingBob, refreshProfile])
+  }, [tab, installingBob, uninstallingBob, refreshProfile])
 
   useUsageUpdated(setUsage)
 
   const install = async () => {
-    if (installingBob) return
+    if (installingBob || uninstallingBob) return
     setInstallingBob(true)
-    setStatus(t('settings.bobInstalling'))
     try {
       await installBobShell()
-      setStatus(t('settings.bobInstalled'))
+      showTransientStatus(t('settings.bobInstalled'))
       await refreshProfile()
     } catch (error) {
       setStatus(t('settings.bobInstallFailed', { error: errorMessage(error) }))
@@ -153,12 +153,26 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
     }
   }
 
+  const uninstall = async () => {
+    if (installingBob || uninstallingBob) return
+    setUninstallingBob(true)
+    try {
+      await uninstallBobShell()
+      showTransientStatus(t('settings.bobUninstalled'))
+      await refreshProfile()
+    } catch (error) {
+      setStatus(t('settings.bobUninstallFailed', { error: errorMessage(error) }))
+    } finally {
+      setUninstallingBob(false)
+    }
+  }
+
   const saveKey = async () => {
     if (!apiKey.trim()) return
     try {
       await bobAuthService.setSessionApiKey(apiKey.trim())
       setApiKey('')
-      setStatus(t('settings.bobKeySaved'))
+      showTransientStatus(t('settings.bobKeySaved'))
       await refreshProfile()
     } catch (error) { setStatus(errorMessage(error)) }
   }
@@ -184,6 +198,8 @@ export function useBobProfile(tab: string, setStatus: (status: string) => void, 
     refreshProfile,
     install,
     installingBob,
+    uninstall,
+    uninstallingBob,
     saveKey,
     revokeGrant
   }

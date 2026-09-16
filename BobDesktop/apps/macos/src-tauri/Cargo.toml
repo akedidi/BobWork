@@ -1,6 +1,6 @@
 [package]
 name = "bob-work"
-version = "0.1.9"
+version = "0.1.10"
 description = "Bob Work - IBM Bob Desktop Application for macOS"
 authors = ["Bob Work Team"]
 edition = "2021"

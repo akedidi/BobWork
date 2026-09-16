@@ -22,27 +22,6 @@ pub struct Plugin {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginVersion {
-    pub plugin_id: String,
-    pub version: String,
-    pub release_notes: Option<String>,
-    pub created_at: String,
-    pub installed_at: Option<String>,
-    pub state: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginVersionDiff {
-    pub from_version: String,
-    pub to_version: String,
-    pub changes: Vec<String>,
-    pub warnings: Vec<String>,
-    pub permissions_changed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CreatePluginInput {
     pub name: String,
     pub version: String,

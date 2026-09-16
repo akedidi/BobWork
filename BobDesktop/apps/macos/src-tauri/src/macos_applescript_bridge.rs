@@ -97,21 +97,13 @@ pub fn identity_env_pairs() -> Vec<(String, String)> {
 
 /// Apple Event from this GUI process on the main thread so Automation lists
 /// the running app (Bob Work vs Bob Work-test), not a background helper.
-pub fn request_chrome_automation_on_main_thread(app: &AppHandle) -> Result<(), String> {
+fn run_chrome_automation_on_main_thread(app: &AppHandle, ask_user: bool) -> Result<(), String> {
     if !std::path::Path::new("/Applications/Google Chrome.app").exists() {
         return Err("Google Chrome n’est pas installé.".into());
     }
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let consent = crate::macos_permissions::request_chrome_automation_consent(true);
-        let result = match consent {
-            Ok(()) => crate::macos_permissions::run_applescript(
-                crate::macos_permissions::CHROME_AUTOMATION_SCRIPT,
-            )
-            .map(|_| ()),
-            Err(error) => Err(error),
-        };
-        let _ = sender.send(result);
+        let _ = sender.send(crate::macos_permissions::check_chrome_automation(ask_user));
     })
     .map_err(|error| format!("Impossible de planifier Automatisation Chrome : {error}"))?;
     receiver
@@ -119,6 +111,12 @@ pub fn request_chrome_automation_on_main_thread(app: &AppHandle) -> Result<(), S
         .map_err(|_| "Automatisation Chrome n’a pas répondu dans les 60 secondes.".to_string())?
 }
 
+/// Explicit UI action: may show the macOS Automation consent sheet.
+pub fn request_chrome_automation_on_main_thread(app: &AppHandle) -> Result<(), String> {
+    run_chrome_automation_on_main_thread(app, true)
+}
+
+/// Status / Recheck only — never prompts TCC (ask_user = false).
 pub fn probe_chrome_automation_on_main_thread(
     app: &AppHandle,
     app_name: &str,
@@ -131,7 +129,7 @@ pub fn probe_chrome_automation_on_main_thread(
     }
     crate::macos_permissions::classify_chrome_automation(
         app_name,
-        request_chrome_automation_on_main_thread(app),
+        run_chrome_automation_on_main_thread(app, false),
     )
 }
 

@@ -45,7 +45,7 @@ export default function SettingsView() {
     usage, usageLoading,
     grants, grantsLoading, grantsError,
     apiKey, setApiKey, sessionKeyStatus,
-    bobExtrasReady, refreshProfile, install, installingBob, saveKey, revokeGrant
+    bobExtrasReady, refreshProfile, install, installingBob, uninstall, uninstallingBob, saveKey, revokeGrant
   } = useBobProfile(tab, setStatus, showTransientStatus)
 
   const tabs = useMemo(() => [
@@ -99,7 +99,7 @@ export default function SettingsView() {
   const tabProps = {
     t, settings, change, settingsError, updateInfo, appVersion, appName, updateBusy, checkUpdate, installUpdate,
     notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel,
-    authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, refreshProfile,
+    authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, uninstall, uninstallingBob, refreshProfile,
     apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant,
     chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools,
     computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools,
@@ -140,7 +140,7 @@ export default function SettingsView() {
           {tab === 'modes' && <ModesSettingsTab {...tabProps} />}
           {tab === 'appearance' && <AppearanceSettingsTab {...tabProps} />}
           {tab === 'data' && <DataSettingsTab {...tabProps} />}
-          {status && <div className="settings-status">{status}</div>}
+          {status && <div className="settings-status" role="status" aria-live="polite">{status}</div>}
         </div>
         {visibleTabs.length === 0 && <div className="settings-no-results"><span>⌕</span><h1>{t('settings.searchEmptyTitle')}</h1><p>{t('settings.searchEmptyHint')}</p></div>}
       </main>

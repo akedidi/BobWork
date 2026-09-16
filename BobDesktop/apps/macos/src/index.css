@@ -789,12 +789,18 @@
   .composer-toolbar-control { flex: 0 0 auto; }
 
   .composer-attachments {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    padding: 10px 12px 0;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
   }
   .composer-documents-hint {
     margin: 0;
-    padding: 0 12px 8px;
+    padding: 4px 12px 0;
   }
   .composer-active-plugin,
   .composer-mention-chips {
@@ -905,41 +911,64 @@
     color: var(--text-muted); font-size: 12px;
   }
 
+  /* ChatGPT-style attachment strip: thumbs + compact chips above the prompt */
   .composer-attachment {
     position: relative;
     flex: 0 0 auto;
+    max-width: 100%;
     border-radius: 12px;
     border: 1px solid var(--border);
     background: var(--bg-hover);
     overflow: hidden;
   }
+  .composer-attachment--thumb {
+    width: 56px;
+    height: 56px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--bg-surface);
+  }
+  .composer-attachment--chip {
+    max-width: min(168px, 55vw);
+  }
   .composer-attachment:hover .composer-attachment-remove,
   .composer-attachment:focus-within .composer-attachment-remove {
     opacity: 1;
   }
-  .composer-attachment--image {
-    width: 48px; height: 48px;
-    background: var(--bg-surface);
-  }
   .composer-attachment-image {
-    width: 100%; height: 100%;
+    width: 100%;
+    height: 100%;
   }
   .composer-attachment-image img {
-    width: 100%; height: 100%; object-fit: cover; display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
   }
   .composer-attachment-file {
-    display: flex; align-items: center; gap: 10px;
-    min-width: 180px; max-width: 240px;
-    padding: 10px 34px 10px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 168px;
+    padding: 6px 28px 6px 6px;
   }
   .composer-attachment-ext {
     flex: 0 0 auto;
-    min-width: 42px; padding: 6px 4px;
-    border-radius: 8px;
-    font-size: 10px; font-weight: 700; letter-spacing: .03em;
-    text-align: center; line-height: 1.1;
+    min-width: 34px;
+    max-width: 42px;
+    padding: 5px 3px;
+    border-radius: 7px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    text-align: center;
+    line-height: 1.1;
     color: #fff;
     background: #64748b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .composer-attachment--pdf .composer-attachment-ext { background: #dc2626; }
   .composer-attachment--document .composer-attachment-ext { background: #2563eb; }
@@ -950,33 +979,63 @@
   .composer-attachment--audio .composer-attachment-ext { background: #db2777; }
   .composer-attachment--video .composer-attachment-ext { background: #0891b2; }
   .composer-attachment-icon {
-    display: grid; place-items: center;
-    width: 42px; height: 42px;
-    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
     background: color-mix(in srgb, #2563eb 12%, var(--bg-surface));
     color: #2563eb;
   }
   .composer-attachment-meta {
-    min-width: 0; display: flex; flex-direction: column; gap: 2px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
   }
   .composer-attachment-name {
-    font-size: 12px; font-weight: 600; color: var(--text-primary);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .composer-attachment-size {
-    font-size: 11px; color: var(--text-muted);
+    font-size: 10px;
+    color: var(--text-muted);
   }
   .composer-attachment-remove {
-    position: absolute; top: 6px; right: 6px;
-    display: grid; place-items: center;
-    width: 22px; height: 22px;
-    border: 0; border-radius: 999px;
-    background: rgb(15 23 42 / .72); color: #fff;
-    cursor: pointer; opacity: 0;
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border: 0;
+    border-radius: 999px;
+    background: rgb(15 23 42 / .72);
+    color: #fff;
+    cursor: pointer;
+    opacity: .95;
     transition: opacity .15s ease, background .15s ease;
   }
   .composer-attachment-remove:hover {
     background: rgb(15 23 42 / .92);
+  }
+  .composer-attachment--chip .composer-attachment-remove {
+    top: 50%;
+    right: 6px;
+    transform: translateY(-50%);
+    background: transparent;
+    color: var(--text-muted);
+    opacity: .8;
+  }
+  .composer-attachment--chip .composer-attachment-remove:hover {
+    background: var(--bg-active, var(--bg-hover));
+    color: var(--text-primary);
   }
   .attachment-chip {
     display: inline-flex; align-items: center; gap: 6px;
@@ -2092,11 +2151,20 @@
   }
   .runtime-status--not_installed, .runtime-status--broken { background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning); }
   .runtime-status--installing, .runtime-status--updating, .runtime-status--removing { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
-  .runtime-busy { display: flex; align-items: center; gap: 7px; margin-top: 4px; color: var(--text-secondary); }
+  .runtime-catalog-busy { margin: 0 0 12px; }
+  .runtime-details .settings-install-busy { margin-top: 8px; }
   .runtime-actions { flex-shrink: 0; display: flex !important; align-items: center; justify-content: flex-end; gap: 10px; }
   .runtime-actions .secondary-btn,
   .runtime-actions .danger-link { display: inline-flex; align-items: center; gap: 7px; }
   .runtime-actions .task-spinner { width: 12px; height: 12px; }
+  .runtime-stop-btn {
+    width: 28px; height: 28px; padding: 0;
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--danger) 8%, var(--bg-surface));
+    color: var(--danger);
+  }
+  .runtime-stop-btn:hover { background: color-mix(in srgb, var(--danger) 16%, var(--bg-surface)); }
   .runtime-actions .danger-link { margin-right: 0; }
   .runtime-managed-label { max-width: 130px; text-align: right; }
   .runtime-load-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; color: var(--danger); font-size: 12px; }
@@ -2112,6 +2180,20 @@
     min-height: 72px; padding: 18px 0; display: flex; align-items: center; gap: 10px;
     color: var(--text-muted); font-size: 12.5px;
   }
+  .settings-install-busy {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 2px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .settings-install-busy .task-spinner { width: 16px; height: 16px; }
   .settings-row-loader { display: inline-flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
   .settings-row { min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--border); }
   .settings-row:last-child { border-bottom: 0; }
@@ -2176,12 +2258,38 @@
   .vault-secret-fields .btn-primary { justify-self: start; }
   .settings-warning, .settings-status { max-width: 760px; padding: 11px 13px; border-radius: 8px; font-size: 11.5px; line-height: 1.5; }
   .settings-warning { background: color-mix(in srgb, var(--warning) 12%, transparent); color: color-mix(in srgb, var(--warning) 80%, var(--text-primary)); border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent); }
-  .settings-status { position: fixed; right: 28px; bottom: 76px; background: var(--bg-surface); border: 1px solid var(--border); box-shadow: var(--shadow-md); }
+  .settings-status {
+    position: fixed;
+    right: 28px;
+    bottom: 76px;
+    z-index: 40;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    animation: settings-status-enter 180ms ease-out, settings-status-exit 320ms ease-in 2.68s forwards;
+  }
+  @keyframes settings-status-enter {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes settings-status-exit {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
   .settings-status--success { background: color-mix(in srgb, var(--success) 8%, var(--bg-surface)); border-color: color-mix(in srgb, var(--success) 42%, var(--border)); box-shadow: var(--shadow-md), inset 3px 0 0 var(--success); }
   .settings-status--success::before { content: '✓'; display: inline-grid; place-items: center; width: 17px; height: 17px; margin-right: 8px; border-radius: 50%; background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); font-weight: 800; }
   .settings-status--error { border-color: color-mix(in srgb, var(--danger) 38%, var(--border)); box-shadow: var(--shadow-md), inset 3px 0 0 var(--danger); }
-  .btn-primary { padding: 7px 12px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: white; cursor: pointer; font-size: 12px; }
+  .btn-primary {
+    padding: 7px 12px; border: 1px solid var(--accent); border-radius: 7px;
+    background: var(--accent); color: white; cursor: pointer; font-size: 12px;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
   .btn-primary:disabled { opacity: .5; cursor: default; }
+  .btn-primary[aria-busy="true"]:disabled { opacity: .92; }
+  .btn-primary .task-spinner {
+    border-color: color-mix(in srgb, white 35%, transparent);
+    border-top-color: white;
+  }
   .danger-btn, .primary-btn.danger-btn {
     padding: 7px 12px;
     border: 1px solid var(--danger);
@@ -3266,8 +3374,7 @@
   opacity: .45;
 }
 
-.conversation-interaction__choice span,
-.conversation-interaction__busy {
+.conversation-interaction__choice span {
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.4;
@@ -3276,6 +3383,18 @@
 .conversation-interaction__busy {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.conversation-interaction__busy .task-spinner {
+  width: 16px;
+  height: 16px;
 }

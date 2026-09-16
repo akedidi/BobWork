@@ -10,6 +10,7 @@ mod db;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_applescript_bridge;
+mod macos_clipboard;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
 #[cfg(target_os = "macos")]
@@ -596,6 +597,7 @@ pub fn run() {
             commands::mode::uninstall_bob_mode,
             commands::mode::import_bob_mode_yaml,
             commands::bob::install_bob_shell,
+            commands::bob::uninstall_bob_shell,
             commands::bob::set_session_secret,
             commands::bob::has_session_secret,
             commands::bob::clear_session_secret,
@@ -634,10 +636,6 @@ pub fn run() {
             // Plugin commands
             commands::plugin::get_plugins,
             commands::plugin::get_plugin,
-            commands::plugin::get_plugin_versions,
-            commands::plugin::compare_plugin_version,
-            commands::plugin::install_plugin_update,
-            commands::plugin::rollback_plugin_version,
             commands::plugin::create_plugin,
             commands::plugin::update_plugin,
             commands::plugin::delete_plugin,
@@ -664,6 +662,8 @@ pub fn run() {
             commands::preview::get_live_preview_revision,
             commands::preview::export_live_canvas_zip,
             commands::preview::allow_composer_attachments,
+            commands::preview::read_clipboard_attachment_paths,
+            commands::preview::write_clipboard_attachment_image,
             commands::preview::open_preview_resource,
             commands::preview::reveal_in_file_manager,
             // Approval commands
@@ -705,6 +705,7 @@ pub fn run() {
             commands::runtime::install_external_runtime,
             commands::runtime::remove_external_runtime,
             commands::runtime::cancel_runtime_process,
+            commands::runtime::cancel_runtime_operation,
             commands::rendering::route_diagram_spec,
             commands::rendering::route_visualization_spec,
             commands::rendering::get_renderer_capabilities,
@@ -837,6 +838,7 @@ fn refresh_startup_integrations(app_handle: tauri::AppHandle, data_dir: std::pat
         "orca-cli",
         "orchestration",
         "capability-router",
+        "image-annotate",
     ] {
         if let Err(error) =
             services::workspace::WorkspaceService::new().install_builtin_skill(skill_id)

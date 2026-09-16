@@ -25,10 +25,20 @@ BobDesktop/apps/macos/.build/
 .env
 .env.*
 !.env.example
+*.p12
+*.p12.password
+BobDesktop/scripts/enterprise/signing/
+BobDesktop/dist-enterprise/
 
 # Test artifacts
 **/coverage/
 **/.turbo/
+
+# Guide build QA dumps / Office lock files
+guide-bob-work/qa/
+guide-bob-work/qa-final.*/
+guide-bob-work/~$*
+**/~$*.docx
 
 # BobMobile generated outputs
 BobMobile/build/

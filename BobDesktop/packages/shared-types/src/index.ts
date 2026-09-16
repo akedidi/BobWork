@@ -781,24 +781,6 @@ export interface Plugin {
   createdAt: string;
   updatedAt: string;
   lastExecutedAt?: string;
-  availableVersion?: string;
-}
-
-export interface PluginVersion {
-  pluginId: string;
-  version: string;
-  releaseNotes?: string;
-  createdAt: string;
-  installedAt?: string;
-  state: "current" | "available" | "previous";
-}
-
-export interface PluginVersionDiff {
-  fromVersion: string;
-  toVersion: string;
-  changes: string[];
-  warnings: string[];
-  permissionsChanged: boolean;
 }
 
 // ── Integration ───────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import {
   deleteSkill, getSkills, saveSkill, setSkillEnabled,
@@ -12,6 +12,7 @@ import type { WorkspaceSkill } from '@bob-work/shared-types'
 import { useT } from '../i18n'
 import { useAppStore } from '../stores/appStore'
 import { useAppDialog } from '../components/AppDialog'
+import { useTransientStatus } from '../hooks/useTransientStatus'
 
 type SkillPanel = 'closed' | 'detail' | 'editor'
 
@@ -69,8 +70,7 @@ export default function ExtensionsView() {
   const [skillPanel, setSkillPanel] = useState<SkillPanel>('closed')
   const [skillSearch, setSkillSearch] = useState('')
   const [togglingSkill, setTogglingSkill] = useState<string | null>(null)
-  const [status, setStatus] = useState('')
-  const statusTimerRef = useRef<number | null>(null)
+  const [status, setStatus] = useTransientStatus(3000)
 
   const load = async () => {
     setLoadError(null)
@@ -101,15 +101,6 @@ export default function ExtensionsView() {
     setSelectedSkillKey(skillKey(match))
     setSkillPanel('detail')
   }, [requestedSkillSlug, skills])
-
-  useEffect(() => {
-    if (!status) return
-    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    statusTimerRef.current = window.setTimeout(() => setStatus(''), 3500)
-    return () => {
-      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    }
-  }, [status])
 
   const selectedSkill = useMemo(() => {
     if (!selectedSkillKey) return null

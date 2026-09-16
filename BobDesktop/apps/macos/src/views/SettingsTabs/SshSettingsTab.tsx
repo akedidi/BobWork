@@ -4,6 +4,7 @@ import { Folder, File, Server, TerminalSquare, RefreshCw, Download, Upload, Tras
 import type { SshRemoteEntry, SshServer } from '@bob-work/shared-types'
 import { browseSshDirectory, deleteSshServer, getSshServers, saveSshServer, sshRead, startSshTerminal, stopSshTerminal, syncSshWorkspace, testSshServer, writeSshTerminal } from '../../lib/ipc'
 import { errorMessage } from '../../lib/errorMessage'
+import { useTransientStatus } from '../../hooks/useTransientStatus'
 import { useAppDialog } from '../../components/AppDialog'
 import { Card, Heading } from './SettingsShared'
 import '@xterm/xterm/css/xterm.css'
@@ -18,7 +19,7 @@ export default function SshSettingsTab({ t }: { t: (key: any, params?: Record<st
   const [form, setForm] = useState<FormState>(EMPTY)
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState('')
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useTransientStatus(3000)
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState<SshRemoteEntry[]>([])
   const [filePreview, setFilePreview] = useState<{ path: string; content: string } | null>(null)

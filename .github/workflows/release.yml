@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release-macos:
-    name: Sign · Notarize · Publish · Updater
+    name: Sign · Publish · Updater
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -49,15 +49,12 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
           BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: ${{ vars.BOBWORK_OAUTH_MICROSOFT_CLIENT_ID }}
         run: |
           set -euo pipefail
-          required=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_UPDATER_PUBLIC_KEY BOBWORK_OAUTH_MICROSOFT_CLIENT_ID)
+          required=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD TAURI_SIGNING_PRIVATE_KEY TAURI_UPDATER_PUBLIC_KEY)
           for name in "${required[@]}"; do
             if [[ -z "${!name:-}" ]]; then
               echo "Missing release secret or variable: ${name}" >&2
@@ -65,7 +62,7 @@ jobs:
             fi
           done
 
-      - name: Import Apple Developer ID certificate
+      - name: Import Apple signing certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -81,9 +78,9 @@ jobs:
           security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -nE 's/.*"((Apple Development|Developer ID Application):[^"]*)".*/\1/p' | head -1)"
           if [[ -z "$IDENTITY" ]]; then
-            echo "Developer ID Application identity not found in certificate" >&2
+            echo "Apple Development or Developer ID Application identity not found in certificate" >&2
             exit 1
           fi
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
@@ -100,23 +97,19 @@ jobs:
       - name: Invalidate stale Rust and Release outputs
         run: pnpm --dir BobDesktop --filter macos run release:prepare
 
-      - name: Build, sign, notarize and publish
+      - name: Build, sign and publish
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: ${{ vars.BOBWORK_OAUTH_MICROSOFT_CLIENT_ID }}
         with:
           projectPath: BobDesktop/apps/macos
           args: --config src-tauri/tauri.release.conf.json
           tagName: v__VERSION__
           releaseName: Bob Work v__VERSION__
-          releaseBody: Signed and notarized macOS release with automatic updates.
+          releaseBody: Apple-signed macOS release with cryptographically signed automatic updates. This Personal Team build is not Apple-notarized.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -136,7 +129,7 @@ jobs:
           echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
 
-      - name: Verify Developer ID signature and Apple notarization
+      - name: Verify published Apple signature and stable identity
         run: |
           set -euo pipefail
           DMG="$(find release-evidence/assets -maxdepth 1 -name '*.dmg' -print -quit)"
@@ -154,10 +147,19 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee release-evidence/codesign.txt
-          spctl --assess --type execute --verbose=4 "$APP" 2>&1 | tee release-evidence/spctl.txt
-          xcrun stapler validate "$APP" 2>&1 | tee release-evidence/stapler-app.txt
+          ACTUAL_IDENTITY="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+          if [[ "$ACTUAL_IDENTITY" != "$APPLE_SIGNING_IDENTITY" ]]; then
+            echo "Published app is signed as '$ACTUAL_IDENTITY', expected '$APPLE_SIGNING_IDENTITY'" >&2
+            hdiutil detach "$MOUNT_POINT"
+            exit 1
+          fi
+          codesign -dr - "$APP" 2>&1 | tee release-evidence/designated-requirement.txt
+          if grep -Eiq '\bcdhash\b' release-evidence/designated-requirement.txt; then
+            echo "Published app has an unstable ad-hoc designated requirement" >&2
+            hdiutil detach "$MOUNT_POINT"
+            exit 1
+          fi
           hdiutil detach "$MOUNT_POINT"
-          xcrun stapler validate "$DMG" 2>&1 | tee release-evidence/stapler-dmg.txt
           shasum -a 256 "$DMG" | tee release-evidence/dmg-sha256.txt
 
       - name: Verify updater manifest and signed artifact pairing

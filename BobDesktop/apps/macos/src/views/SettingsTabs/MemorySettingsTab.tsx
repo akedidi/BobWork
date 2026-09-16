@@ -5,7 +5,7 @@ import { errorMessage } from '../../lib/errorMessage'
 import { Card, Heading, SettingsFields, ToggleRow } from './SettingsShared'
 
 export default function MemorySettingsTab(props: any) {
-  const { t, settings, settingsError, change, setStatus } = props
+  const { t, settings, settingsError, change, setStatus, showTransientStatus } = props
   const [items, setItems] = useState<PersistentMemory[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [scope, setScope] = useState<'user' | 'project'>('user')
@@ -38,7 +38,7 @@ export default function MemorySettingsTab(props: any) {
       await createMemory({ scope, projectId: scope === 'project' ? projectId : undefined, content: content.trim() })
       setContent('')
       await refresh()
-      setStatus(t('settings.memorySaved'))
+      showTransientStatus(t('settings.memorySaved'))
     } catch (error) { setStatus(errorMessage(error)) } finally { setBusy(false) }
   }
 
@@ -47,7 +47,7 @@ export default function MemorySettingsTab(props: any) {
     try {
       await forgetMemory(id)
       setItems(current => current.filter(item => item.id !== id))
-      setStatus(t('settings.memoryForgotten'))
+      showTransientStatus(t('settings.memoryForgotten'))
     } catch (error) { setStatus(errorMessage(error)) } finally { setBusy(false) }
   }
 

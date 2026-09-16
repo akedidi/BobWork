@@ -17,11 +17,7 @@ const mocks = vi.hoisted(() => ({
   getPluginMcpStatus: vi.fn(),
   getPluginExtensionStatus: vi.fn(),
   getPluginResourceStatus: vi.fn(),
-  getPluginVersions: vi.fn(),
   getSkills: vi.fn(),
-  comparePluginVersion: vi.fn(),
-  installPluginUpdate: vi.fn(),
-  rollbackPluginVersion: vi.fn(),
   deletePlugin: vi.fn(),
   validatePlugin: vi.fn(),
   exportPluginZip: vi.fn(),
@@ -49,11 +45,7 @@ vi.mock('../lib/ipc', () => ({
   getPluginMcpStatus: mocks.getPluginMcpStatus,
   getPluginExtensionStatus: mocks.getPluginExtensionStatus,
   getPluginResourceStatus: mocks.getPluginResourceStatus,
-  getPluginVersions: mocks.getPluginVersions,
   getSkills: mocks.getSkills,
-  comparePluginVersion: mocks.comparePluginVersion,
-  installPluginUpdate: mocks.installPluginUpdate,
-  rollbackPluginVersion: mocks.rollbackPluginVersion,
   createPlugin: vi.fn(),
   updatePlugin: vi.fn(),
   deletePlugin: mocks.deletePlugin,
@@ -118,13 +110,6 @@ describe('PluginsView', () => {
       hooks: [{ id: 'prepare', name: 'Préparation du contexte', event: 'before_task', enabled: true, required: true }],
       scheduledTaskTemplates: [{ id: 'review', name: 'Revue hebdomadaire', instructions: 'Analyse les écarts.', cronOrEvent: 'every week', offlineBehavior: 'run_on_wake', overlapPolicy: 'queue' }],
     })
-    mocks.getPluginVersions.mockImplementation((pluginId: string) => Promise.resolve(pluginId === 'cloud' ? [
-      { pluginId: 'cloud', version: '1.1.0', releaseNotes: 'Ajout du contrôle de résilience.', createdAt: '2026-08-09T08:00:00Z', state: 'available' },
-      { pluginId: 'cloud', version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'current' },
-    ] : [{ pluginId, version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', state: 'current' }]))
-    mocks.comparePluginVersion.mockResolvedValue({ fromVersion: '1.0.0', toVersion: '1.1.0', changes: ['Ajout du contrôle de résilience.'], warnings: ['Nouvelle autorisation demandée : network.request'], permissionsChanged: true })
-    mocks.installPluginUpdate.mockResolvedValue({ ...plugins[1], version: '1.1.0', availableVersion: undefined })
-    mocks.rollbackPluginVersion.mockResolvedValue(plugins[1])
     mocks.deletePlugin.mockResolvedValue(undefined)
     mocks.validatePlugin.mockResolvedValue({ valid: true, warnings: [], errors: [], riskLevel: 'low' })
     mocks.exportPluginZip.mockResolvedValue(undefined)
@@ -300,19 +285,19 @@ describe('PluginsView', () => {
     expect(screen.getByRole('button', { name: 'Planifier' })).toBeVisible()
   })
 
-  it('shows an available version, its changes and installs it explicitly', async () => {
+  it('shows only the current plugin version without manual update controls', async () => {
     render(<MemoryRouter><PluginsView /></MemoryRouter>)
     fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
 
-    expect(await screen.findByText('Version 1.1.0 disponible')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: 'Voir les changements' }))
-    expect(await screen.findByText('1.0.0 → 1.1.0')).toBeVisible()
-    expect(screen.getAllByText('Ajout du contrôle de résilience.')).toHaveLength(2)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Mettre à jour' })[0])
-    await waitFor(() => expect(mocks.installPluginUpdate).toHaveBeenCalledWith('cloud', '1.1.0'))
+    expect(await screen.findByText('Version 1.0.0')).toBeVisible()
+    expect(screen.getByText('Version utilisée actuellement')).toBeVisible()
+    expect(screen.getByText('Actuelle')).toBeVisible()
+    expect(screen.queryByText('Version 1.1.0 disponible')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Mettre à jour' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Voir les changements' })).not.toBeInTheDocument()
   })
 
-  it('keeps Intégré and Mise à jour badges readable side by side', async () => {
+  it('keeps plugin scope badges readable and hides staged update state', async () => {
     render(<MemoryRouter><PluginsView /></MemoryRouter>)
 
     const documentsRow = await screen.findByRole('button', { name: /Documents Créer et lire des documents/ })
@@ -320,7 +305,7 @@ describe('PluginsView', () => {
     expect(documentsRow).not.toHaveTextContent(/^In…$|In\.\.\./)
 
     const cloudRow = screen.getByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ })
-    expect(cloudRow).toHaveTextContent('Mise à jour')
+    expect(cloudRow).not.toHaveTextContent('Mise à jour')
     expect(cloudRow).toHaveTextContent('Personnel')
   })
 
@@ -345,24 +330,6 @@ describe('PluginsView', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Supprimer' }))
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer' }))
     await waitFor(() => expect(mocks.deletePlugin).toHaveBeenCalledWith('cloud'))
-  })
-
-  it('shows only the active version and never offers rollback', async () => {
-    mocks.getPluginVersions.mockImplementation((pluginId: string) => Promise.resolve(pluginId === 'cloud' ? [
-      { pluginId: 'cloud', version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'current' },
-      { pluginId: 'cloud', version: '1.1.0', createdAt: '2026-08-09T08:00:00Z', installedAt: null, state: 'available' },
-    ] : [
-      { pluginId, version: '1.0.0', createdAt: '2026-08-08T08:00:00Z', installedAt: '2026-08-08T08:00:00Z', state: 'current' },
-    ]))
-    render(<MemoryRouter><PluginsView /></MemoryRouter>)
-
-    fireEvent.click(await screen.findByRole('button', { name: /Documents Créer et lire des documents/ }))
-    expect(await screen.findByText(/Bob Work ne conserve qu’une version active/)).toBeVisible()
-    expect(screen.queryByRole('button', { name: 'Restaurer' })).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
-    expect(await screen.findByText('Version 1.1.0 disponible')).toBeVisible()
-    expect(screen.queryByRole('button', { name: 'Restaurer' })).not.toBeInTheDocument()
   })
 
   it('liste les skills du manifeste et ouvre le catalogue Skills', async () => {

@@ -19,10 +19,11 @@ const BobalyticsPanel = lazy(() => import('../BobalyticsPanel'))
   
 
 export default function BobSettingsTab(props: any) {
-  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
+  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, uninstall, uninstallingBob, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
   const dialog = useAppDialog()
   const navigate = useNavigate()
   const loadingLabel = t('common.loading')
+  const bobBusy = installingBob || uninstallingBob
 
   return (
     <>
@@ -40,7 +41,16 @@ export default function BobSettingsTab(props: any) {
             </Card>
           )}
           <Card>
-            <StatusRow title={t('settings.installation')} value={installationLabel} ok={profileLoading ? undefined : installationFound} loading={profileLoading} />
+            <StatusRow
+              title={t('settings.installation')}
+              value={installingBob
+                ? t('settings.bobInstalling')
+                : uninstallingBob
+                  ? t('settings.bobUninstalling')
+                  : installationLabel}
+              ok={profileLoading || bobBusy ? undefined : installationFound}
+              loading={profileLoading || bobBusy}
+            />
             <StatusRow
               title={t('settings.bobRunAuthentication')}
               value={authReady
@@ -50,12 +60,24 @@ export default function BobSettingsTab(props: any) {
               loading={profileLoading && !authReady}
             />
             <StatusRow title={t('settings.locationPath')} value={profile?.detection.path ?? authSnapshot?.path ?? (profileLoading ? loadingLabel : '—')} loading={profileLoading && !profile && !authSnapshot} />
+            {installingBob && (
+              <div className="settings-install-busy" role="status" aria-live="polite">
+                <span className="task-spinner" aria-hidden="true" />
+                {t('settings.bobInstalling')}
+              </div>
+            )}
+            {uninstallingBob && (
+              <div className="settings-install-busy" role="status" aria-live="polite">
+                <span className="task-spinner" aria-hidden="true" />
+                {t('settings.bobUninstalling')}
+              </div>
+            )}
             <div className="settings-actions">
               {(!installationFound || installingBob) && !profileLoading && (
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={installingBob}
+                  disabled={bobBusy}
                   aria-busy={installingBob}
                   onClick={() => void install()}
                 >
@@ -64,10 +86,30 @@ export default function BobSettingsTab(props: any) {
                     : t('settings.installOfficial')}
                 </button>
               )}
+              {installationFound && !profileLoading && (
+                <button
+                  type="button"
+                  className="danger-link"
+                  disabled={bobBusy}
+                  aria-busy={uninstallingBob}
+                  onClick={async () => {
+                    if (!await dialog.confirm({
+                      message: t('settings.bobUninstallConfirm'),
+                      confirmLabel: t('settings.bobUninstall'),
+                      destructive: true,
+                    })) return
+                    void uninstall()
+                  }}
+                >
+                  {uninstallingBob
+                    ? <><span className="task-spinner" aria-hidden="true" />{t('settings.bobUninstalling')}</>
+                    : t('settings.bobUninstall')}
+                </button>
+              )}
               <button
                 type="button"
                 className="btn-primary"
-                disabled={profileLoading || installingBob}
+                disabled={profileLoading || bobBusy}
                 aria-busy={profileLoading}
                 onClick={() => void refreshProfile(true)}
               >
@@ -101,7 +143,7 @@ export default function BobSettingsTab(props: any) {
                   destructive: true,
                 })) return
                 await bobAuthService.clearSessionApiKey()
-                setStatus(t('settings.vaultKeyCleared'))
+                showTransientStatus(t('settings.vaultKeyCleared'))
                 await refreshProfile()
               }}>{t('settings.clearVault')}</button>
             </div>}

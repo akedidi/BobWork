@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
   connectIntegrationSsh,
@@ -14,6 +14,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useT } from '../i18n'
 import { useAppDialog } from '../components/AppDialog'
 import { CATALOG, IntegrationAuthMode, IntegrationDef } from '../views/IntegrationsTabs/catalogData'
+import { useTransientStatus } from './useTransientStatus'
 
 export function isPkcePublicProvider(provider: string) {
   return provider === 'slack' || provider === 'microsoft'
@@ -42,18 +43,7 @@ export function useIntegrations({ reloadMcp }: { reloadMcp?: () => Promise<void>
   const [authModeForms, setAuthModeForms] = useState<Record<string, IntegrationAuthMode>>({})
   const [connectingToken, setConnectingToken] = useState<string | null>(null)
   const [connectingSsh, setConnectingSsh] = useState<string | null>(null)
-  const [status, setStatus] = useState('')
-
-  const statusTimerRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (!status) return
-    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    statusTimerRef.current = window.setTimeout(() => setStatus(''), 3500)
-    return () => {
-      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    }
-  }, [status])
+  const [status, setStatus] = useTransientStatus(3000)
 
   const refreshStatuses = useCallback(async () => {
     const next = await getIntegrationStatuses()

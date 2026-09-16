@@ -7,6 +7,7 @@ import type { AppSettings, MacosChromeControlStatus, MacosComputerUseStatus, Orc
 import { useT } from '../i18n'
 import { errorMessage } from '../lib/errorMessage'
 import { useLocation } from 'react-router-dom'
+import { useTransientStatus } from './useTransientStatus'
 
 type Tab = 'general' | 'bob' | 'instructions' | 'memory' | 'permissions' | 'tasks' | 'extensions' | 'runtimes' | 'remote' | 'ssh' | 'modes' | 'appearance' | 'data'
 
@@ -48,7 +49,8 @@ export function useSettingsData() {
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const [appName, setAppName] = useState('Bob Work')
   const [updateBusy, setUpdateBusy] = useState(false)
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useTransientStatus(3000)
+  const showTransientStatus = setStatus
 
   const skipNextSaveRef = useRef(true)
   const saveTimerRef = useRef<number | null>(null)
@@ -56,13 +58,6 @@ export function useSettingsData() {
   const saveInFlightRef = useRef(false)
   const latestSettingsRef = useRef<AppSettings>(settings)
   const lastPersistedSettingsRef = useRef<AppSettings>(initialSettings())
-  const statusTimerRef = useRef<number | null>(null)
-
-  const showTransientStatus = useCallback((message: string) => {
-    setStatus(message)
-    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    statusTimerRef.current = window.setTimeout(() => setStatus(''), 2500)
-  }, [])
 
   const checkUpdate = async () => {
     setUpdateBusy(true)
@@ -120,10 +115,26 @@ export function useSettingsData() {
   useEffect(() => {
     getAppInfo()
       .then(info => {
-        setAppVersion(info.appVersion)
+        const version = info.appVersion?.trim() || null
+        setAppVersion(version)
         if (info.appName.trim()) setAppName(info.appName.trim())
       })
       .catch(() => setAppVersion(null))
+  }, [])
+
+  useEffect(() => {
+    const snapshot = useUpdateStore.getState()
+    if (snapshot.currentVersion?.trim()) {
+      setAppVersion(current => current ?? snapshot.currentVersion)
+    }
+    if (snapshot.lastCheckedAt) {
+      setUpdateInfo({
+        currentVersion: snapshot.currentVersion ?? '',
+        available: snapshot.available,
+        version: snapshot.version,
+        notes: snapshot.notes,
+      })
+    }
   }, [])
 
   useEffect(() => {

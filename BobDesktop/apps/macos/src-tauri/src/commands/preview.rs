@@ -485,6 +485,23 @@ pub async fn allow_composer_attachments(
 }
 
 #[tauri::command]
+pub async fn read_clipboard_attachment_paths() -> Result<Vec<String>, AppError> {
+    Ok(crate::macos_clipboard::read_clipboard_file_paths())
+}
+
+#[tauri::command]
+pub async fn write_clipboard_attachment_image(
+    bytes: Vec<u8>,
+    mime: String,
+    app: AppHandle,
+) -> Result<String, AppError> {
+    crate::macos_clipboard::write_clipboard_image(
+        &app,
+        crate::macos_clipboard::ClipboardImageInput { bytes, mime },
+    )
+}
+
+#[tauri::command]
 pub async fn open_preview_resource(target: String) -> Result<(), AppError> {
     if target.starts_with("https://") || target.starts_with("http://") {
         return open::that(target).map_err(|error| AppError::Io(error.to_string()));

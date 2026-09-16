@@ -26,6 +26,7 @@ import {
   rewindConversationFromMessage,
   registerExternalArtifact,
   getCodeGraphSuggestion, installExternalRuntime,
+  prepareFilePreview,
 } from '../lib/ipc'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import type { ConversationChoice, ConversationInteraction, FileChange, MessageAttachment, MessageSource, TaskDetail, ToolUse } from '@bob-work/shared-types'
@@ -587,7 +588,9 @@ export default function ChatView() {
               state: 'done' as const,
               persisted: true,
               attachments: m.attachments,
-              sources: mergeMessageSources(m.sources, sourcesInferredFromMessage(role, m.content)),
+              // Keep DB/session sources only. Paths merely printed in prose are
+              // inferred at render time and existence-checked before preview.
+              sources: m.sources,
               fileChanges: m.fileChanges,
               activities: activitiesFromToolsUsed(m.toolsUsed),
             }
@@ -680,7 +683,7 @@ export default function ChatView() {
             state: 'done' as const,
             persisted: true,
             attachments: m.attachments,
-            sources: mergeMessageSources(m.sources, sourcesInferredFromMessage(role, m.content)),
+            sources: m.sources,
             fileChanges: m.fileChanges,
             activities: activitiesFromToolsUsed(m.toolsUsed),
           }
@@ -917,11 +920,13 @@ export default function ChatView() {
       completedSessionsRef.current.add(event.payload.sessionId)
       activeSessionRef.current = null
 
-      const localSources = mergeMessageSources(
-        sourcesFromLocalPaths(fullOutput || ''),
-        sourcesFromDeliverablePaths(event.payload.deliverablePaths),
-      )
-      await Promise.allSettled(localSources
+      // Only backend-verified deliverables become trusted message sources.
+      // Paths merely printed by the model are still used to rewrite markdown
+      // links, but MessageResources existence-checks them before preview.
+      const durableSources = sourcesFromDeliverablePaths(event.payload.deliverablePaths)
+      const citedSources = sourcesFromLocalPaths(fullOutput || '')
+      const linkSources = mergeMessageSources(durableSources, citedSources)
+      await Promise.allSettled(durableSources
         .map(source => source.path)
         .filter((path): path is string => !!path)
         .map(path => registerExternalArtifact(path, event.payload.conversationId)))
@@ -929,13 +934,13 @@ export default function ChatView() {
       // Finalize the streaming message or create it if it didn't exist (fast execution)
       setConversationStoreMsgs(conversationId, prev => {
         const finalizeAssistant = (contentRaw: string, priorError?: string, priorSources?: MessageSource[]): Pick<Msg, 'content' | 'error' | 'state' | 'sources'> => {
-          const content = resolveDeliverableLinks(contentRaw.trim(), localSources)
+          const content = resolveDeliverableLinks(contentRaw.trim(), linkSources)
           const errorText = success ? undefined : (error || priorError)
           const errorOnly = !success && !!content && (
             /^(error|erreur)\b/i.test(content)
             || (!!errorText && content === errorText.trim())
           )
-          const sources = mergeMessageSources(priorSources, localSources, sourcesFromLocalPaths(content))
+          const sources = mergeMessageSources(priorSources, durableSources)
           if (errorOnly) {
             return { content, error: undefined, state: 'error', sources }
           }
@@ -1049,7 +1054,7 @@ export default function ChatView() {
                 state: 'done' as const,
                 persisted: true,
                 attachments: message.attachments,
-                sources: mergeMessageSources(message.sources, sourcesInferredFromMessage(role, message.content)),
+                sources: message.sources,
                 fileChanges: message.fileChanges,
                 activities: activitiesFromToolsUsed(message.toolsUsed),
               }
@@ -1786,7 +1791,7 @@ export default function ChatView() {
                       state: 'done' as const,
                       persisted: true,
                       attachments: m.attachments,
-                      sources: mergeMessageSources(m.sources, sourcesInferredFromMessage(role, m.content)),
+                      sources: m.sources,
                       fileChanges: m.fileChanges,
                       activities: activitiesFromToolsUsed(m.toolsUsed),
                     }
@@ -2444,16 +2449,51 @@ function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: s
     if (trustedSourcePaths.has(item.target)) return true
     return existingFiles.has(item.target)
   })
-  if (!resources.length) return null
   const imageResources = msg.role === 'assistant'
     ? resources.filter(item => item.target && INLINE_IMAGE_EXT.test(item.target))
     : []
+  const pdfCandidates = msg.role === 'assistant'
+    ? resources.filter(item => item.kind === 'file' && item.target && /\.pdf$/i.test(item.target))
+    : []
+  const [readablePdfs, setReadablePdfs] = useState<Set<string>>(() => new Set())
+  const pdfKey = pdfCandidates.map(item => item.target).join('\n')
+  useEffect(() => {
+    let cancelled = false
+    if (!pdfCandidates.length) {
+      setReadablePdfs(new Set())
+      return
+    }
+    void Promise.all(pdfCandidates.map(async item => {
+      const target = item.target!
+      try {
+        const preview = await prepareFilePreview(target)
+        const ok = preview.kind === 'pdf'
+          || Boolean(preview.previewPath?.toLowerCase().endsWith('.pdf'))
+        return ok ? target : null
+      } catch {
+        return null
+      }
+    })).then(results => {
+      if (cancelled) return
+      setReadablePdfs(new Set(results.filter((path): path is string => Boolean(path))))
+    })
+    return () => { cancelled = true }
+  }, [pdfKey])
+  const pdfResources = pdfCandidates.filter(item => item.target && readablePdfs.has(item.target))
+  // Hide phantom PDF chips until prepareFilePreview confirms the file is readable.
+  const chipResources = resources.filter(item => {
+    if (item.kind !== 'file' || !item.target || !/\.pdf$/i.test(item.target)) return true
+    return readablePdfs.has(item.target)
+  })
   const visualizationResources = msg.role === 'assistant'
     ? selectPrimaryVisualizations(
       resources.filter(item => item.kind === 'file' && item.target && INLINE_VISUALIZATION_EXT.test(item.target)),
       msg.content || '',
     )
     : []
+  if (!chipResources.length && !pdfResources.length && !imageResources.length && !visualizationResources.length) {
+    return null
+  }
   return (
     <>
       {imageResources.length > 0 && (
@@ -2476,9 +2516,9 @@ function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: s
           })}
         </div>
       )}
-      {msg.role === 'assistant' && resources.some(item => item.kind === 'file' && /\.pdf$/i.test(item.target || '')) && (
+      {pdfResources.length > 0 && (
         <div className="message-pdf-previews" aria-label="PDF générés">
-          {resources.filter(item => item.kind === 'file' && /\.pdf$/i.test(item.target || '')).map(item => (
+          {pdfResources.map(item => (
             <PdfViewer key={`pdf-${normalizeLocalFilePathKey(item.target || item.id)}`} path={item.target!}
               title={item.name || fileNameFromPath(item.target!)}
               onOpen={() => onOpen(item.target!, item.name, 'file')} />
@@ -2500,8 +2540,9 @@ function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: s
           })}
         </div>
       )}
+      {chipResources.length > 0 && (
       <div className="message-resources">
-        {resources.map(item => {
+        {chipResources.map(item => {
           const label = item.name || fileNameFromPath(item.target || '')
           return (
             <button
@@ -2524,6 +2565,7 @@ function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: s
           )
         })}
       </div>
+      )}
     </>
   )
 }

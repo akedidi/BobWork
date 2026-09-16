@@ -87,6 +87,7 @@ pub struct RuntimeManager {
     core_path: Option<PathBuf>,
     active_processes: Arc<Mutex<HashMap<String, RuntimeProcessDiagnostic>>>,
     process_cancellations: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    operation_cancellations: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ impl RuntimeManager {
             core_path: bob_work_core_path(),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
             process_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            operation_cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -134,6 +136,7 @@ impl RuntimeManager {
             core_path: None,
             active_processes: Arc::new(Mutex::new(HashMap::new())),
             process_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            operation_cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -591,44 +594,77 @@ impl RuntimeManager {
             None,
         )?;
 
-        let result = match strategy {
-            ExternalInstallStrategy::PythonIndex if is_managed_cli_manifest(&manifest) => {
-                super::cli_runtime_catalog::install_managed_cli(
-                    &manifest,
-                    &shared_python,
-                    &candidate,
-                )
-                .await
-                .map(|_| ())
-            }
-            ExternalInstallStrategy::PythonIndex => self
-                .install_python_packages(&manifest, &shared_python, python_mode, &candidate)
-                .await
-                .map(|_| ()),
-            ExternalInstallStrategy::CliArchive | ExternalInstallStrategy::NpmRegistry => {
-                super::cli_runtime_catalog::install_managed_cli(
-                    &manifest,
-                    &shared_python,
-                    &candidate,
-                )
-                .await
-                .map(|_| ())
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        self.operation_cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(runtime_id.to_string(), cancel_tx);
+
+        let install_future = async {
+            match strategy {
+                ExternalInstallStrategy::PythonIndex if is_managed_cli_manifest(&manifest) => {
+                    super::cli_runtime_catalog::install_managed_cli(
+                        &manifest,
+                        &shared_python,
+                        &candidate,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                ExternalInstallStrategy::PythonIndex => self
+                    .install_python_packages(&manifest, &shared_python, python_mode, &candidate)
+                    .await
+                    .map(|_| ()),
+                ExternalInstallStrategy::CliArchive | ExternalInstallStrategy::NpmRegistry => {
+                    super::cli_runtime_catalog::install_managed_cli(
+                        &manifest,
+                        &shared_python,
+                        &candidate,
+                    )
+                    .await
+                    .map(|_| ())
+                }
             }
         };
+
+        let result = tokio::select! {
+            result = install_future => result,
+            _ = &mut cancel_rx => Err(AppError::PermissionDenied(
+                format!("{} installation cancelled", manifest.name),
+            )),
+        };
+
+        self.operation_cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(runtime_id);
+
         if let Err(error) = result {
             let _ = std::fs::remove_dir_all(&candidate);
             let message = error.to_string();
+            let cancelled = message.to_ascii_lowercase().contains("cancelled");
             self.set_status(
                 db,
                 runtime_id,
-                if current.install_path.is_some() {
+                if cancelled {
+                    if current.install_path.is_some() {
+                        RuntimeStatus::Installed
+                    } else {
+                        RuntimeStatus::NotInstalled
+                    }
+                } else if current.install_path.is_some() {
                     RuntimeStatus::Installed
                 } else {
                     RuntimeStatus::Broken
                 },
+                if cancelled { None } else { Some(&message) },
+            )?;
+            self.finish_operation(
+                db,
+                &operation_id,
+                if cancelled { "cancelled" } else { "failed" },
                 Some(&message),
             )?;
-            self.finish_operation(db, &operation_id, "failed", Some(&message))?;
             return Err(error);
         }
 
@@ -1430,6 +1466,15 @@ impl RuntimeManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(process_id)
+            .is_some_and(|cancel| cancel.send(()).is_ok())
+    }
+
+    /// Cancel an in-flight install/update for `runtime_id` (user stop button).
+    pub fn cancel_operation(&self, runtime_id: &str) -> bool {
+        self.operation_cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(runtime_id)
             .is_some_and(|cancel| cancel.send(()).is_ok())
     }
 

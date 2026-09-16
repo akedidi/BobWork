@@ -22,8 +22,6 @@ import type {
   PluginMcpStatus,
   PluginMcpTestResult,
   PluginResourceStatus,
-  PluginVersion,
-  PluginVersionDiff,
   Approval,
   ResolveApprovalInput,
   Artifact,
@@ -296,18 +294,6 @@ export const getPlugins = () => invoke<Plugin[]>('get_plugins');
 
 export const getPlugin = (id: string) => invoke<Plugin | null>('get_plugin', { id });
 
-export const getPluginVersions = (pluginId: string) =>
-  invoke<PluginVersion[]>('get_plugin_versions', { pluginId });
-
-export const comparePluginVersion = (pluginId: string, version: string) =>
-  invoke<PluginVersionDiff>('compare_plugin_version', { pluginId, version });
-
-export const installPluginUpdate = (pluginId: string, version: string) =>
-  invoke<Plugin>('install_plugin_update', { pluginId, version });
-
-export const rollbackPluginVersion = (pluginId: string, version: string) =>
-  invoke<Plugin>('rollback_plugin_version', { pluginId, version });
-
 export const createPlugin = (input: CreatePluginInput) =>
   invoke<Plugin>('create_plugin', { input });
 
@@ -511,6 +497,8 @@ export const removeExternalRuntime = (runtimeId: string, confirmed: boolean) =>
   invoke<void>('remove_external_runtime', { runtimeId, confirmed });
 export const cancelRuntimeProcess = (processId: string) =>
   invoke<boolean>('cancel_runtime_process', { processId });
+export const cancelRuntimeOperation = (runtimeId: string) =>
+  invoke<boolean>('cancel_runtime_operation', { runtimeId });
 
 export const getCodeGraphSuggestion = (message: string, projectId?: string) =>
   invoke<ConversationInteraction | null>('get_codegraph_suggestion', { message, projectId });
@@ -530,6 +518,7 @@ export const checkForUpdates = () => invoke<UpdateCheckResult>('check_for_update
 export const installAvailableUpdate = () => invoke<void>('install_available_update')
 
 export const installBobShell = () => invoke<boolean>('install_bob_shell');
+export const uninstallBobShell = () => invoke<boolean>('uninstall_bob_shell');
 
 export interface CreatePermissionGrantInput {
   actionType: string;
@@ -797,6 +786,12 @@ export interface ComposerAttachmentGrant {
 
 export const allowComposerAttachments = (paths: string[]) =>
   invoke<ComposerAttachmentGrant[]>('allow_composer_attachments', { paths });
+
+export const readClipboardAttachmentPaths = () =>
+  invoke<string[]>('read_clipboard_attachment_paths');
+
+export const writeClipboardAttachmentImage = (bytes: number[], mime: string) =>
+  invoke<string>('write_clipboard_attachment_image', { bytes, mime });
 
 export const startNativeAudioRecording = () =>
   invoke<void>('start_native_audio_recording');

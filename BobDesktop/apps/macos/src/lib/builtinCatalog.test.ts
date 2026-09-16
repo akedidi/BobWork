@@ -23,6 +23,8 @@ describe('builtinCatalog', () => {
     expect(isBuiltinSkill({ slug: 'skill-creator' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'plugin-creator' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'agent-review' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'capability-router' })).toBe(true)
+    expect(isBuiltinSkill({ slug: 'image-annotate' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'computer-use' })).toBe(true)
     expect(isBuiltinSkill({ slug: 'my-personal-skill' })).toBe(false)
     expect(isBuiltinSkill({ slug: 'bonjour-simple', builtin: false })).toBe(false)

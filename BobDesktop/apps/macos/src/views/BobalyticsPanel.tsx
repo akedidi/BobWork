@@ -7,6 +7,7 @@ import {
 import { exportBobalytics, getBobalytics } from '../lib/ipc'
 import { errorMessage } from '../lib/errorMessage'
 import { useT } from '../i18n'
+import { useTransientStatus } from '../hooks/useTransientStatus'
 import type { BobalyticsReport, BobalyticsScope, BobalyticsTeamPoint } from '@bob-work/shared-types'
 
 type Tab = 'today' | 'patterns'
@@ -23,7 +24,7 @@ export default function BobalyticsPanel() {
   const [report, setReport] = useState<BobalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useTransientStatus(3000)
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -60,7 +61,6 @@ export default function BobalyticsPanel() {
     try {
       await exportBobalytics(path, scope, rangeDays)
       setStatus(t('bobalytics.exported'))
-      window.setTimeout(() => setStatus(''), 2500)
     } catch (err) {
       setError(errorMessage(err))
     }

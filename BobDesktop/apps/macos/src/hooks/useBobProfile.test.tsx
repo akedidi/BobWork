@@ -19,6 +19,7 @@ vi.mock('../lib/ipc', () => ({
   getBobAuthSnapshot: mocks.getBobAuthSnapshot,
   hasSessionSecret: mocks.hasSessionSecret,
   installBobShell: vi.fn(),
+  uninstallBobShell: vi.fn(),
   revokePermissionGrant: vi.fn(),
 }))
 

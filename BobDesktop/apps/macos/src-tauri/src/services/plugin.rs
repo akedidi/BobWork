@@ -4,9 +4,7 @@
 
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
-use crate::models::plugin::{
-    CreatePluginInput, Plugin, PluginValidationResult, PluginVersion, PluginVersionDiff,
-};
+use crate::models::plugin::{CreatePluginInput, Plugin, PluginValidationResult};
 use crate::services::plugin_deploy::PluginDeployService;
 use crate::services::plugin_extensions::PluginExtensionService;
 use crate::services::plugin_mcp::PluginMcpService;
@@ -287,20 +285,35 @@ impl PluginService {
                 };
                 if !self.version_exists(db, packaged.id, packaged.version)? {
                     self.persist_version(db, &candidate, None, false)?;
+                } else {
+                    self.refresh_builtin_version(db, &candidate)?;
                 }
-                // Stage only — do not auto-activate (Restaurer / Mettre à jour stay honest).
-                let keep_available = existing
-                    .available_version
-                    .as_deref()
-                    .and_then(|value| Self::parse_version(value).ok())
-                    .filter(|version| version > &packaged_version)
-                    .map(|version| version.to_string())
-                    .unwrap_or_else(|| packaged.version.into());
-                let conn = db.conn.lock().unwrap();
-                conn.execute(
-                    "UPDATE plugins SET available_version=?1,updated_at=?2 WHERE id=?3",
-                    params![keep_available, now, packaged.id],
-                )?;
+                match self.activate_version(db, packaged.id, packaged.version) {
+                    Ok(_) => {
+                        info!(
+                            "Auto-activated packaged work plugin {} to {}",
+                            packaged.id, packaged.version
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Could not auto-activate packaged work plugin {} to {}: {}",
+                            packaged.id, packaged.version, error
+                        );
+                        let keep_available = existing
+                            .available_version
+                            .as_deref()
+                            .and_then(|value| Self::parse_version(value).ok())
+                            .filter(|version| version > &packaged_version)
+                            .map(|version| version.to_string())
+                            .unwrap_or_else(|| packaged.version.into());
+                        let conn = db.conn.lock().unwrap();
+                        conn.execute(
+                            "UPDATE plugins SET available_version=?1,updated_at=?2 WHERE id=?3",
+                            params![keep_available, now, packaged.id],
+                        )?;
+                    }
+                }
             } else if packaged_version == current_version {
                 let mut manifest = packaged.manifest.clone();
                 if let Some(object) = manifest.as_object_mut() {
@@ -2028,46 +2041,6 @@ impl PluginService {
         Ok(count > 0)
     }
 
-    pub fn list_versions(&self, db: &Database, plugin_id: &str) -> AppResult<Vec<PluginVersion>> {
-        let plugin = self
-            .get_by_id(db, plugin_id)?
-            .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-        let conn = db.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT plugin_id,version,release_notes,created_at,installed_at
-             FROM plugin_versions WHERE plugin_id=?1",
-        )?;
-        let mut versions = stmt
-            .query_map(params![plugin_id], |row| {
-                let version: String = row.get(1)?;
-                let state = if version == plugin.version {
-                    "current"
-                } else if plugin.available_version.as_deref() == Some(version.as_str()) {
-                    "available"
-                } else {
-                    return Ok(None);
-                };
-                Ok(Some(PluginVersion {
-                    plugin_id: row.get(0)?,
-                    version,
-                    release_notes: row.get(2)?,
-                    created_at: row.get(3)?,
-                    installed_at: row.get(4)?,
-                    state: state.into(),
-                }))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        versions.sort_by(|left, right| {
-            let left = Version::parse(&left.version).ok();
-            let right = Version::parse(&right.version).ok();
-            right.cmp(&left)
-        });
-        Ok(versions)
-    }
-
     fn version_manifest(
         &self,
         db: &Database,
@@ -2089,79 +2062,6 @@ impl PluginService {
                 other => AppError::Database(other.to_string()),
             })?;
         serde_json::from_str(&manifest).map_err(AppError::from)
-    }
-
-    pub fn compare_version(
-        &self,
-        db: &Database,
-        plugin_id: &str,
-        to_version: &str,
-    ) -> AppResult<PluginVersionDiff> {
-        let plugin = self
-            .get_by_id(db, plugin_id)?
-            .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-        let target = self.version_manifest(db, plugin_id, to_version)?;
-        let mut changes = vec![];
-        let mut warnings = vec![];
-        let current_permissions = Self::array_values(&plugin.manifest, "permissions", "type");
-        let target_permissions = Self::array_values(&target, "permissions", "type");
-        let added_permissions = target_permissions
-            .difference(&current_permissions)
-            .cloned()
-            .collect::<Vec<_>>();
-        let removed_permissions = current_permissions
-            .difference(&target_permissions)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !added_permissions.is_empty() {
-            warnings.push(format!(
-                "Nouvelles autorisations demandées : {}",
-                added_permissions.join(", ")
-            ));
-        }
-        if !removed_permissions.is_empty() {
-            changes.push(format!(
-                "Autorisations retirées : {}",
-                removed_permissions.join(", ")
-            ));
-        }
-        Self::describe_set_change(
-            &mut changes,
-            "Fonctions",
-            Self::string_array(&plugin.manifest, "capabilities"),
-            Self::string_array(&target, "capabilities"),
-        );
-        Self::describe_set_change(
-            &mut changes,
-            "Outils MCP",
-            Self::object_keys(&plugin.manifest, "mcpServers"),
-            Self::object_keys(&target, "mcpServers"),
-        );
-        Self::describe_set_change(
-            &mut changes,
-            "Connexions",
-            Self::array_values(&plugin.manifest, "integrations", "provider"),
-            Self::array_values(&target, "integrations", "provider"),
-        );
-        Self::describe_set_change(
-            &mut changes,
-            "Actions automatiques",
-            Self::array_values(&plugin.manifest, "hooks", "id"),
-            Self::array_values(&target, "hooks", "id"),
-        );
-        if let Some(notes) = Self::release_notes(&target) {
-            changes.insert(0, notes);
-        }
-        if changes.is_empty() && warnings.is_empty() {
-            changes.push("Aucun changement fonctionnel déclaré.".into());
-        }
-        Ok(PluginVersionDiff {
-            from_version: plugin.version,
-            to_version: to_version.into(),
-            changes,
-            warnings,
-            permissions_changed: current_permissions != target_permissions,
-        })
     }
 
     pub fn activate_version(
@@ -2303,51 +2203,6 @@ impl PluginService {
         self.prune_plugin_versions(db, plugin_id, &[version])?;
         self.get_by_id(db, plugin_id)?
             .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))
-    }
-
-    fn string_array(manifest: &serde_json::Value, key: &str) -> BTreeSet<String> {
-        manifest
-            .get(key)
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect()
-    }
-
-    fn array_values(manifest: &serde_json::Value, key: &str, field: &str) -> BTreeSet<String> {
-        manifest
-            .get(key)
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.get(field).and_then(|value| value.as_str()))
-            .map(str::to_string)
-            .collect()
-    }
-
-    fn object_keys(manifest: &serde_json::Value, key: &str) -> BTreeSet<String> {
-        manifest
-            .get(key)
-            .and_then(|value| value.as_object())
-            .map(|value| value.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    fn describe_set_change(
-        changes: &mut Vec<String>,
-        label: &str,
-        before: BTreeSet<String>,
-        after: BTreeSet<String>,
-    ) {
-        let added = after.difference(&before).cloned().collect::<Vec<_>>();
-        let removed = before.difference(&after).cloned().collect::<Vec<_>>();
-        if !added.is_empty() {
-            changes.push(format!("{} ajoutés : {}", label, added.join(", ")));
-        }
-        if !removed.is_empty() {
-            changes.push(format!("{} retirés : {}", label, removed.join(", ")));
-        }
     }
 
     pub fn create(&self, db: &Database, input: CreatePluginInput) -> AppResult<Plugin> {
@@ -4432,6 +4287,17 @@ mod builtin_tests {
         db
     }
 
+    fn stored_versions(db: &Database, plugin_id: &str) -> Vec<String> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT version FROM plugin_versions WHERE plugin_id=?1 ORDER BY version")
+            .expect("prepare versions query");
+        stmt.query_map(params![plugin_id], |row| row.get::<_, String>(0))
+            .expect("query versions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect versions")
+    }
+
     #[test]
     fn resolves_personal_plugin_by_manifest_slug_or_legacy_id() {
         let db = test_database();
@@ -5706,6 +5572,57 @@ mod builtin_tests {
     }
 
     #[test]
+    fn ensure_auto_activates_packaged_cto_update_and_prunes_previous_version() {
+        let db = test_database();
+        let service = PluginService::new();
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("seed packaged CTO");
+
+        let packaged = service
+            .get_by_id(&db, "bob-work-cto-invest")
+            .expect("lookup")
+            .expect("CTO");
+        let previous_version = "0.1.0";
+        let mut previous_manifest = packaged.manifest.clone();
+        previous_manifest["version"] = serde_json::Value::String(previous_version.into());
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE plugins SET version=?1,manifest=?2,available_version=?3,updated_at=?4 WHERE id=?5",
+                params![
+                    previous_version,
+                    previous_manifest.to_string(),
+                    packaged.version,
+                    now,
+                    packaged.id,
+                ],
+            )
+            .expect("simulate older installed CTO");
+        }
+        let previous = service
+            .get_by_id(&db, &packaged.id)
+            .expect("lookup previous")
+            .expect("previous CTO");
+        service
+            .persist_version(&db, &previous, None, true)
+            .expect("persist previous version");
+
+        service
+            .ensure_builtin_plugins(&db)
+            .expect("auto-activate packaged update");
+
+        let upgraded = service
+            .get_by_id(&db, &packaged.id)
+            .expect("lookup upgraded")
+            .expect("upgraded CTO");
+        assert_eq!(upgraded.version, packaged.version);
+        assert!(upgraded.available_version.is_none());
+        assert_eq!(stored_versions(&db, &packaged.id), vec![packaged.version]);
+    }
+
+    #[test]
     fn packaged_work_plugin_stays_deleted_after_uninstall() {
         let db = test_database();
         let service = PluginService::new();
@@ -6056,12 +5973,7 @@ mod builtin_tests {
         );
         assert!(skill_after.contains("improved local architecture CLI"));
 
-        let history = service
-            .list_versions(&db, &upgraded.id)
-            .expect("version history");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].state, "current");
-        assert_eq!(history[0].version, "1.1.0");
+        assert_eq!(stored_versions(&db, &upgraded.id), vec!["1.1.0"]);
 
         // Source mutations after auto-activation do not rewrite the active DB
         // version until the SemVer is bumped again.
@@ -6092,12 +6004,7 @@ mod builtin_tests {
 
         let rollback = service.activate_version(&db, &upgraded.id, "1.0.0");
         assert!(rollback.is_err());
-        let history_after_upgrade = service
-            .list_versions(&db, &upgraded.id)
-            .expect("version history after upgrade");
-        assert_eq!(history_after_upgrade.len(), 1);
-        assert_eq!(history_after_upgrade[0].version, "1.1.0");
-        assert_eq!(history_after_upgrade[0].state, "current");
+        assert_eq!(stored_versions(&db, &upgraded.id), vec!["1.1.0"]);
 
         std::fs::remove_dir_all(&root).expect("cleanup test bundle");
     }

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   getDbConnections: vi.fn(),
   listBobSlashCommands: vi.fn(),
   allowComposerAttachments: vi.fn(),
+  readClipboardAttachmentPaths: vi.fn(),
+  writeClipboardAttachmentImage: vi.fn(),
   startNativeAudioRecording: vi.fn(),
   stopNativeAudioRecording: vi.fn(),
   getNativeAudioRecordingLevel: vi.fn(),
@@ -55,6 +57,8 @@ vi.mock('../../lib/ipc', () => ({
   getDbConnections: mocks.getDbConnections,
   listBobSlashCommands: mocks.listBobSlashCommands,
   allowComposerAttachments: mocks.allowComposerAttachments,
+  readClipboardAttachmentPaths: mocks.readClipboardAttachmentPaths,
+  writeClipboardAttachmentImage: mocks.writeClipboardAttachmentImage,
   startNativeAudioRecording: mocks.startNativeAudioRecording,
   stopNativeAudioRecording: mocks.stopNativeAudioRecording,
   getNativeAudioRecordingLevel: mocks.getNativeAudioRecordingLevel,
@@ -88,6 +92,8 @@ describe('Composer popovers', () => {
     mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) =>
       paths.map(path => ({ path, isDirectory: path.endsWith('dossier-projet') })),
     )
+    mocks.readClipboardAttachmentPaths.mockResolvedValue([])
+    mocks.writeClipboardAttachmentImage.mockResolvedValue('/tmp/paste-clipboard.png')
     mocks.startNativeAudioRecording.mockResolvedValue(undefined)
     mocks.stopNativeAudioRecording.mockResolvedValue({
       id: 'meeting-1',
@@ -285,6 +291,27 @@ describe('Composer popovers', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'photo.png' })).toBeVisible())
     expect(screen.getByText('note.txt')).toBeVisible()
     expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/photo.png', '/tmp/note.txt'])
+  })
+
+  it('colle des fichiers Finder comme des pièces jointes (⌘V)', async () => {
+    mocks.readClipboardAttachmentPaths.mockResolvedValue(['/tmp/capture.png', '/tmp/notes.pdf'])
+    await renderComposer()
+
+    const textarea = screen.getByRole('textbox')
+    const pasteEvent = createEvent.paste(textarea)
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: {
+        types: ['Files'],
+        files: [],
+        items: [],
+      },
+    })
+    fireEvent(textarea, pasteEvent)
+
+    await waitFor(() => expect(screen.getByRole('img', { name: 'capture.png' })).toBeVisible())
+    expect(screen.getByText('notes.pdf')).toBeVisible()
+    expect(mocks.readClipboardAttachmentPaths).toHaveBeenCalled()
+    expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/capture.png', '/tmp/notes.pdf'])
   })
 
   it('accepte le drag & drop HTML avec chemins injectés par Tauri', async () => {

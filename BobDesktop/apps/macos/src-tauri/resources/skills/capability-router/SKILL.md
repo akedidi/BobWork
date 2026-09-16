@@ -36,6 +36,7 @@ Utilise ce skill **en premier** quand tu hésites entre une action native Bob Sh
 | Architecture cloud (SVG pro) | `@plugin:agentic-cloud-architect` | skill `cloud-architect` (pas de MCP) |
 | Site web **http(s)** visible | `@plugin:builtin-chrome-control` | MCP `bob-work-chrome-control` — **jamais** HTML local / `file://` |
 | Bureau macOS | `@skill:computer-use` | MCP `bob-work-computer-use` (si activé) |
+| Annoter un screenshot (rectangles / surlignage) | `@skill:image-annotate` | skill `image-annotate` — Python partagé + Pillow (natif) |
 | Carte / itinéraire | `@plugin:builtin-map-tools` | skill `map-tools` / MCP `bob-work-map-tools` |
 | GitHub PR / repo | `@integration:github` | MCP `bob-work-github` |
 

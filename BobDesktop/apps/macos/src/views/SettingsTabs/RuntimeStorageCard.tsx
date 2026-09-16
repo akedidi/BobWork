@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { RuntimeRecord, RuntimeStorageReport } from '@bob-work/shared-types'
+import { Square } from 'lucide-react'
 import {
+  cancelRuntimeOperation,
   cancelRuntimeProcess,
   getRuntimeInstallationPlan,
   getRuntimeStorage,
@@ -18,10 +20,14 @@ type BusyAction = 'install' | 'update' | 'remove' | 'cancel'
 type BusyState = { id: string; action: BusyAction } | null
 type RuntimeWorkingAction = Exclude<BusyAction, 'cancel'>
 
-function workingActionFor(runtime: RuntimeRecord, busy: BusyState): RuntimeWorkingAction | null {
+function workingActionFor(
+  runtime: RuntimeRecord,
+  busy: BusyState,
+  pendingRemoves: Set<string>,
+): RuntimeWorkingAction | null {
   if (runtime.status === 'installing') return 'install'
   if (runtime.status === 'updating') return 'update'
-  if (runtime.status === 'removing') return 'remove'
+  if (runtime.status === 'removing' || pendingRemoves.has(runtime.runtimeId)) return 'remove'
   if (busy?.id !== runtime.runtimeId || busy.action === 'cancel') return null
   return busy.action
 }
@@ -70,6 +76,8 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
   const [report, setReport] = useState<RuntimeStorageReport | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [busy, setBusy] = useState<BusyState>(null)
+  /** Survives poll races so Install never appears while a delete is still in flight. */
+  const [pendingRemoves, setPendingRemoves] = useState<Set<string>>(() => new Set())
   const [searchQuery, setSearchQuery] = useState('')
   const runtimeStatus = (status: RuntimeRecord['status']) => {
     switch (status) {
@@ -134,16 +142,20 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
         confirmLabel: t('settings.runtimeInstall'),
       })
       if (!accepted) return
-      setBusy({
-        id: runtime.runtimeId,
-        action: runtime.status === 'installed' ? 'update' : 'install',
-      })
-      await installExternalRuntime(runtime.runtimeId, true)
-      setStatus(t('settings.runtimeInstalled', { name: runtime.name }))
-      await refresh()
+      const action = runtime.status === 'installed' ? 'update' as const : 'install' as const
+      setBusy({ id: runtime.runtimeId, action })
+      try {
+        await installExternalRuntime(runtime.runtimeId, true)
+        setStatus(t('settings.runtimeInstalled', { name: runtime.name }))
+        await refresh()
+      } finally {
+        // Keep the row spinner if the backend still reports an in-progress status.
+        setBusy(current => (
+          current?.id === runtime.runtimeId && current.action === action ? null : current
+        ))
+      }
     } catch (error) {
       setStatus(errorMessage(error))
-    } finally {
       setBusy(null)
     }
   }
@@ -155,15 +167,24 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
       destructive: true,
     })
     if (!confirmed) return
+    setPendingRemoves(current => new Set(current).add(runtime.runtimeId))
+    setBusy({ id: runtime.runtimeId, action: 'remove' })
     try {
-      setBusy({ id: runtime.runtimeId, action: 'remove' })
       await removeExternalRuntime(runtime.runtimeId, true)
       setStatus(t('settings.runtimeRemoved', { name: runtime.name }))
       await refresh()
     } catch (error) {
       setStatus(errorMessage(error))
     } finally {
-      setBusy(null)
+      setBusy(current => (
+        current?.id === runtime.runtimeId && current.action === 'remove' ? null : current
+      ))
+      setPendingRemoves(current => {
+        if (!current.has(runtime.runtimeId)) return current
+        const next = new Set(current)
+        next.delete(runtime.runtimeId)
+        return next
+      })
     }
   }
 
@@ -180,10 +201,41 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
     }
   }
 
+  const stopOperation = async (runtime: RuntimeRecord) => {
+    try {
+      const cancelled = await cancelRuntimeOperation(runtime.runtimeId)
+      if (cancelled) {
+        setStatus(t('settings.runtimeInstallStopped', { name: runtime.name }))
+      }
+      await refresh()
+    } catch (error) {
+      setStatus(errorMessage(error))
+    } finally {
+      setBusy(current => (
+        current?.id === runtime.runtimeId
+          && (current.action === 'install' || current.action === 'update')
+          ? null
+          : current
+      ))
+    }
+  }
+
   const needle = searchQuery.trim().toLowerCase()
   const filteredRuntimes = report
     ? report.runtimes.filter(runtime => runtimeMatchesQuery(runtime, needle))
     : []
+  const activeWork = report
+    ? report.runtimes
+      .map(runtime => ({ runtime, action: workingActionFor(runtime, busy, pendingRemoves) }))
+      .find(item => item.action)
+    : undefined
+  const activeWorkLabel = activeWork?.action === 'install'
+    ? t('settings.runtimeProgressInstall')
+    : activeWork?.action === 'update'
+      ? t('settings.runtimeProgressUpdate')
+      : activeWork?.action === 'remove'
+        ? t('settings.runtimeProgressRemove')
+        : null
 
   return (
     <Card title={t('settings.runtimeCatalogHeading')}>
@@ -207,6 +259,16 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
             autoComplete="off"
           />
         </div>
+        {activeWork && activeWorkLabel && (
+          <div className="settings-install-busy runtime-catalog-busy" role="status" aria-live="polite">
+            <span className="task-spinner" aria-hidden="true" />
+            <span>
+              <strong>{activeWork.runtime.name}</strong>
+              {' — '}
+              {activeWorkLabel}
+            </span>
+          </div>
+        )}
         <div className="runtime-storage-summary">
           <span>{t('settings.runtimeCore')}<strong>{formatBytes(report.coreBytes)}</strong></span>
           <span>{t('settings.runtimeShared')}<strong>{formatBytes(report.sharedBytes)}</strong></span>
@@ -240,7 +302,7 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
         </div>}
         <div className="settings-list runtime-list">
           {filteredRuntimes.map(runtime => {
-            const working = workingActionFor(runtime, busy)
+            const working = workingActionFor(runtime, busy, pendingRemoves)
             const displayStatus = displayStatusFor(runtime, working)
             const progressLabel = working === 'install'
               ? t('settings.runtimeProgressInstall')
@@ -277,36 +339,55 @@ export function RuntimeStorageCard({ setStatus }: { setStatus: (message: string)
                 && !runtime.removable
                 && <small>{t('settings.runtimeSystemInstall')}</small>}
               {runtime.error && <small className="runtime-error">{runtime.error}</small>}
-              {progressLabel && <small className="runtime-busy" role="status">
-                <span className="task-spinner" aria-hidden="true" />
-                {progressLabel}
-              </small>}
+              {progressLabel && (
+                <div className="settings-install-busy" role="status" aria-live="polite">
+                  <span className="task-spinner" aria-hidden="true" />
+                  {progressLabel}
+                </div>
+              )}
             </div>
             <div className="runtime-actions">
-              {runtime.runtimeType === 'external_managed' && runtime.management !== 'manual' &&
-                (working === 'install' || working === 'update'
-                  ? <button className="secondary-btn" disabled aria-busy>
+              {runtime.runtimeType === 'external_managed' && runtime.management !== 'manual' && (
+                working === 'install' || working === 'update' ? (
+                  <>
+                    <button className="secondary-btn" disabled aria-busy>
                       <span className="task-spinner" aria-hidden="true" />
                       {working === 'update' ? t('settings.runtimeStatusUpdating') : t('settings.runtimeStatusInstalling')}
                     </button>
-                  : (runtime.status !== 'installed' || runtime.installedVersion !== runtime.version) &&
-                    <button className="secondary-btn" disabled={busy !== null} onClick={() => void install(runtime)}>
-                      {runtime.status === 'installed' ? t('settings.runtimeUpdate') : t('settings.runtimeInstall')}
-                    </button>)}
-              {runtime.runtimeType === 'external_managed' && runtime.management !== 'manual' &&
-                (working === 'remove'
-                  ? <button className="danger-link" disabled aria-busy>
-                      <span className="task-spinner" aria-hidden="true" />
-                      {t('settings.runtimeStatusRemoving')}
+                    <button
+                      type="button"
+                      className="icon-btn runtime-stop-btn"
+                      aria-label={t('settings.runtimeInstallStop')}
+                      title={t('settings.runtimeInstallStop')}
+                      onClick={() => void stopOperation(runtime)}
+                    >
+                      <Square size={12} fill="currentColor" aria-hidden="true" />
                     </button>
-                  : runtime.status === 'installed' && runtime.removable &&
-                    <button className="danger-link" disabled={busy !== null} onClick={() => void remove(runtime)}>
-                      {t('settings.runtimeRemove')}
-                    </button>)}
+                  </>
+                ) : working === 'remove' ? (
+                  <button className="danger-link" disabled aria-busy>
+                    <span className="task-spinner" aria-hidden="true" />
+                    {t('settings.runtimeStatusRemoving')}
+                  </button>
+                ) : (
+                  <>
+                    {(runtime.status !== 'installed' || runtime.installedVersion !== runtime.version) && (
+                      <button className="secondary-btn" disabled={busy !== null} onClick={() => void install(runtime)}>
+                        {runtime.status === 'installed' ? t('settings.runtimeUpdate') : t('settings.runtimeInstall')}
+                      </button>
+                    )}
+                    {runtime.status === 'installed' && runtime.removable && (
+                      <button className="danger-link" disabled={busy !== null} onClick={() => void remove(runtime)}>
+                        {t('settings.runtimeRemove')}
+                      </button>
+                    )}
+                  </>
+                )
+              )}
               {runtime.runtimeType !== 'external_managed' && <small className="runtime-managed-label">
                 {runtime.runtimeType === 'shared' ? t('settings.runtimeManagedByBob') : t('settings.runtimeManagedByPlugin')}
               </small>}
-              {runtime.management === 'manual' && <button className="secondary-btn" disabled={busy !== null} onClick={() => void install(runtime)}>
+              {runtime.management === 'manual' && !working && <button className="secondary-btn" disabled={busy !== null} onClick={() => void install(runtime)}>
                 {t('settings.runtimeManualAction')}
               </button>}
             </div>

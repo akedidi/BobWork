@@ -16,9 +16,33 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     if (path.includes('Application Support')) {
       throw new Error('path not allowed on the configured scope')
     }
+    if (path.includes('missing-file')) {
+      throw new Error('ENOENT')
+    }
     return { isFile: true, isDirectory: false, size: 12 }
   }),
 }))
+
+vi.mock('../lib/ipc', async () => {
+  const actual = await vi.importActual<typeof import('../lib/ipc')>('../lib/ipc')
+  return {
+    ...actual,
+    prepareFilePreview: vi.fn(async (path: string) => {
+      if (path.includes('missing') || path.includes('mainIBM') || path.includes('startedIBM')) {
+        throw new Error('ENOENT')
+      }
+      return {
+        path,
+        name: path.split('/').pop() || 'file',
+        kind: path.toLowerCase().endsWith('.pdf') ? 'pdf' : 'file',
+        mimeType: path.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+        size: 12,
+        previewPath: path,
+        previewPaths: [],
+      }
+    }),
+  }
+})
 
 vi.mock('../components/FittedHtmlFrame', () => ({
   FittedHtmlFrame: ({ src, title }: { src: string; title: string }) => (
@@ -48,6 +72,34 @@ describe('MessageBubble', () => {
       expect(screen.getByTestId('native-pdf')).toHaveAttribute('data-path', '/tmp/Rapport.pdf')
       expect(screen.getByLabelText('PDF générés')).toBeVisible()
     })
+  })
+
+  it('n’affiche pas les aperçus PDF pour des chemins inventés absents du disque', async () => {
+    render(<MessageBubble msg={{
+      id: 'phantom-pdfs',
+      role: 'assistant',
+      content: [
+        'Livrables :',
+        '/tmp/Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf',
+        '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf',
+      ].join('\n'),
+      ts: '2026-09-14T22:45:00Z',
+      state: 'done',
+      sources: [
+        { id: 'bad', title: 'Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf', path: '/tmp/Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf' },
+        { id: 'good', title: 'Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf', path: '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf' },
+      ],
+    }} onOpenResource={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('native-pdf')).toHaveAttribute(
+        'data-path',
+        '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf',
+      )
+    })
+    expect(screen.queryByTestId('native-pdf')).toBeVisible()
+    expect(screen.getAllByTestId('native-pdf')).toHaveLength(1)
+    expect(screen.queryByText('Impossible de charger le PDF')).not.toBeInTheDocument()
   })
 
   it('n’affiche pas en chips les chemins sandbox bloqués absents du disque', async () => {

@@ -1220,10 +1220,6 @@ fn api_router(state: ApiState) -> Router {
             axum::routing::patch(update_remote_plugin),
         )
         .route(
-            "/api/v1/plugins/{id}/update",
-            axum::routing::post(install_remote_plugin_update),
-        )
-        .route(
             "/api/v1/skills/{*slug}",
             axum::routing::patch(update_remote_skill),
         )
@@ -3647,7 +3643,6 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
                 "enabled": plugin.install_state == "installed",
                 "favorite": favorites.contains(&format!("plugin:{}", plugin.id)),
                 "version": plugin.version,
-                "availableVersion": plugin.available_version,
                 "lastUsedAt": plugin.last_executed_at,
                 "validationState": plugin.validation_state,
                 "permissions": manifest_string_list(&plugin.manifest, "/permissions"),
@@ -3655,7 +3650,6 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
                 "tools": plugin_tools(&plugin.manifest),
                 "configuration": configuration,
                 "requiresMacConfiguration": !integration_ready || other_setup_required,
-                "canUpdate": !builtin && plugin.available_version.is_some(),
             })
         })
         .collect::<Vec<_>>();
@@ -3798,43 +3792,6 @@ async fn update_remote_plugin(
     let updated = service
         .get_by_id(&db, &id)?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plugin introuvable.".into()))?;
-    let _ = state.app.emit("catalog-updated", &id);
-    Ok(Json(json!({ "plugin": updated })))
-}
-
-async fn install_remote_plugin_update(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    authorize(&headers, &state.token)?;
-    let db = state.app.state::<Database>();
-    let service = PluginService::new();
-    let current = service
-        .get_by_id(&db, &id)?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plugin introuvable.".into()))?;
-    let builtin = current
-        .manifest
-        .get("builtin")
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| current.id.starts_with("builtin-"));
-    if builtin {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Les plugins intégrés sont mis à jour avec Bob Work sur le Mac.".into(),
-        ));
-    }
-    let version = current.available_version.clone().ok_or_else(|| {
-        ApiError(
-            StatusCode::CONFLICT,
-            "Aucune mise à jour locale n’est disponible pour ce plugin.".into(),
-        )
-    })?;
-    let updated = service.activate_version(&db, &id, &version)?;
-    if updated.install_state == "installed" {
-        let bob = state.app.state::<BobService>();
-        sync_remote_plugin_mcp(&bob, &updated, true)?;
-    }
     let _ = state.app.emit("catalog-updated", &id);
     Ok(Json(json!({ "plugin": updated })))
 }

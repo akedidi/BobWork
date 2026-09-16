@@ -12,14 +12,24 @@ import { LoadErrorBanner } from '../../components/LoadErrorBanner'
 import ModesView from '../ModesView'
 import { useAppDialog } from '../../components/AppDialog'
 import { errorMessage } from '../../lib/errorMessage'
+import { useUpdateStore } from '../../stores/updateStore'
 import { Heading, Card, SectionLoader, SettingsFields, ToggleRow, SelectRow, NumberRow, StatusRow, authenticationLabel, chromeAutomationLabel, computerUseAccessibilityLabel } from './SettingsShared'
 
 const BobalyticsPanel = lazy(() => import('../BobalyticsPanel'))
+
+function firstNonEmpty(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (trimmed) return trimmed
+  }
+  return '—'
+}
   
 
 export default function GeneralSettingsTab(props: any) {
   const { t, settings, change, settingsError, updateInfo, appVersion, appName, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
-  const displayedVersion = appVersion ?? updateInfo?.currentVersion ?? '—'
+  const storeCurrentVersion = useUpdateStore(state => state.currentVersion)
+  const displayedVersion = firstNonEmpty(appVersion, updateInfo?.currentVersion, storeCurrentVersion)
   const dialog = useAppDialog()
   const navigate = useNavigate()
   const loadingLabel = t('common.loading')

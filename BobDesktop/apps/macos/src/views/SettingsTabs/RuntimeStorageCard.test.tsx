@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   getRuntimeInstallationPlan: vi.fn(),
   installExternalRuntime: vi.fn(),
   removeExternalRuntime: vi.fn(),
+  cancelRuntimeProcess: vi.fn(),
+  cancelRuntimeOperation: vi.fn(),
 }))
 
 vi.mock('../../lib/ipc', () => ({
@@ -17,7 +19,8 @@ vi.mock('../../lib/ipc', () => ({
   getRuntimeInstallationPlan: mocks.getRuntimeInstallationPlan,
   installExternalRuntime: mocks.installExternalRuntime,
   removeExternalRuntime: mocks.removeExternalRuntime,
-  cancelRuntimeProcess: vi.fn(),
+  cancelRuntimeProcess: mocks.cancelRuntimeProcess,
+  cancelRuntimeOperation: mocks.cancelRuntimeOperation,
 }))
 
 describe('RuntimeStorageCard', () => {
@@ -116,7 +119,8 @@ describe('RuntimeStorageCard', () => {
     await waitFor(() => {
       expect(within(row).getByRole('status')).toHaveTextContent('Installation du runtime en cours')
     })
-    expect(row.querySelectorAll('.task-spinner').length).toBeGreaterThan(0)
+    expect(row.querySelector('.settings-install-busy .task-spinner')).not.toBeNull()
+    expect(document.querySelector('.runtime-catalog-busy .task-spinner')).not.toBeNull()
     expect(within(row).getByRole('button', { name: 'Installation en cours' })).toBeDisabled()
     expect(row).toHaveAttribute('aria-busy', 'true')
 
@@ -132,10 +136,59 @@ describe('RuntimeStorageCard', () => {
     })
     render(<RuntimeStorageCard setStatus={vi.fn()} />)
 
-    const row = (await screen.findByText('Qiskit Runtime')).closest('.settings-list-row') as HTMLElement
+    const row = await waitFor(() => {
+      const match = screen.getAllByText('Qiskit Runtime')
+        .map(node => node.closest('.settings-list-row'))
+        .find(Boolean)
+      if (!match) throw new Error('runtime row not ready')
+      return match as HTMLElement
+    })
     expect(await within(row).findByRole('status')).toHaveTextContent('Installation du runtime en cours')
-    expect(row.querySelector('.task-spinner')).not.toBeNull()
+    expect(row.querySelector('.settings-install-busy .task-spinner')).not.toBeNull()
+    expect(document.querySelector('.runtime-catalog-busy')).not.toBeNull()
     expect(within(row).getByRole('button', { name: 'Installation en cours' })).toBeDisabled()
+    expect(within(row).getByRole('button', { name: 'Arrêter l’installation' })).toBeEnabled()
+  })
+
+  it('does not show Install while a runtime is being removed', async () => {
+    let resolveRemove: (value: unknown) => void = () => {}
+    mocks.removeExternalRuntime.mockImplementation(() => new Promise(resolve => {
+      resolveRemove = resolve
+    }))
+    const report = await mocks.getRuntimeStorage()
+    mocks.getRuntimeStorage.mockResolvedValue({
+      ...report,
+      runtimes: [{ ...report.runtimes[0], status: 'installed', installedVersion: '2.5.2', removable: true }],
+    })
+    render(<AppDialogProvider><RuntimeStorageCard setStatus={vi.fn()} /></AppDialogProvider>)
+
+    const row = await waitFor(() => {
+      const match = screen.getAllByText('Qiskit Runtime')
+        .map(node => node.closest('.settings-list-row'))
+        .find(Boolean)
+      if (!match) throw new Error('runtime row not ready')
+      return match as HTMLElement
+    })
+    fireEvent.click(within(row).getByRole('button', { name: 'Supprimer le runtime' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer le runtime' }))
+
+    await waitFor(() => {
+      expect(within(row).getByRole('button', { name: 'Suppression en cours' })).toBeDisabled()
+    })
+    expect(within(row).queryByRole('button', { name: 'Installer le runtime' })).not.toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: 'Mettre à jour le runtime' })).not.toBeInTheDocument()
+
+    // Backend may already report not_installed while the remove IPC is still open.
+    mocks.getRuntimeStorage.mockResolvedValue({
+      ...report,
+      runtimes: [{ ...report.runtimes[0], status: 'not_installed', installedVersion: undefined, removable: true, error: undefined }],
+    })
+    await waitFor(() => {
+      expect(within(row).queryByRole('button', { name: 'Installer le runtime' })).not.toBeInTheDocument()
+    })
+    expect(within(row).getByRole('button', { name: 'Suppression en cours' })).toBeDisabled()
+
+    resolveRemove(undefined)
   })
 
   it('does not mark non-installed runtimes with the installed status badge', async () => {

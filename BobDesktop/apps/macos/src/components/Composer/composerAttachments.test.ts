@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   formatFileSize,
   getActiveComposerMentions,
@@ -8,11 +8,10 @@ import {
   getFileExtension,
   getFileTypeLabel,
   getFileVisualKind,
-  getSuggestedBuiltinPluginId,
-  attachmentsUseDefaultDocumentsPlugin,
-  usesDefaultDocumentsPlugin,
   mergeAttachmentPaths,
   removeComposerMention,
+  clipboardLooksLikeAttachments,
+  collectPasteAttachmentPaths,
 } from './composerAttachments'
 
 describe('composerAttachments', () => {
@@ -50,22 +49,33 @@ describe('composerAttachments', () => {
     expect(getFileTypeLabel('/tmp/a.PDF')).toBe('PDF')
   })
 
-  it('suggests builtin plugins from office file extensions', () => {
-    expect(getSuggestedBuiltinPluginId('/tmp/report.docx')).toBe('builtin-word')
-    expect(getSuggestedBuiltinPluginId('/tmp/data.xlsx')).toBe('builtin-excel')
-    expect(getSuggestedBuiltinPluginId('/tmp/deck.pptx')).toBe('builtin-powerpoint')
-    expect(getSuggestedBuiltinPluginId('/tmp/notes.pdf')).toBeNull()
-    expect(getSuggestedBuiltinPluginId('/tmp/scan.png')).toBe('builtin-docling')
-    expect(getSuggestedBuiltinPluginId('/tmp/image.jpg')).toBe('builtin-docling')
-    expect(getSuggestedBuiltinPluginId('/tmp/image.gif')).toBeNull()
+  it('detects attachment pastes vs plain text', () => {
+    expect(clipboardLooksLikeAttachments({ types: ['text/plain'], files: [], items: [] })).toBe(false)
+    expect(clipboardLooksLikeAttachments({ types: ['Files'], files: [], items: [] })).toBe(true)
+    expect(clipboardLooksLikeAttachments({
+      types: ['image/png'],
+      files: [{ type: 'image/png', name: 'clip.png' } as never],
+      items: [],
+    })).toBe(true)
   })
 
-  it('marks document attachments for the default Documents plugin without auto-mention', () => {
-    expect(usesDefaultDocumentsPlugin('/tmp/notes.pdf')).toBe(true)
-    expect(usesDefaultDocumentsPlugin('/tmp/readme.md')).toBe(true)
-    expect(usesDefaultDocumentsPlugin('/tmp/report.docx')).toBe(false)
-    expect(attachmentsUseDefaultDocumentsPlugin(['/tmp/a.txt', '/tmp/b.png'])).toBe(true)
-    expect(attachmentsUseDefaultDocumentsPlugin(['/tmp/report.docx'])).toBe(false)
+  it('collects Finder paths and clipboard images for paste', async () => {
+    const writeImage = vi.fn(async () => '/tmp/paste-clipboard.png')
+    const readClipboardPaths = vi.fn(async () => ['/tmp/from-finder.pdf'])
+    const blob = {
+      type: 'image/png',
+      name: 'clip.png',
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    }
+    const paths = await collectPasteAttachmentPaths({
+      types: ['Files', 'image/png'],
+      files: [blob as never],
+      items: [{ type: 'image/png', getAsFile: () => blob as never }],
+    }, { readClipboardPaths, writeImage })
+
+    expect(writeImage).toHaveBeenCalled()
+    expect(readClipboardPaths).toHaveBeenCalled()
+    expect(paths).toEqual(['/tmp/paste-clipboard.png', '/tmp/from-finder.pdf'])
   })
 
   it('detects active plugin mentions in composer text', () => {

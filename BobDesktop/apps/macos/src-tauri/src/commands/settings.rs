@@ -69,25 +69,14 @@ pub async fn update_settings(
         if let Some(bob_path) = bob.get_binary_path() {
             ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;
         }
-        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
-        if settings.chrome_control_enabled {
-            // Register this running app under Automation (this app → Google Chrome).
-            let app = app_handle.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::macos_applescript_bridge::request_chrome_automation_on_main_thread(&app)
-            })
-            .await;
-        }
+        // Do not prompt Automation here — status stays silent until the user
+        // clicks « Demander Automatisation » in Access & control / Permissions.
     }
     if previous.computer_use_enabled != settings.computer_use_enabled {
         if let Some(bob_path) = bob.get_binary_path() {
             ComputerUseMcpService::new().sync(&bob_path, settings.computer_use_enabled)?;
         }
-        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
-        if settings.computer_use_enabled {
-            // Register Bob Work under Accessibility (system prompt if needed).
-            let _ = crate::macos_permissions::request_accessibility();
-        }
+        // Do not prompt Accessibility here — request only via explicit UI buttons.
     }
     Ok(())
 }

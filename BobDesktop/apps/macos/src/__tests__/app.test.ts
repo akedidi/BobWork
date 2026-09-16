@@ -270,6 +270,7 @@ describe('ipc wrappers', () => {
     expect(typeof ipc.getBobalytics).toBe('function')
     expect(typeof ipc.exportBobalytics).toBe('function')
     expect(typeof ipc.installBobShell).toBe('function')
+    expect(typeof ipc.uninstallBobShell).toBe('function')
     expect(typeof ipc.openDataDir).toBe('function')
     expect(typeof ipc.exportDiagnostics).toBe('function')
     expect(typeof ipc.createPermissionGrant).toBe('function')

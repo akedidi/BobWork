@@ -19,9 +19,11 @@ import {
   getSkills,
   listBobSlashCommands,
   openMacosPrivacyPane,
+  readClipboardAttachmentPaths,
   requestVoiceDictationPermission,
   startNativeAudioRecording,
   stopNativeAudioRecording,
+  writeClipboardAttachmentImage,
   type IntegrationConnectionStatus,
 } from '../../lib/ipc'
 import type { BobMode, BobSlashCommand, DbConnection, McpServer, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
@@ -31,7 +33,7 @@ import { engineMeta } from '../../lib/dbEngines'
 import { CATALOG, isIntegrationVisibleById } from '../../views/IntegrationsTabs/catalogData'
 import { PluginIcon, resolveSkillIcon, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
-import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, attachmentsUseDefaultDocumentsPlugin, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, type ComposerAttachment, type ComposerMentionCatalog } from './composerAttachments'
+import { mergeAttachmentPaths, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, clipboardLooksLikeAttachments, collectPasteAttachmentPaths, type ComposerAttachment, type ComposerMentionCatalog } from './composerAttachments'
 import { errorMessage } from '../../lib/errorMessage'
 import {
   applyAutocompleteInsert,
@@ -385,20 +387,19 @@ export default function Composer({
     })
   }, [])
 
-  const suggestPluginForPaths = useCallback((paths: string[]) => {
-    const pluginIds = Array.from(new Set(
-      paths.map(getSuggestedBuiltinPluginId).filter((id): id is string => Boolean(id)),
-    ))
-    if (pluginIds.length !== 1) return
-    const pluginId = pluginIds[0]
-    if (!plugins.some(item => item.id === pluginId)) return
-    insertPluginMention(pluginId)
-  }, [insertPluginMention, plugins])
-
   const addAttachmentPaths = useCallback((paths: string[]) => {
+    // Attachments stay plain files — never auto-insert @plugin mentions.
     void registerAttachmentPaths(paths, setAttachments)
-    suggestPluginForPaths(paths)
-  }, [suggestPluginForPaths])
+  }, [])
+
+  const pasteClipboardAttachments = useCallback(async (clipboardData: DataTransfer | null) => {
+    const unique = await collectPasteAttachmentPaths(clipboardData, {
+      readClipboardPaths: readClipboardAttachmentPaths,
+      writeImage: writeClipboardAttachmentImage,
+    })
+    if (unique.length > 0) addAttachmentPaths(unique)
+    return unique.length > 0
+  }, [addAttachmentPaths])
 
   useEffect(() => {
     let cancelled = false
@@ -413,7 +414,9 @@ export default function Composer({
         } else if (payload.type === 'drop') {
           setIsDragging(false)
           dragDepthRef.current = 0
-          addAttachmentPaths(payload.paths)
+          // Window-level Tauri drops only attach when this composer is mounted
+          // (home / chat). Ignore empty path lists from cancelled OS drops.
+          if (payload.paths.length > 0) addAttachmentPaths(payload.paths)
         } else {
           setIsDragging(false)
           dragDepthRef.current = 0
@@ -1061,9 +1064,6 @@ export default function Composer({
                 />
               ))}
             </div>
-            {attachmentsUseDefaultDocumentsPlugin(attachments.map(item => item.path)) && (
-              <p className="settings-note composer-documents-hint">{t('composer.documentsDefaultPluginHint')}</p>
-            )}
           </>
         )}
         {recordingError && <p className="composer-recording-error" role="alert">{recordingError}</p>}
@@ -1085,6 +1085,18 @@ export default function Composer({
             setCaretIndex(event.target.selectionStart ?? event.target.value.length)
           }}
           onSelect={event => setCaretIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
+          onPaste={event => {
+            const data = event.clipboardData
+            if (clipboardLooksLikeAttachments(data)) {
+              event.preventDefault()
+              void pasteClipboardAttachments(data)
+              return
+            }
+            // Finder copies may omit web MIME types — attach without blocking text paste.
+            void readClipboardAttachmentPaths()
+              .then(paths => { if (paths.length) addAttachmentPaths(paths) })
+              .catch(() => undefined)
+          }}
           onKeyDown={event => {
             if (visibleAutocompleteItems.length > 0) {
               if (event.key === 'ArrowDown') {

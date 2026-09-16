@@ -46,6 +46,8 @@ export const BUILTIN_SKILL_SLUGS = new Set([
   'skill-creator',
   'plugin-creator',
   'agent-review',
+  'capability-router',
+  'image-annotate',
 ])
 
 export function isBuiltinSkill(skill: Pick<WorkspaceSkill, 'slug' | 'builtin'>): boolean {

@@ -20,6 +20,8 @@ const ORCA_CLI_SKILL: &str = include_str!("../../resources/skills/orca-cli/SKILL
 const ORCHESTRATION_SKILL: &str = include_str!("../../resources/skills/orchestration/SKILL.md");
 const CAPABILITY_ROUTER_SKILL: &str =
     include_str!("../../resources/skills/capability-router/SKILL.md");
+const IMAGE_ANNOTATE_SKILL: &str =
+    include_str!("../../resources/skills/image-annotate/SKILL.md");
 
 pub struct WorkspaceService;
 
@@ -444,6 +446,12 @@ impl WorkspaceService {
                 CAPABILITY_ROUTER_SKILL,
                 "plugin",
                 Some("Capability router"),
+            ),
+            "image-annotate" => self.install_bundled_builtin_skill(
+                "image-annotate",
+                IMAGE_ANNOTATE_SKILL,
+                "designer",
+                Some("Image annotate"),
             ),
             _ => Err(AppError::ValidationFailed("Ce skill intégré n’existe pas.".into())),
         }

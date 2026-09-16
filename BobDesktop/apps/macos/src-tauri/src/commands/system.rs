@@ -622,7 +622,10 @@ pub async fn request_chrome_automation_permission(app: AppHandle) -> Result<Stri
     {
         let app_name = crate::app_identity::app_display_name();
         let (state, message) = tokio::task::spawn_blocking(move || {
-            crate::macos_applescript_bridge::probe_chrome_automation_on_main_thread(&app, &app_name)
+            crate::macos_permissions::classify_chrome_automation(
+                &app_name,
+                crate::macos_applescript_bridge::request_chrome_automation_on_main_thread(&app),
+            )
         })
         .await
         .map_err(|e| AppError::Io(e.to_string()))?;
