@@ -91,6 +91,10 @@ jobs:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         run: node scripts/create-release-config.mjs
 
+      - name: Download shared document runtimes
+        working-directory: BobDesktop/apps/macos
+        run: python3 scripts/build-document-runtimes.py
+
       - name: Verify application before packaging
         run: pnpm --dir BobDesktop --filter macos run verify
 
@@ -112,7 +116,8 @@ jobs:
           releaseBody: Apple-signed macOS release with cryptographically signed automatic updates. This Personal Team build is not Apple-notarized.
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
 
       - name: Certify freshly packaged application
         run: pnpm --dir BobDesktop --filter macos run release:verify
