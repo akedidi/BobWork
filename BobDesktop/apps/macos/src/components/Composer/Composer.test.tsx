@@ -610,13 +610,13 @@ describe('Composer popovers', () => {
       createdAt: '2026-08-09T00:00:00Z', updatedAt: '2026-08-09T00:00:00Z',
     }])
     mocks.getIntegrationStatuses.mockResolvedValue([{
-      integrationId: 'slack',
+      integrationId: 'monday',
       connected: true,
-      authMethod: 'oauth',
+      authMethod: 'token',
       accountLabel: 'bob',
       expiresAt: null,
       oauthClientConfigured: false,
-      deviceFlowAvailable: true,
+      deviceFlowAvailable: false,
       scopeSatisfied: true,
     }])
     await renderComposer()
@@ -627,14 +627,14 @@ describe('Composer popovers', () => {
     expect(menu.querySelectorAll('input.popover-search')).toHaveLength(1)
     expect(menu).toHaveTextContent('Cloud Architect')
     expect(menu).toHaveTextContent('GitHub')
-    expect(menu).toHaveTextContent('Slack')
+    expect(menu).toHaveTextContent('Monday.com')
 
     fireEvent.change(search, { target: { value: 'Cloud' } })
     expect(menu).toHaveTextContent('Cloud Architect')
     expect(menu).toHaveTextContent('Aucun skill correspondant.')
     expect(menu).toHaveTextContent('Aucune intégration MCP correspondante.')
     expect(screen.queryByRole('button', { name: /GitHub/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Slack/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Monday/ })).not.toBeInTheDocument()
 
     fireEvent.change(search, { target: { value: 'git' } })
     expect(menu).toHaveTextContent('GitHub')
