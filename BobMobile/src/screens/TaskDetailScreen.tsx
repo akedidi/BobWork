@@ -31,7 +31,7 @@ export function TaskDetailScreen({ task, onBack, onOpenConversation }: { task: B
     {!detail ? <View style={commonStyles.empty}><ActivityIndicator color={colors.accent} /></View> : <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.objective}>{current.objective}</Text>
       <View style={styles.metrics}><Metric label={t('duration')} value={duration ? `${Math.round(duration / 1000)} s` : '—'} /><Metric label={t('mode')} value={modeLabel(current.mode, t)} /></View>
-      <Section title={t('taskResult')}>{current.summary ? <MessageMarkdown value={current.summary} user={false} /> : <Text style={styles.body}>{t('noResult')}</Text>}</Section>
+      <Section title={t('taskResult')}>{current.summary ? <MessageMarkdown value={current.summary} /> : <Text style={styles.body}>{t('noResult')}</Text>}</Section>
       {errors ? <Section title={t('taskErrors')}><Text style={[styles.body, { color: colors.danger }]}>{errors}</Text></Section> : null}
       <Section title={t('taskTools')}><Text style={styles.body}>{tools.join(' · ') || '—'}</Text></Section>
       <Section title={t('taskRuns')}>{detail.runs.length ? detail.runs.map(run => <View key={run.id} style={styles.row}><Ionicons name={run.state === 'completed' ? 'checkmark-circle' : run.state === 'failed' ? 'alert-circle' : 'time'} color={run.state === 'failed' ? colors.danger : colors.accent} size={18} /><View style={{ flex: 1 }}><Text style={styles.body}>{run.summary ?? run.error ?? taskStateLabel(run.state, t)}</Text><Text style={styles.date}>{formatDateTime(run.createdAt, language)}</Text></View></View>) : <Text style={styles.body}>{t('noRuns')}</Text>}</Section>

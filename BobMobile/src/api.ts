@@ -42,6 +42,37 @@ export function isConnectionFailure(error: unknown): error is ApiError {
   return status === 401 || status === 403 || status === 410 || status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 530)
 }
 
+export interface RemoteConnectionInfo {
+  state?: string
+  publicUrl?: string | null
+  connectionUrl?: string | null
+}
+
+export function mergeConnectionFromRemote(current: Connection, info: RemoteConnectionInfo): Connection {
+  if (info.connectionUrl) {
+    const parsed = parseConnectionLink(info.connectionUrl)
+    if (parsed.accessToken !== current.accessToken) return current
+    return parsed
+  }
+  if (info.publicUrl) {
+    const serverUrl = info.publicUrl.replace(/\/$/, '')
+    if (serverUrl !== current.serverUrl) return { ...current, serverUrl }
+  }
+  return current
+}
+
+export async function refreshConnectionFromServer(current: Connection, timeoutMs = CONNECTION_TIMEOUT_MS): Promise<Connection> {
+  const api = new BobApi(current)
+  const info = await api.remoteConnection(timeoutMs)
+  const merged = mergeConnectionFromRemote(current, info)
+  if (merged.serverUrl !== current.serverUrl) {
+    await new BobApi(merged).health(timeoutMs)
+    return merged
+  }
+  await api.health(timeoutMs)
+  return current
+}
+
 export function parseConnectionLink(value: string): Connection {
   const candidate = value.trim()
   const withProtocol = /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`
@@ -102,11 +133,17 @@ export class BobApi {
     }
   }
 
-  health = (timeoutMs = API_REQUEST_TIMEOUT_MS) => this.request<{ status: string; apiVersion: string; bobAvailable: boolean }>('/health', {}, timeoutMs)
+  health = (timeoutMs = API_REQUEST_TIMEOUT_MS) => this.request<{ status: string; apiVersion: string; bobAvailable: boolean; remoteControl?: RemoteConnectionInfo }>('/health', {}, timeoutMs)
+  remoteConnection = (timeoutMs = API_REQUEST_TIMEOUT_MS) => this.request<RemoteConnectionInfo>('/connection', {}, timeoutMs)
   usage = (timeoutMs = API_REQUEST_TIMEOUT_MS) => this.request<UsageStatus>('/usage', {}, timeoutMs)
   updateCurrentLocation = (latitude: number, longitude: number) =>
     this.request<{ enabled: boolean; updatedAt: string }>('/location', { method: 'POST', body: JSON.stringify({ latitude, longitude }) })
   clearCurrentLocation = () => this.request<{ enabled: boolean }>('/location', { method: 'DELETE' })
+  updateExecutionMode = (sandboxMode: boolean) =>
+    this.request<{ sandboxMode: boolean; executionMode: 'sandbox' | 'direct_disk' }>(
+      '/settings/execution-mode',
+      { method: 'PATCH', body: JSON.stringify({ sandboxMode }) },
+    )
   bootstrap = async (timeoutMs = API_REQUEST_TIMEOUT_MS) => {
     const bootstrap = await this.request<Bootstrap>('/bootstrap', {}, timeoutMs)
     return {
@@ -173,7 +210,18 @@ export class BobApi {
     if (cursor) params.set('cursor', cursor)
     return this.request<MessagePage>(`/conversations/${encodeURIComponent(id)}/messages?${params}`)
   }
-  sendPrompt = (id: string, input: { prompt: string; mode: string; projectId?: string; pluginIds: string[]; skillSlugs: string[]; mcpNames: string[]; dbNames: string[]; attachments: PromptAttachment[]; resumeTaskId?: string }) =>
+  sendPrompt = (id: string, input: {
+    prompt: string
+    mode: string
+    projectId?: string
+    pluginIds: string[]
+    skillSlugs: string[]
+    mcpNames: string[]
+    dbNames: string[]
+    attachments: PromptAttachment[]
+    resumeTaskId?: string
+    taskApproval?: { autoApprovalEnabled: boolean; allowedPermissions: string[] }
+  }) =>
     this.request<{ session: StartSessionResult }>(`/conversations/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
       body: JSON.stringify({
@@ -182,7 +230,17 @@ export class BobApi {
         attachments: input.attachments.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
       }),
     })
-  resendPrompt = (id: string, messageId: string, input: { prompt: string; mode: string; projectId?: string; pluginIds: string[]; skillSlugs: string[]; mcpNames: string[]; dbNames: string[]; attachments: PromptAttachment[] }) =>
+  resendPrompt = (id: string, messageId: string, input: {
+    prompt: string
+    mode: string
+    projectId?: string
+    pluginIds: string[]
+    skillSlugs: string[]
+    mcpNames: string[]
+    dbNames: string[]
+    attachments: PromptAttachment[]
+    taskApproval?: { autoApprovalEnabled: boolean; allowedPermissions: string[] }
+  }) =>
     this.request<{ session: StartSessionResult }>(`/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/resend`, {
       method: 'POST',
       body: JSON.stringify({

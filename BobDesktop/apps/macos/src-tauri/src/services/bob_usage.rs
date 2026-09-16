@@ -43,6 +43,31 @@ enum GatewayAuth {
     Bearer(String),
 }
 
+/// Public auth kind for callers outside this module (e.g. direct inference).
+#[derive(Debug, Clone)]
+pub enum GatewayAuthKind {
+    ApiKey(Zeroizing<String>),
+    Bearer(String),
+}
+
+impl From<GatewayAuth> for GatewayAuthKind {
+    fn from(value: GatewayAuth) -> Self {
+        match value {
+            GatewayAuth::ApiKey(key) => Self::ApiKey(key),
+            GatewayAuth::Bearer(token) => Self::Bearer(token),
+        }
+    }
+}
+
+impl From<&GatewayAuthKind> for GatewayAuth {
+    fn from(value: &GatewayAuthKind) -> Self {
+        match value {
+            GatewayAuthKind::ApiKey(key) => Self::ApiKey(Zeroizing::new(key.as_str().to_string())),
+            GatewayAuthKind::Bearer(token) => Self::Bearer(token.clone()),
+        }
+    }
+}
+
 pub struct BobUsageService;
 
 impl BobUsageService {
@@ -352,6 +377,35 @@ fn resolve_gateway_auth() -> AppResult<Option<(String, GatewayAuth)>> {
     }
 
     Ok(None)
+}
+
+/// Public wrapper for direct inference clients.
+pub fn resolve_gateway_auth_public() -> AppResult<Option<(String, GatewayAuthKind)>> {
+    Ok(resolve_gateway_auth()?.map(|(gateway, auth)| (gateway, auth.into())))
+}
+
+pub fn gateway_auth_headers(auth: &GatewayAuthKind) -> AppResult<HeaderMap> {
+    auth_headers(&GatewayAuth::from(auth))
+}
+
+/// Best-effort team id from the latest usage snapshot (for general API keys).
+pub fn preferred_team_id() -> Option<String> {
+    let path = bob_settings_dir()?.join("auth-secrets.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let map: HashMap<String, Value> = serde_json::from_str(&content).ok()?;
+    for (_key, value) in map {
+        let token_string = value.as_str().unwrap_or_default();
+        let token_json: Value = serde_json::from_str(token_string).unwrap_or(Value::Null);
+        if let Some(team) = token_json
+            .get("teamId")
+            .or_else(|| token_json.get("team_id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(team.to_string());
+        }
+    }
+    None
 }
 
 fn http_client() -> AppResult<Client> {

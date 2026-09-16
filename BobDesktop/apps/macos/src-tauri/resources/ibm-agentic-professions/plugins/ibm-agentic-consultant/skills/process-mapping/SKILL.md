@@ -1,44 +1,52 @@
 ---
 name: process-mapping
-description: "Visualiser un processus as-is pour localiser délais, risques et valeur."
+description: "Visualize an as-is process to locate delays, risks, and value."
 icon: consultant
 ---
 
 # process-mapping
 
-Utiliser ce skill pour visualiser un processus as-is pour localiser délais, risques et valeur.
+Use this skill to visualize an as-is process to locate delays, risks, and value.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir déclencheur, fin, client, unités et niveau de détail.
-2. Cartographier activités, décisions, files, handoffs, systèmes et contrôles.
-3. Quantifier volumes, temps de traitement, attente, erreurs et reprises.
-4. Valider le flux avec les opérateurs avant de concevoir le to-be.
+1. Define trigger, end state, customer, units, and level of detail.
+2. Map activities, decisions, queues, handoffs, systems, and controls.
+3. Quantify volumes, processing time, wait time, errors, and rework.
+4. Validate the flow with operators before designing the to-be.
 
-## Livrable
+## Deliverable
 
-Process map as-is, métriques, points de douleur et opportunités.
+As-is process map, metrics, pain points, and opportunities.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Temps de travail et temps d’attente séparés.
-- Exceptions réelles incluses.
-- Le processus est validé par ceux qui l’exécutent.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Work time and wait time separated.
+- Real exceptions included.
+- The process is validated by those who execute it.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

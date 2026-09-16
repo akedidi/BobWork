@@ -2,6 +2,7 @@ use crate::db::Database;
 use crate::error::AppError;
 use crate::services::chrome_mcp::{ChromeMcpService, MacosChromeControlStatus};
 use crate::services::computer_use_mcp::{ComputerUseMcpService, MacosComputerUseStatus};
+use crate::services::orca_cli::{OrcaCliService, OrcaCliStatus};
 use crate::services::notify::{AppNotificationEvent, NotificationInbox};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -57,9 +58,41 @@ pub async fn restore_database_backup(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn export_database_backup(
+    app: AppHandle,
+    name: String,
+    destination: String,
+) -> Result<(), AppError> {
+    if name.contains('/')
+        || name.contains('\\')
+        || !name.starts_with("bob-work-")
+        || !name.ends_with(".sqlite")
+    {
+        return Err(AppError::ValidationFailed("Invalid backup name".into()));
+    }
+    let backup_dir = database_backup_dir(&app)?;
+    let source = backup_dir.join(&name);
+    if !source.is_file() {
+        return Err(AppError::NotFound("Database backup not found".into()));
+    }
+    let destination = Path::new(&destination);
+    if destination.extension().and_then(|value| value.to_str()) != Some("sqlite") {
+        return Err(AppError::ValidationFailed(
+            "The destination file must end with .sqlite".into(),
+        ));
+    }
+    if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&source, destination)?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
+    pub app_name: String,
     pub app_version: String,
     pub tauri_version: String,
     pub os: String,
@@ -83,6 +116,7 @@ pub async fn get_app_info(app: AppHandle) -> Result<AppInfo, AppError> {
         .unwrap_or_default();
 
     Ok(AppInfo {
+        app_name: crate::app_identity::app_display_name(),
         app_version: app.package_info().version.to_string(),
         tauri_version: "2.x".to_string(),
         os: std::env::consts::OS.to_string(),
@@ -228,6 +262,25 @@ pub async fn microphone_authorization_state() -> Result<String, AppError> {
     }
 }
 
+/// Returns macOS Speech Recognition TCC state without prompting.
+#[tauri::command]
+pub async fn speech_recognition_authorization_state() -> Result<String, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(
+            tokio::task::spawn_blocking(crate::macos_permissions::speech_recognition_authorization)
+                .await
+                .map_err(|error| AppError::Io(error.to_string()))?
+                .key()
+                .into(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("authorized".into())
+    }
+}
+
 /// Shows the native macOS microphone sheet the first time it is called.
 #[tauri::command]
 pub async fn request_microphone_permission() -> Result<String, AppError> {
@@ -316,13 +369,15 @@ fn purge_app_cache_sync(app: &AppHandle) -> Result<CachePurgeResult, AppError> {
     }
 
     if let Some(home) = dirs::home_dir() {
+        let bundle_id = app.config().identifier.as_str();
         candidates.push(home.join("Library/Caches/bob-work"));
-        candidates.push(home.join("Library/Caches/com.bobwork.desktop"));
+        candidates.push(home.join(format!("Library/Caches/{bundle_id}")));
         candidates.push(home.join("Library/Caches/com.bobwork.app"));
-        candidates.push(home.join("Library/WebKit/com.bobwork.desktop"));
-        candidates.push(home.join("Library/HTTPStorages/com.bobwork.desktop"));
+        candidates.push(home.join(format!("Library/WebKit/{bundle_id}")));
+        candidates.push(home.join(format!("Library/HTTPStorages/{bundle_id}")));
         candidates.push(home.join(".bob/logs"));
         candidates.push(home.join(".bob/run/applescript.sock"));
+        candidates.push(home.join(".bob/run/applescript-test.sock"));
     }
 
     // Temporary preview artifacts inside app data (never DB / vault / workspaces).
@@ -413,17 +468,54 @@ pub async fn export_diagnostics(
 }
 
 #[tauri::command]
-pub async fn get_chrome_control_status() -> Result<MacosChromeControlStatus, AppError> {
-    tokio::task::spawn_blocking(|| ChromeMcpService::new().status())
-        .await
-        .map_err(|error| AppError::Io(format!("Statut Chrome indisponible : {error}")))
+pub async fn get_chrome_control_status(app: AppHandle) -> Result<MacosChromeControlStatus, AppError> {
+    let app_name = crate::app_identity::app_display_name();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
+        {
+            let mut status = ChromeMcpService::new().mcp_status(&app_name);
+            let (automation, automation_message) =
+                crate::macos_applescript_bridge::probe_chrome_automation_on_main_thread(
+                    &app, &app_name,
+                );
+            status.automation = automation;
+            status.automation_message = automation_message;
+            status
+        }
+        #[cfg(not(all(target_os = "macos", not(feature = "e2e"))))]
+        {
+            let _ = &app;
+            ChromeMcpService::new().status_for_app(&app_name)
+        }
+    })
+    .await
+    .map_err(|error| AppError::Io(format!("Statut Chrome indisponible : {error}")))
 }
 
 #[tauri::command]
-pub async fn get_computer_use_status() -> Result<MacosComputerUseStatus, AppError> {
-    tokio::task::spawn_blocking(|| ComputerUseMcpService::new().status())
+pub async fn get_computer_use_status(app: AppHandle) -> Result<MacosComputerUseStatus, AppError> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(all(target_os = "macos", not(feature = "e2e")))]
+        {
+            let runtime =
+                crate::macos_applescript_bridge::probe_system_events_on_main_thread(&app);
+            ComputerUseMcpService::new().status_with_runtime(runtime)
+        }
+        #[cfg(not(all(target_os = "macos", not(feature = "e2e"))))]
+        {
+            let _ = &app;
+            ComputerUseMcpService::new().status()
+        }
+    })
+    .await
+    .map_err(|error| AppError::Io(format!("Statut Computer Use indisponible : {error}")))
+}
+
+#[tauri::command]
+pub async fn get_orca_cli_status() -> Result<OrcaCliStatus, AppError> {
+    tokio::task::spawn_blocking(|| OrcaCliService::new().status())
         .await
-        .map_err(|error| AppError::Io(format!("Statut Computer Use indisponible : {error}")))
+        .map_err(|error| AppError::Io(format!("Statut Orca CLI indisponible : {error}")))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -478,9 +570,11 @@ pub async fn request_notification_authorization() -> Result<String, AppError> {
     #[cfg(target_os = "macos")]
     {
         if !crate::macos_notifications::is_available() {
+            let app_name = crate::app_identity::app_display_name();
             return Err(AppError::ValidationFailed(
-                "Bob Work n’apparaît dans Réglages → Notifications que depuis un vrai .app signé (Apple Development). Avec « pnpm dev:tauri », utilisez « pnpm install:dev-app » puis ouvrez /Applications/Bob Work.app."
-                    .into(),
+                format!(
+                    "{app_name} n’apparaît dans Réglages → Notifications que depuis un vrai .app signé (Apple Development). Avec « pnpm dev:tauri », utilisez « pnpm install:dev-app » puis ouvrez /Applications/{app_name}.app."
+                ),
             ));
         }
         let state = tokio::task::spawn_blocking(crate::macos_notifications::request_authorization)
@@ -488,9 +582,10 @@ pub async fn request_notification_authorization() -> Result<String, AppError> {
             .map_err(|e| AppError::Io(e.to_string()))?
             .map_err(AppError::Io)?;
         if state.is_granted() {
-            let _ = tokio::task::spawn_blocking(|| {
+            let app_name = crate::app_identity::app_display_name();
+            let _ = tokio::task::spawn_blocking(move || {
                 crate::macos_notifications::send(
-                    "Bob Work",
+                    &app_name,
                     "Les notifications macOS sont activées.",
                     None,
                     None,
@@ -522,22 +617,26 @@ pub async fn request_accessibility_permission() -> Result<bool, AppError> {
 }
 
 #[tauri::command]
-pub async fn request_chrome_automation_permission() -> Result<String, AppError> {
+pub async fn request_chrome_automation_permission(app: AppHandle) -> Result<String, AppError> {
     #[cfg(target_os = "macos")]
     {
-        let (state, message) = tokio::task::spawn_blocking(|| {
-            let _ = crate::macos_permissions::request_chrome_automation();
-            crate::macos_permissions::probe_chrome_automation_in_process()
+        let app_name = crate::app_identity::app_display_name();
+        let (state, message) = tokio::task::spawn_blocking(move || {
+            crate::macos_permissions::classify_chrome_automation(
+                &app_name,
+                crate::macos_applescript_bridge::request_chrome_automation_on_main_thread(&app),
+            )
         })
         .await
         .map_err(|e| AppError::Io(e.to_string()))?;
-        if state == "denied" || state == "unknown" {
+        if state == "denied" || state == "unknown" || state == "chrome_missing" {
             return Err(AppError::ValidationFailed(message));
         }
         Ok(state)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         Ok("unavailable".into())
     }
 }

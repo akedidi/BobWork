@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { saveMcpServer } from '../lib/ipc'
+import { saveApiConnection, saveMcpServer } from '../lib/ipc'
 import type { SaveMcpServerInput } from '@bob-work/shared-types'
 import type { McpServer } from '@bob-work/shared-types'
 import { errorMessage } from '../lib/errorMessage'
@@ -80,13 +80,11 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
     originalName: '',
     name: '',
     url: '',
-    transport: 'streamable-http',
   })
   const [apiKeyForm, setApiKeyForm] = useState({
     originalName: '',
     name: '',
     url: '',
-    transport: 'http',
     authMode: 'query' as 'bearer' | 'header' | 'env' | 'query',
     headerName: 'X-Api-Key',
     queryName: 'api_key',
@@ -140,19 +138,17 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
   }
 
   const persistPublicApi = async () => {
-    await persistConnector(
-      {
-        originalName: publicApiForm.originalName || undefined,
-        name: slugifyName(publicApiForm.name),
-        transport: publicApiForm.transport,
-        commandOrUrl: publicApiForm.url.trim(),
-        args: [],
-        enabled: true,
-      },
-      publicApiForm.originalName ? t('integrations.publicApiUpdated') : t('integrations.publicApiSaved'),
-      () => setPublicApiForm({ originalName: '', name: '', url: '', transport: 'streamable-http' }),
-      { stayOnTab: 'apis' },
-    )
+    const name = slugifyName(publicApiForm.name)
+    setStatus('')
+    try {
+      await saveApiConnection({ originalName: publicApiForm.originalName || undefined, name, url: publicApiForm.url.trim(), authMode: 'none', enabled: true })
+      setPublicApiForm({ originalName: '', name: '', url: '' })
+      await loadMcp()
+      setStatus(publicApiForm.originalName ? t('integrations.publicApiUpdated') : t('integrations.publicApiSaved'))
+      setTab('apis')
+    } catch (error) {
+      setStatus(errorMessage(error))
+    }
   }
 
   const persistApiKey = async () => {
@@ -162,54 +158,41 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
       setStatus(t('integrations.missingApiKey'))
       return
     }
-    let headers: Record<string, string> | undefined
-    let env: Record<string, string> | undefined
-    let commandOrUrl = apiKeyForm.url.trim()
-    if (!secret) {
-      // Editing with an empty field intentionally preserves the stored secret.
-    } else if (apiKeyForm.authMode === 'bearer') {
-      headers = { Authorization: `Bearer ${secret}` }
-    } else if (apiKeyForm.authMode === 'header') {
-      headers = { [apiKeyForm.headerName.trim() || 'X-Api-Key']: secret }
-    } else if (apiKeyForm.authMode === 'query') {
-      const param = apiKeyForm.queryName.trim() || 'api_key'
-      try {
-        const parsed = new URL(commandOrUrl)
-        parsed.searchParams.set(param, secret)
-        commandOrUrl = parsed.toString()
-      } catch {
-        const join = commandOrUrl.includes('?') ? '&' : '?'
-        commandOrUrl = `${commandOrUrl}${join}${encodeURIComponent(param)}=${encodeURIComponent(secret)}`
-      }
-      env = { [`${param.toUpperCase()}`]: secret }
-    } else {
-      env = { [apiKeyForm.envName.trim() || 'API_KEY']: secret }
+    if (apiKeyForm.authMode === 'env') {
+      await persistConnector(
+        {
+          originalName: apiKeyForm.originalName || undefined,
+          name,
+          transport: 'http',
+          commandOrUrl: apiKeyForm.url.trim(),
+          args: [],
+          enabled: true,
+          env: secret ? {
+            [apiKeyForm.envName.trim() || 'API_KEY']: secret,
+            BOB_WORK_API_CREDENTIAL_ONLY: '1',
+          } : undefined,
+        },
+        apiKeyForm.originalName ? t('integrations.keyedApiUpdated', { name }) : t('integrations.keyedApiSaved', { name }),
+        () => setApiKeyForm({ originalName: '', name: '', url: '', authMode: 'query', headerName: 'X-Api-Key', queryName: 'api_key', secret: '', envName: 'API_KEY' }),
+        { stayOnTab: 'apis' },
+      )
+      return
     }
-    await persistConnector(
-      {
-        originalName: apiKeyForm.originalName || undefined,
-        name,
-        transport: apiKeyForm.transport,
-        commandOrUrl,
-        args: [],
-        enabled: true,
-        headers: secret ? headers : undefined,
-        env: secret ? env : undefined,
-      },
-      apiKeyForm.originalName ? t('integrations.keyedApiUpdated', { name }) : t('integrations.keyedApiSaved', { name }),
-      () => setApiKeyForm({
-        originalName: '',
-        name: '',
-        url: '',
-        transport: 'http',
-        authMode: 'query',
-        headerName: 'X-Api-Key',
-        queryName: 'api_key',
-        secret: '',
-        envName: 'API_KEY',
-      }),
-      { stayOnTab: 'apis' },
-    )
+    const authName = apiKeyForm.authMode === 'query'
+      ? (apiKeyForm.queryName.trim() || 'api_key')
+      : apiKeyForm.authMode === 'header'
+        ? (apiKeyForm.headerName.trim() || 'X-Api-Key')
+        : ''
+    setStatus('')
+    try {
+      await saveApiConnection({ originalName: apiKeyForm.originalName || undefined, name, url: apiKeyForm.url.trim(), authMode: apiKeyForm.authMode, authName, secret, enabled: true })
+      setApiKeyForm({ originalName: '', name: '', url: '', authMode: 'query', headerName: 'X-Api-Key', queryName: 'api_key', secret: '', envName: 'API_KEY' })
+      await loadMcp()
+      setStatus(apiKeyForm.originalName ? t('integrations.keyedApiUpdated', { name }) : t('integrations.keyedApiSaved', { name }))
+      setTab('apis')
+    } catch (error) {
+      setStatus(errorMessage(error))
+    }
   }
 
   const persistOauthMcp = async () => {
@@ -242,32 +225,49 @@ export function useConnectorForms({ setStatus, loadMcp, setTab }: { setStatus: (
   }
 
   const editPublicApi = (server: McpServer) => {
-    setPublicApiForm({ originalName: server.name, name: server.name, url: server.commandOrUrl, transport: server.transport })
+    const env = server.raw?.env as Record<string, unknown> | undefined
+    const url = String(env?.BOB_WORK_API_BASE_URL || server.commandOrUrl)
+    setPublicApiForm({ originalName: server.name, name: server.name, url })
   }
 
   const editKeyedApi = (server: McpServer) => {
+    const apiEnv = server.raw?.env as Record<string, unknown> | undefined
+    if (apiEnv?.BOB_WORK_API_KIND === 'rest') {
+      const authMode = String(apiEnv.BOB_WORK_API_AUTH_MODE || 'query') as 'bearer' | 'header' | 'query'
+      const authName = String(apiEnv.BOB_WORK_API_AUTH_NAME || '')
+      setApiKeyForm({
+        originalName: server.name,
+        name: server.name,
+        url: String(apiEnv.BOB_WORK_API_BASE_URL || ''),
+        authMode,
+        headerName: authMode === 'header' ? (authName || 'X-Api-Key') : 'X-Api-Key',
+        queryName: authMode === 'query' ? (authName || 'api_key') : 'api_key',
+        secret: '',
+        envName: 'API_KEY',
+      })
+      return
+    }
     const headerNames = redactedFieldNames(server.raw?.headers)
-    const envNames = redactedFieldNames(server.raw?.env)
     const queryName = redactedQueryName(server.commandOrUrl)
     const authorization = headerNames.find(name => name.toLowerCase() === 'authorization')
     const customHeader = headerNames.find(name => name.toLowerCase() !== 'authorization')
-    const authMode: 'bearer' | 'header' | 'env' | 'query' = queryName ? 'query' : authorization ? 'bearer' : customHeader ? 'header' : 'env'
+    const credentialOnly = (server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_CREDENTIAL_ONLY === '1'
+    const authMode: 'bearer' | 'header' | 'env' | 'query' = credentialOnly ? 'env' : queryName ? 'query' : authorization ? 'bearer' : customHeader ? 'header' : 'env'
     setApiKeyForm({
       originalName: server.name,
       name: server.name,
       url: server.commandOrUrl,
-      transport: server.transport,
       authMode,
       headerName: customHeader || 'X-Api-Key',
       queryName: queryName || 'api_key',
       secret: '',
-      envName: envNames[0] || 'API_KEY',
+      envName: redactedFieldNames(server.raw?.env).find(name => !name.startsWith('BOB_WORK_API_')) || 'API_KEY',
     })
   }
 
   const cancelMcpEdit = () => setMcpForm({ originalName: '', name: '', transport: 'stdio', commandOrUrl: '', args: '', envFields: [], originalEnvKeys: [], headersText: '' })
-  const cancelPublicApiEdit = () => setPublicApiForm({ originalName: '', name: '', url: '', transport: 'streamable-http' })
-  const cancelKeyedApiEdit = () => setApiKeyForm({ originalName: '', name: '', url: '', transport: 'http', authMode: 'query', headerName: 'X-Api-Key', queryName: 'api_key', secret: '', envName: 'API_KEY' })
+  const cancelPublicApiEdit = () => setPublicApiForm({ originalName: '', name: '', url: '' })
+  const cancelKeyedApiEdit = () => setApiKeyForm({ originalName: '', name: '', url: '', authMode: 'query', headerName: 'X-Api-Key', queryName: 'api_key', secret: '', envName: 'API_KEY' })
 
   return {
     mcpForm,

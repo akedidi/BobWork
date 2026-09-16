@@ -3,7 +3,6 @@ use crate::error::{AppError, AppResult};
 use crate::models::plugin::{
     CreatePluginInput, Plugin, PluginExtensionStatus, PluginFileResource, PluginLinkedDatabase,
     PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginValidationResult,
-    PluginVersion, PluginVersionDiff,
 };
 use crate::services::bob::BobService;
 use crate::services::plugin::PluginService;
@@ -53,62 +52,6 @@ fn register_runtime_requirements(
     manager.register_plugin_requirements(db, &plugin.id, &plugin.manifest)
 }
 
-fn reconcile_plugin_tools(service: &BobService, previous: &Plugin, next: &Plugin) -> AppResult<()> {
-    let enabled = next.install_state == "installed";
-    if PluginMcpService::has_servers(&next.manifest) {
-        sync_plugin_mcp(service, next, enabled)?;
-    }
-    if PluginMcpService::has_servers(&previous.manifest) {
-        let old_dir = PluginMcpService::bundle_dir(&previous.manifest)?;
-        if PluginMcpService::has_servers(&next.manifest) {
-            let new_dir = PluginMcpService::bundle_dir(&next.manifest)?;
-            PluginMcpService::new().remove_obsolete(
-                &bob_path(service)?,
-                &next.id,
-                &previous.manifest,
-                &old_dir,
-                &next.manifest,
-                &new_dir,
-            )?;
-        } else {
-            PluginMcpService::new().remove(
-                &bob_path(service)?,
-                &previous.id,
-                &previous.manifest,
-                &old_dir,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn switch_plugin_version(
-    db: &Database,
-    bob_service: &BobService,
-    runtime_manager: &RuntimeManager,
-    plugin_id: &str,
-    version: &str,
-) -> AppResult<Plugin> {
-    let service = PluginService::new();
-    let previous = service
-        .get_by_id(db, plugin_id)?
-        .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-    let next = service.activate_version(db, plugin_id, version)?;
-    register_runtime_requirements(runtime_manager, db, &next)?;
-    // Keep the activated plugin even if Bob Shell MCP sync fails — otherwise
-    // Office builtins stay stuck on "Prête à être installée" forever.
-    // Retry MCP sync on the next install / toggle of this plugin.
-    if let Err(error) = reconcile_plugin_tools(bob_service, &previous, &next) {
-        tracing::warn!(
-            "Plugin {} switched to {} but MCP tools sync failed: {:?}",
-            plugin_id,
-            version,
-            error
-        );
-    }
-    Ok(next)
-}
-
 #[tauri::command]
 pub async fn get_plugins(
     db: State<'_, Database>,
@@ -116,15 +59,9 @@ pub async fn get_plugins(
     runtime_manager: State<'_, RuntimeManager>,
 ) -> Result<Vec<Plugin>, AppError> {
     let service = PluginService::new();
-    // Apply any staged built-in package bumps (e.g. 1.0 → 1.1) so the Plugins
-    // screen does not stay stuck on "Prête à être installée".
-    if let Err(error) = service.ensure_builtin_plugins(&db) {
-        tracing::warn!("Unable to refresh built-in plugins: {:?}", error);
-    }
-    service.sync_agentic_bundles(&db)?;
-    // Do not reconcile Bob MCP on list — each `bob mcp add-json` used to block
-    // the Plugins screen for ~1s per plugin (and forever when workspace-scoped
-    // mcp.json was missing). MCP is synced on install / toggle / version switch.
+    // Listing must stay cheap: built-in/agentic sync runs in bob-startup-refresh
+    // and on install/toggle/version switch. Re-running ensure here blocked the
+    // Plugins screen and Composer on every mount.
     let plugins = service.get_all(&db)?;
     for plugin in &plugins {
         register_runtime_requirements(&runtime_manager, &db, plugin)?;
@@ -134,54 +71,7 @@ pub async fn get_plugins(
 
 #[tauri::command]
 pub async fn get_plugin(id: String, db: State<'_, Database>) -> Result<Option<Plugin>, AppError> {
-    PluginService::new().get_by_id(&db, &id)
-}
-
-#[tauri::command]
-pub async fn get_plugin_versions(
-    plugin_id: String,
-    db: State<'_, Database>,
-) -> Result<Vec<PluginVersion>, AppError> {
-    PluginService::new().list_versions(&db, &plugin_id)
-}
-
-#[tauri::command]
-pub async fn compare_plugin_version(
-    plugin_id: String,
-    version: String,
-    db: State<'_, Database>,
-) -> Result<PluginVersionDiff, AppError> {
-    PluginService::new().compare_version(&db, &plugin_id, &version)
-}
-
-#[tauri::command]
-pub async fn install_plugin_update(
-    plugin_id: String,
-    version: String,
-    db: State<'_, Database>,
-    bob_service: State<'_, BobService>,
-    runtime_manager: State<'_, RuntimeManager>,
-) -> Result<Plugin, AppError> {
-    let plugin = PluginService::new()
-        .get_by_id(&db, &plugin_id)?
-        .ok_or_else(|| AppError::NotFound(format!("Plugin {} not found", plugin_id)))?;
-    if plugin.available_version.as_deref() != Some(version.as_str()) {
-        return Err(AppError::ValidationFailed(
-            "Cette mise à jour n’est plus disponible. Actualisez la liste des plugins.".into(),
-        ));
-    }
-    switch_plugin_version(&db, &bob_service, &runtime_manager, &plugin_id, &version)
-}
-
-#[tauri::command]
-pub async fn rollback_plugin_version(
-    plugin_id: String,
-    version: String,
-    db: State<'_, Database>,
-    bob_service: State<'_, BobService>,
-    runtime_manager: State<'_, RuntimeManager>,
-) -> Result<Plugin, AppError> {
-    switch_plugin_version(&db, &bob_service, &runtime_manager, &plugin_id, &version)
+    PluginService::new().get_by_reference(&db, &id)
 }
 
 #[tauri::command]

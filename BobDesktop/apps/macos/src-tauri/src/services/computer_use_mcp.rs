@@ -7,6 +7,7 @@ use std::process::Command;
 
 pub const COMPUTER_USE_MCP_NAME: &str = "bob-work-computer-use";
 const COMPUTER_USE_MCP_SCRIPT: &str = include_str!("../../resources/computer/computer_use_mcp.py");
+const COMPUTER_USE_GUIDE: &str = include_str!("../../resources/computer/GUIDE.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,12 @@ impl ComputerUseMcpService {
                 error
             ))
         })?;
+        std::fs::write(bundle_dir.join("GUIDE.md"), COMPUTER_USE_GUIDE).map_err(|error| {
+            AppError::Io(format!(
+                "Failed to write Computer Use guide: {}",
+                error
+            ))
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -65,6 +72,14 @@ impl ComputerUseMcpService {
             env.insert(
                 "BOB_WORK_APPLESCRIPT_SOCKET".into(),
                 json!(crate::macos_applescript_bridge::socket_path_string()),
+            );
+            env.insert(
+                "BOB_WORK_APP_NAME".into(),
+                json!(crate::app_identity::app_display_name()),
+            );
+            env.insert(
+                "BOB_WORK_BUNDLE_ID".into(),
+                json!(crate::app_identity::bundle_identifier()),
             );
         }
         json!({
@@ -113,9 +128,13 @@ impl ComputerUseMcpService {
     }
 
     pub fn status(&self) -> MacosComputerUseStatus {
+        self.status_with_runtime(Self::probe_in_process_accessibility())
+    }
+
+    pub fn status_with_runtime(&self, runtime: String) -> MacosComputerUseStatus {
         let mcp_configured = self.is_configured();
         let mcp_enabled = self.is_enabled();
-        let (accessibility, accessibility_message) = Self::probe_accessibility();
+        let (accessibility, accessibility_message) = Self::probe_accessibility_with_runtime(runtime);
         MacosComputerUseStatus {
             mcp_configured,
             mcp_enabled,
@@ -125,6 +144,10 @@ impl ComputerUseMcpService {
     }
 
     pub fn probe_accessibility() -> (String, String) {
+        Self::probe_accessibility_with_runtime(Self::probe_in_process_accessibility())
+    }
+
+    pub fn probe_accessibility_with_runtime(runtime: String) -> (String, String) {
         if std::env::consts::OS != "macos" {
             return (
                 "unavailable".into(),
@@ -135,6 +158,7 @@ impl ComputerUseMcpService {
         // runtime and freeze every subsequent IPC call (settings, MCP list, chat).
         #[cfg(feature = "e2e")]
         {
+            let _ = runtime;
             return (
                 "denied".into(),
                 "E2E : sonde Accessibilité désactivée (pas de dialogue système).".into(),
@@ -142,25 +166,40 @@ impl ComputerUseMcpService {
         }
         #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         {
+            let app_name = crate::app_identity::app_display_name();
             let (app_state, app_message) = crate::macos_permissions::accessibility_status_for_app();
-            // Probe System Events from *this* process (NSAppleScript), never osascript.
-            let runtime = Self::probe_in_process_accessibility();
-            return match (app_state.as_str(), runtime.as_str()) {
-                ("granted", "granted") => (
-                    "granted".into(),
-                    "Accessibilité OK pour Bob Work (les actions UI passent par Bob Work, pas python3).".into(),
-                ),
-                ("granted", _) => (
-                    "granted".into(),
-                    format!(
-                        "{app_message} Activez aussi System Events pour Bob Work si les clics restent bloqués."
-                    ),
-                ),
-                _ => ("denied".into(), app_message),
-            };
+            return Self::combine_accessibility_status(
+                &app_name,
+                &app_state,
+                &runtime,
+                app_message,
+            );
         }
         #[allow(unreachable_code)]
         ("unavailable".into(), "Non disponible.".into())
+    }
+
+    pub fn combine_accessibility_status(
+        app_name: &str,
+        app_state: &str,
+        runtime: &str,
+        app_message: String,
+    ) -> (String, String) {
+        match (app_state, runtime) {
+            ("granted", "granted") => (
+                "granted".into(),
+                format!(
+                    "Accessibilité OK pour {app_name} (les actions UI passent par {app_name}, pas python3)."
+                ),
+            ),
+            ("granted", _) => (
+                "granted".into(),
+                format!(
+                    "{app_message} Activez aussi System Events pour {app_name} si les clics restent bloqués."
+                ),
+            ),
+            _ => ("denied".into(), app_message),
+        }
     }
 
     fn probe_in_process_accessibility() -> String {
@@ -213,7 +252,9 @@ mod tests {
 
     #[test]
     fn bundled_script_exposes_desktop_tools() {
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("get_computer_use_guide"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("open_app"));
+        assert!(COMPUTER_USE_GUIDE.contains("bob-work-computer-use"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("list_apps"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("desktop_click"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("desktop_scroll"));
@@ -222,7 +263,7 @@ mod tests {
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("ui_set_value"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("app_command"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("bring_to_front"));
-        assert!(COMPUTER_USE_MCP_SCRIPT.contains("MAX_VISUAL_CAPTURES = 3"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("MAX_VISUAL_CAPTURES = 10"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("MAX_ACTIONS = 20"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("_authorize_action"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("formatOptions"));
@@ -251,11 +292,31 @@ mod tests {
     #[test]
     fn bundled_script_prefers_bob_work_applescript_bridge() {
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("BOB_WORK_APPLESCRIPT_SOCKET"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("applescript_socket_path"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("applescript-test.sock"));
         assert!(COMPUTER_USE_MCP_SCRIPT.contains("_run_osascript_via_bob_work"));
-        assert!(COMPUTER_USE_MCP_SCRIPT.contains("BRIDGE_REQUIRED_ERROR"));
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("def bridge_required_error"));
         assert!(
             !COMPUTER_USE_MCP_SCRIPT.contains("[\"osascript\""),
             "Computer Use must not spawn /usr/bin/osascript (TCC would attach to python3)"
         );
+        assert!(
+            COMPUTER_USE_MCP_SCRIPT.contains(r#""action": "screencapture""#),
+            "Screen Recording must go through the native bridge, not python3 screencapture"
+        );
+        assert!(COMPUTER_USE_MCP_SCRIPT.contains("BOB_WORK_APP_NAME"));
+    }
+
+    #[test]
+    fn accessibility_status_names_the_running_app() {
+        let (state, message) = ComputerUseMcpService::combine_accessibility_status(
+            "Bob Work-test",
+            "granted",
+            "granted",
+            "ignored".into(),
+        );
+        assert_eq!(state, "granted");
+        assert!(message.contains("Bob Work-test"));
+        assert!(!message.contains("OK pour Bob Work ("));
     }
 }

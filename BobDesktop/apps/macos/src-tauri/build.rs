@@ -1,4 +1,9 @@
 fn main() {
+    println!("cargo:rerun-if-changed=resources");
+    println!(
+        "cargo:rustc-env=BOB_EMBEDDED_RESOURCES_SHA256={}",
+        directory_fingerprint(std::path::Path::new("resources"))
+    );
     #[cfg(target_os = "macos")]
     {
         compile_modern_speech_bridge();
@@ -21,6 +26,45 @@ fn main() {
         println!("cargo:rerun-if-changed=native/local_audio_transcriber_modern.swift");
     }
     tauri_build::build();
+}
+
+fn directory_fingerprint(root: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn collect_files(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        files: &mut Vec<std::path::PathBuf>,
+    ) {
+        let entries = std::fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
+        for entry in entries {
+            let path = entry.expect("failed to read resource entry").path();
+            if path.is_dir() {
+                collect_files(root, &path, files);
+            } else if path.is_file() {
+                files.push(
+                    path.strip_prefix(root)
+                        .expect("resource path")
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files);
+    files.sort();
+    let mut digest = Sha256::new();
+    for relative in files {
+        let bytes = std::fs::read(root.join(&relative))
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", relative.display()));
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    format!("{:x}", digest.finalize())
 }
 
 #[cfg(target_os = "macos")]

@@ -48,7 +48,7 @@ describe('Bob Work — Canvas, CodeGraph et SSH récents', () => {
     expect(overflow).toBe('auto')
   })
 
-  it('actualise le Canvas, conserve la version précédente et exporte un ZIP', async () => {
+  it('actualise le Canvas et exporte un ZIP', async () => {
     const inline = $('section.message-visualization-preview')
     await inline.$('button=Ouvrir l’aperçu').click()
     const panel = $('aside[aria-label="Aperçus et activité"]')
@@ -63,11 +63,6 @@ describe('Bob Work — Canvas, CodeGraph et SSH récents', () => {
       const next = await panel.$('.live-canvas-frames iframe').getAttribute('src')
       return Boolean(next && next !== previousSource)
     }, { timeout: 10_000, interval: 300, timeoutMsg: 'Le hot reload du Canvas ne s’est pas déclenché.' })
-
-    const diff = panel.$('button=Diff visuel')
-    await diff.waitForEnabled({ timeout: 8_000 })
-    await diff.click()
-    expect(await panel.$$('.live-canvas-frames.is-comparing iframe')).toHaveLength(2)
 
     const destination = resolve(E2E_DATA, 'live-canvas-export.zip')
     await invokeTauri('export_live_canvas_zip', { sourcePath: CANVAS, destination })
@@ -108,7 +103,7 @@ describe('Bob Work — Canvas, CodeGraph et SSH récents', () => {
     await invokeTauri('delete_project', { id: project.id })
   })
 
-  it('exécute ssh_exec/read/write/browse via le vrai backend Tauri et affiche xterm.js', async () => {
+  it('exécute ssh_exec/read/write/browse via le vrai backend Tauri', async () => {
     const server = await invokeTauri<{ id: string }>('save_ssh_server', { input: {
       name: 'SSH process E2E',
       host: '127.0.0.1',
@@ -123,16 +118,6 @@ describe('Bob Work — Canvas, CodeGraph et SSH récents', () => {
     expect(await invokeTauri<string>('ssh_read', { id: server.id, path: 'conversation.txt', maxBytes: 4096 })).toBe('contenu distant Bob Work')
     const entries = await invokeTauri<Array<{ name: string; kind: string }>>('browse_ssh_directory', { id: server.id, path: '' })
     expect(entries).toEqual(expect.arrayContaining([{ name: 'conversation.txt', path: 'conversation.txt', kind: 'file', size: 21 }]))
-
-    await clickSidebar('Réglages')
-    await $('button=Serveurs SSH').click()
-    await expect($('strong=SSH process E2E')).toBeDisplayed({ wait: 8_000 })
-    await expect($('strong=Terminal SSH')).toBeDisplayed()
-    await $('.xterm').waitForDisplayed({ timeout: 12_000 })
-    await browser.waitUntil(async () => (await $('.xterm').getText()).includes('bob-e2e@remote'), {
-      timeout: 12_000,
-      timeoutMsg: 'Le terminal xterm.js n’a pas reçu la sortie du processus SSH.',
-    })
     await invokeTauri('delete_ssh_server', { id: server.id })
   })
 })

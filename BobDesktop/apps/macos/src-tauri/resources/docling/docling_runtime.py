@@ -46,6 +46,10 @@ def bob_home() -> Path:
 
 
 def runtime_root() -> Path:
+    return bob_home() / "runtimes" / "external" / "docling-cli" / DOCLING_VERSION
+
+
+def legacy_runtime_root() -> Path:
     return bob_home() / "runtimes" / "docling" / DOCLING_VERSION
 
 
@@ -68,6 +72,60 @@ def _is_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def _bob_runtime_binaries() -> list[str]:
+    binaries: list[str] = []
+    parents = [
+        bob_home() / "runtimes" / "external" / "docling-cli",
+        bob_home() / "runtimes" / "docling",
+    ]
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        version_dirs = sorted(
+            (entry for entry in parent.iterdir() if entry.is_dir()),
+            reverse=True,
+        )
+        for root in version_dirs:
+            for relative in (("bin", "docling"), ("venv", "bin", "docling")):
+                path = root.joinpath(*relative)
+                if _is_executable(path):
+                    binaries.append(str(path))
+    return binaries
+
+
+def _external_cli_candidates() -> list[str]:
+    """Find user-installed CLIs even when launched from Finder's minimal PATH."""
+    home = Path.home()
+    paths = [home / ".local/bin/docling"]
+    python_root = home / "Library/Python"
+    if python_root.is_dir():
+        paths.extend(
+            version / "bin/docling"
+            for version in sorted(python_root.iterdir(), reverse=True)
+            if version.is_dir()
+        )
+    paths.extend([Path("/opt/homebrew/bin/docling"), Path("/usr/local/bin/docling")])
+    return [str(path) for path in paths if _is_executable(path)]
+
+
+def _docling_env(binary: str) -> dict[str, str]:
+    """Preserve pip --user packages for CLIs launched by an isolated MCP host."""
+    env = os.environ.copy()
+    path = Path(binary).expanduser()
+    try:
+        relative = path.relative_to(Path.home() / "Library/Python")
+    except ValueError:
+        return env
+    if len(relative.parts) < 3 or relative.parts[1] != "bin":
+        return env
+    user_site = Path.home() / "Library/Python" / relative.parts[0] / "lib/python/site-packages"
+    if not user_site.is_dir():
+        return env
+    current = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(user_site) if not current else f"{user_site}{os.pathsep}{current}"
+    return env
+
+
 def _probe_version(binary: str) -> str | None:
     try:
         result = subprocess.run(
@@ -76,8 +134,11 @@ def _probe_version(binary: str) -> str | None:
             text=True,
             timeout=20,
             check=False,
+            env=_docling_env(binary),
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
         return None
     text = (result.stdout or result.stderr or "").strip()
     return text.splitlines()[0] if text else None
@@ -92,6 +153,7 @@ def uses_convert_subcommand(binary: str) -> bool:
             text=True,
             timeout=25,
             check=False,
+            env=_docling_env(binary),
         )
     except (OSError, subprocess.TimeoutExpired):
         return True
@@ -115,9 +177,8 @@ def resolve_docling() -> dict[str, Any]:
     candidates: list[tuple[str, str]] = []
     if env_bin:
         candidates.append((env_bin, "env"))
-    runtime_bin = runtime_root() / "bin" / "docling"
-    if _is_executable(runtime_bin):
-        candidates.append((str(runtime_bin), "bob-runtime"))
+    candidates.extend((binary, "external") for binary in _external_cli_candidates())
+    candidates.extend((binary, "bob-runtime") for binary in _bob_runtime_binaries())
     path_bin = _which("docling")
     if path_bin:
         candidates.append((path_bin, "path"))
@@ -163,30 +224,39 @@ def _run(command: list[str], timeout: int, cwd: Path | None = None) -> subproces
     )
 
 
+def _link_cli(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        destination.unlink()
+    try:
+        destination.symlink_to(source)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
 def ensure_runtime(force: bool = False) -> dict[str, Any]:
     status = resolve_docling()
-    if status.get("ok") and not force and status.get("origin") in {"env", "bob-runtime"}:
-        return {**status, "installed": False}
-    if status.get("ok") and not force and status.get("origin") == "path":
+    if status.get("ok") and not force and status.get("origin") in {"env", "bob-runtime", "external", "path"}:
         return {**status, "installed": False}
 
     root = runtime_root()
+    venv = root / "venv"
     root.mkdir(parents=True, exist_ok=True)
-    python = root / "bin" / "python3"
+    python = venv / "bin" / "python3"
     uv = _which("uv")
     logs: list[str] = []
 
     if not python.is_file() or force:
         if uv:
-            cmd = [uv, "venv", str(root), "--python", "3.12"]
+            cmd = [uv, "venv", str(venv), "--python", "3.12"]
             result = _run(cmd, INSTALL_TIMEOUT)
             logs.append((result.stderr or result.stdout or "").strip())
             if result.returncode != 0:
-                result = _run([uv, "venv", str(root)], INSTALL_TIMEOUT)
+                result = _run([uv, "venv", str(venv)], INSTALL_TIMEOUT)
                 logs.append((result.stderr or result.stdout or "").strip())
         if not python.is_file():
             host = sys.executable or "python3"
-            result = _run([host, "-m", "venv", str(root)], INSTALL_TIMEOUT)
+            result = _run([host, "-m", "venv", str(venv)], INSTALL_TIMEOUT)
             logs.append((result.stderr or result.stdout or "").strip())
             if result.returncode != 0:
                 return {
@@ -214,6 +284,10 @@ def ensure_runtime(force: bool = False) -> dict[str, Any]:
             "pinned": DOCLING_VERSION,
             "runtimeRoot": str(root),
         }
+
+    installed = venv / "bin" / "docling"
+    if installed.is_file():
+        _link_cli(installed, root / "bin" / "docling")
 
     status = resolve_docling()
     status["installed"] = True
@@ -369,6 +443,7 @@ def run_docling(argv: list[str], timeout: int = CONVERT_TIMEOUT, cwd: str | None
             text=True,
             timeout=timeout,
             check=False,
+            env=_docling_env(binary),
         )
     except subprocess.TimeoutExpired:
         return {
@@ -438,6 +513,7 @@ def download_models(models: list[str] | None = None, all_models: bool = False) -
             text=True,
             timeout=MODELS_TIMEOUT,
             check=False,
+            env=_docling_env(str(status["binary"])),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "message": "Téléchargement des modèles Docling trop long.", "command": command}

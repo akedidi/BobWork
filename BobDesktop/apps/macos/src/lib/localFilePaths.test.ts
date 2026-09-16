@@ -4,6 +4,7 @@ import {
   fileNameFromPath,
   linkifyLocalFilePaths,
   normalizeLocalFilePathKey,
+  resolveDurableLocalPath,
 } from './localFilePaths'
 
 describe('localFilePaths', () => {
@@ -94,5 +95,28 @@ describe('localFilePaths', () => {
     const input = 'Exemple : `https://api.weatherapi.com/v1/forecast.json?key=CLEF&q=Paris`'
     expect(extractLocalFilePaths(input)).toEqual([])
     expect(linkifyLocalFilePaths(input)).toBe(input)
+  })
+
+  it('collapses bob-isolated skill paths onto the host ~/.bob/skills key', () => {
+    const isolated =
+      '/private/var/folders/5n/8bqj71ls731721nymrrw18tc0000gn/T/bob-isolated-Edb9u5/.bob/skills/learning-path-sandbox-v2/SKILL.md'
+    const host = '/Users/aniskedidi/.bob/skills/learning-path-sandbox-v2/SKILL.md'
+    expect(normalizeLocalFilePathKey(isolated)).toBe(normalizeLocalFilePathKey(host))
+    expect(normalizeLocalFilePathKey('~/.bob/skills/learning-path-sandbox-v2/SKILL.md')).toBe(
+      normalizeLocalFilePathKey(host),
+    )
+  })
+
+  it('rewrites bob-isolated and ~/ paths to a durable host path', () => {
+    const home = '/Users/aniskedidi'
+    expect(
+      resolveDurableLocalPath(
+        '/var/folders/5n/8bqj71ls731721nymrrw18tc0000gn/T/bob-isolated-xyz/.bob/skills/demo/SKILL.md',
+        home,
+      ),
+    ).toBe('/Users/aniskedidi/.bob/skills/demo/SKILL.md')
+    expect(resolveDurableLocalPath('~/.bob/skills/demo/SKILL.md', home)).toBe(
+      '/Users/aniskedidi/.bob/skills/demo/SKILL.md',
+    )
   })
 })

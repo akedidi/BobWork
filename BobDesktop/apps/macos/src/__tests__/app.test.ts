@@ -177,6 +177,31 @@ describe('appStore', () => {
     store.markConversationRead('c1')
     expect(useAppStore.getState().unreadConversationIds).toEqual(['c2'])
   })
+
+  it('counts completed tasks separately and clears them when their conversation is viewed', async () => {
+    const { completedTaskUnreadCount, useAppStore } = await import('../stores/appStore')
+    useAppStore.setState({ unreadConversationIds: [], unreadCompletedTasks: [] })
+    const store = useAppStore.getState()
+    store.markCompletedTaskUnread('task-1', 'c1')
+    store.markCompletedTaskUnread('task-2', 'c1')
+    store.markCompletedTaskUnread('task-2', 'c1')
+    store.markCompletedTaskUnread('task-3', 'c2')
+
+    expect(useAppStore.getState().unreadCompletedTasks).toEqual([
+      { taskId: 'task-3', conversationId: 'c2' },
+      { taskId: 'task-2', conversationId: 'c1' },
+      { taskId: 'task-1', conversationId: 'c1' },
+    ])
+    expect(completedTaskUnreadCount(useAppStore.getState())).toBe(3)
+    store.markConversationRead('c1')
+    expect(useAppStore.getState().unreadCompletedTasks).toEqual([
+      { taskId: 'task-3', conversationId: 'c2' },
+    ])
+    expect(completedTaskUnreadCount(useAppStore.getState())).toBe(1)
+    useAppStore.getState().markAllCompletedTasksRead()
+    expect(completedTaskUnreadCount(useAppStore.getState())).toBe(0)
+    expect(useAppStore.getState().unreadConversationIds).toEqual([])
+  })
 })
 
 // ── IPC Wrappers ──────────────────────────────────────────────
@@ -245,6 +270,7 @@ describe('ipc wrappers', () => {
     expect(typeof ipc.getBobalytics).toBe('function')
     expect(typeof ipc.exportBobalytics).toBe('function')
     expect(typeof ipc.installBobShell).toBe('function')
+    expect(typeof ipc.uninstallBobShell).toBe('function')
     expect(typeof ipc.openDataDir).toBe('function')
     expect(typeof ipc.exportDiagnostics).toBe('function')
     expect(typeof ipc.createPermissionGrant).toBe('function')

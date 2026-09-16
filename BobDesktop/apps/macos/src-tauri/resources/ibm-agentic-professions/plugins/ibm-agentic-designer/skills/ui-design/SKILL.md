@@ -1,44 +1,50 @@
 ---
 name: ui-design
-description: "Produire une interface cohérente, responsive et prête à construire."
+description: "Produce a coherent, responsive interface ready to build."
 icon: designer
 ---
 
 # ui-design
 
-Utiliser ce skill pour produire une interface cohérente, responsive et prête à construire.
+Use this skill to produce a coherent, responsive interface ready to build.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir grille, hiérarchie visuelle, densité et comportements responsive.
-2. Composer les écrans avec des composants et tokens existants avant toute variante.
-3. Couvrir états normal, chargement, vide, erreur, succès, disabled et permissions.
-4. Annoter interactions, contenu, données et transitions nécessaires.
+1. Define grid, visual hierarchy, density, and responsive behaviors.
+2. Compose screens with existing components and tokens before any variant.
+3. Cover normal, loading, empty, error, success, disabled, and permission states.
+4. Annotate interactions, content, data, and required transitions.
 
-## Livrable
+## Deliverable
 
-Écrans haute fidélité, variantes, états et spécifications d’interaction.
+High-fidelity screens, variants, states, and interaction specifications.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Pas de texte tronqué ni de contraste insuffisant.
-- Tous les états et tailles cibles sont couverts.
-- Les composants restent réutilisables.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- No truncated text or insufficient contrast.
+- All states and target sizes are covered.
+- Components remain reusable.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

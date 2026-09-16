@@ -89,7 +89,7 @@ The app detects what IBM Bob can and cannot do, then:
 
 ### Design Principles
 
-1. **Original Design**: Professional UI inspired by ChatGPT Work's UX patterns, but with unique visual identity
+1. **Original Design**: Professional UI professional desktop UX with a distinct visual identity
 2. **macOS Native**: Follows Apple's Human Interface Guidelines
 3. **Accessible**: Full keyboard navigation, VoiceOver support, WCAG AA compliance
 4. **Performant**: <2s launch, <100ms UI response, <500ms conversation load

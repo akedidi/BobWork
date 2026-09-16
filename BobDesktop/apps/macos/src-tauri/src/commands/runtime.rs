@@ -68,3 +68,11 @@ pub async fn cancel_runtime_process(
 ) -> AppResult<bool> {
     Ok(manager.cancel_process(&process_id))
 }
+
+#[tauri::command]
+pub async fn cancel_runtime_operation(
+    runtime_id: String,
+    manager: State<'_, RuntimeManager>,
+) -> AppResult<bool> {
+    Ok(manager.cancel_operation(&runtime_id))
+}

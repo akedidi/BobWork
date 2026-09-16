@@ -10,8 +10,8 @@ DERIVED_DATA="$RELEASE_ROOT/ios-derived-data"
 ARCHIVE="$RELEASE_ROOT/BobMobile.xcarchive"
 MODE="${1:-simulator}"
 
-if [[ "$MODE" != "prepare" && "$MODE" != "simulator" && "$MODE" != "archive" && "$MODE" != "verify" ]]; then
-  echo "Usage: bash scripts/release-ios.sh [prepare|simulator|archive|verify] [app-path]" >&2
+if [[ "$MODE" != "prepare" && "$MODE" != "simulator" && "$MODE" != "archive" && "$MODE" != "unsigned-ipa" && "$MODE" != "verify" ]]; then
+  echo "Usage: bash scripts/release-ios.sh [prepare|simulator|archive|unsigned-ipa|verify] [app-path]" >&2
   exit 2
 fi
 if [[ -n "${EXPO_PUBLIC_BOB_MOBILE_DEV_SCREEN:-}" || -n "${REACT_NATIVE_PACKAGER_HOSTNAME:-}" ]]; then
@@ -57,7 +57,6 @@ case "$MODE" in
       -configuration Release \
       -sdk iphonesimulator \
       -derivedDataPath "$DERIVED_DATA" \
-      CODE_SIGNING_ALLOWED=NO \
       clean build
     APP="$(find "$DERIVED_DATA/Build/Products" -maxdepth 2 -type d -name 'BobMobile.app' -print -quit)"
     [[ -n "$APP" ]] || { echo "Release simulator app not found." >&2; exit 1; }
@@ -74,6 +73,29 @@ case "$MODE" in
       -archivePath "$ARCHIVE" \
       clean archive
     node "$SCRIPT_DIR/verify-release-ios.mjs" "$ARCHIVE/Products/Applications/BobMobile.app"
+    ;;
+  unsigned-ipa)
+    prepare
+    xcodebuild \
+      -workspace "$ROOT/ios/BobMobile.xcworkspace" \
+      -scheme BobMobile \
+      -configuration Release \
+      -destination 'generic/platform=iOS' \
+      -derivedDataPath "$DERIVED_DATA" \
+      -archivePath "$ARCHIVE" \
+      CODE_SIGNING_ALLOWED=NO \
+      CODE_SIGNING_REQUIRED=NO \
+      CODE_SIGN_IDENTITY='' \
+      clean archive
+    APP="$ARCHIVE/Products/Applications/BobMobile.app"
+    [[ -d "$APP" ]] || { echo "Unsigned iOS app not found in archive." >&2; exit 1; }
+    mkdir -p "$RELEASE_ROOT/ipa/Payload"
+    cp -R "$APP" "$RELEASE_ROOT/ipa/Payload/BobMobile.app"
+    (
+      cd "$RELEASE_ROOT/ipa"
+      /usr/bin/zip -qry "$RELEASE_ROOT/BobMobile-unsigned.ipa" Payload -x '*.DS_Store'
+    )
+    echo "Unsigned IPA: $RELEASE_ROOT/BobMobile-unsigned.ipa"
     ;;
   verify)
     [[ -n "${2:-}" ]] || { echo "An .app path is required for verify." >&2; exit 2; }

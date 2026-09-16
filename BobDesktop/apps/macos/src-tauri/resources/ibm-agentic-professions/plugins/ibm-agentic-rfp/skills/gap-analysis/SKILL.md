@@ -1,44 +1,52 @@
 ---
 name: gap-analysis
-description: "Identifier les écarts de conformité et le chemin crédible pour les fermer."
+description: "Identify compliance gaps and a credible path to close them."
 icon: rfp
 ---
 
 # gap-analysis
 
-Utiliser ce skill pour identifier les écarts de conformité et le chemin crédible pour les fermer.
+Use this skill to identify compliance gaps and a credible path to close them.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Comparer chaque exigence aux capacités et preuves existantes.
-2. Classer écart produit, delivery, partenaire, contractuel, sécurité ou ressource.
-3. Définir remédiation, coût, délai, responsable et risque résiduel.
-4. Escalader les écarts qui nécessitent dérogation ou engagement exécutif.
+1. Compare each requirement against existing capabilities and evidence.
+2. Classify gaps as product, delivery, partner, contractual, security, or resource.
+3. Define remediation, cost, timeline, owner, and residual risk.
+4. Escalate gaps requiring waiver or executive commitment.
 
-## Livrable
+## Deliverable
 
-Gap register lié à la compliance matrix et plan de remédiation.
+Gap register linked to the compliance matrix and remediation plan.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Aucun gap critique sans propriétaire.
-- La remédiation est réalisable avant l’échéance.
-- Les engagements futurs sont approuvés.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- No critical gap without an owner.
+- Remediation is achievable before the deadline.
+- Future commitments are approved.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.

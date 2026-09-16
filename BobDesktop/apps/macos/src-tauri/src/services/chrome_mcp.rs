@@ -16,6 +16,7 @@ pub struct MacosChromeControlStatus {
     pub mcp_enabled: bool,
     pub automation: String,
     pub automation_message: String,
+    pub app_name: String,
 }
 
 pub struct ChromeMcpService;
@@ -60,6 +61,14 @@ impl ChromeMcpService {
                 "BOB_WORK_APPLESCRIPT_SOCKET".into(),
                 json!(crate::macos_applescript_bridge::socket_path_string()),
             );
+            env.insert(
+                "BOB_WORK_APP_NAME".into(),
+                json!(crate::app_identity::app_display_name()),
+            );
+            env.insert(
+                "BOB_WORK_BUNDLE_ID".into(),
+                json!(crate::app_identity::bundle_identifier()),
+            );
         }
         json!({
             "command": "python3",
@@ -86,7 +95,10 @@ impl ChromeMcpService {
     pub fn sync(&self, bob_path: &str, enabled: bool) -> AppResult<()> {
         if !enabled {
             if self.is_configured() {
-                run_bob(bob_path, &["mcp", "disable", CHROME_MCP_NAME])?;
+                run_bob(
+                    bob_path,
+                    &["mcp", "disable", CHROME_MCP_NAME, "--scope", "global"],
+                )?;
             }
             return Ok(());
         }
@@ -95,24 +107,43 @@ impl ChromeMcpService {
         let config = Self::mcp_config(&bundle_dir);
         run_bob(
             bob_path,
-            &["mcp", "add-json", CHROME_MCP_NAME, &config.to_string()],
+            &[
+                "mcp",
+                "add-json",
+                "--scope",
+                "global",
+                CHROME_MCP_NAME,
+                &config.to_string(),
+            ],
         )?;
-        run_bob(bob_path, &["mcp", "enable", CHROME_MCP_NAME])?;
+        run_bob(
+            bob_path,
+            &["mcp", "enable", CHROME_MCP_NAME, "--scope", "global"],
+        )?;
         Ok(())
     }
 
     pub fn status(&self) -> MacosChromeControlStatus {
-        let chrome_installed = Self::chrome_installed();
-        let mcp_configured = self.is_configured();
-        let mcp_enabled = self.is_enabled();
-        let (automation, automation_message) = Self::probe_chrome_automation();
+        self.status_for_app(&crate::app_identity::app_display_name())
+    }
+
+    pub fn mcp_status(&self, app_name: &str) -> MacosChromeControlStatus {
         MacosChromeControlStatus {
-            chrome_installed,
-            mcp_configured,
-            mcp_enabled,
-            automation,
-            automation_message,
+            chrome_installed: Self::chrome_installed(),
+            mcp_configured: self.is_configured(),
+            mcp_enabled: self.is_enabled(),
+            automation: "unknown".into(),
+            automation_message: String::new(),
+            app_name: app_name.to_string(),
         }
+    }
+
+    pub fn status_for_app(&self, app_name: &str) -> MacosChromeControlStatus {
+        let mut status = self.mcp_status(app_name);
+        let (automation, automation_message) = Self::probe_chrome_automation_for_app(app_name);
+        status.automation = automation;
+        status.automation_message = automation_message;
+        status
     }
 
     pub fn chrome_installed() -> bool {
@@ -123,6 +154,10 @@ impl ChromeMcpService {
     }
 
     pub fn probe_chrome_automation() -> (String, String) {
+        Self::probe_chrome_automation_for_app(&crate::app_identity::app_display_name())
+    }
+
+    pub fn probe_chrome_automation_for_app(app_name: &str) -> (String, String) {
         if std::env::consts::OS != "macos" {
             return (
                 "unavailable".into(),
@@ -146,8 +181,8 @@ impl ChromeMcpService {
         }
         #[cfg(all(target_os = "macos", not(feature = "e2e")))]
         {
-            // In-process probe only so Automation lists Bob Work, never osascript.
-            return crate::macos_permissions::probe_chrome_automation_in_process();
+            // In-process probe only so Automation lists the running app, never osascript.
+            return crate::macos_permissions::probe_chrome_automation_in_process_for_app(app_name);
         }
         #[allow(unreachable_code)]
         ("unavailable".into(), "Non disponible.".into())
@@ -180,7 +215,14 @@ mod tests {
         assert!(CHROME_MCP_SCRIPT.contains("chrome_execute_js"));
         assert!(CHROME_MCP_SCRIPT.contains("web_fetch"));
         assert!(CHROME_MCP_SCRIPT.contains("fetch_background_url"));
+        assert!(CHROME_MCP_SCRIPT.contains("contentSource"));
+        assert!(CHROME_MCP_SCRIPT.contains("chrome_javascript_from_applescript_disabled"));
         assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_ALLOW_VISIBLE_CHROME"));
+        assert!(CHROME_MCP_SCRIPT.contains("open location"));
+        assert!(
+            !CHROME_MCP_SCRIPT.contains("open\", \"-a\", \"Google Chrome\""),
+            "chrome_open_url must use the AppleScript bridge, not Launch Services open -a"
+        );
         let compatibility_body = CHROME_MCP_SCRIPT
             .split("def browser_snapshot(arguments: dict) -> dict:")
             .nth(1)
@@ -203,17 +245,27 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("applescript.sock"));
+            assert!(!config["env"]["BOB_WORK_APP_NAME"].as_str().unwrap_or("").is_empty());
+            assert!(!config["env"]["BOB_WORK_BUNDLE_ID"].as_str().unwrap_or("").is_empty());
         }
     }
 
     #[test]
     fn bundled_script_prefers_bob_work_applescript_bridge() {
         assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_APPLESCRIPT_SOCKET"));
+        assert!(CHROME_MCP_SCRIPT.contains("applescript_socket_path"));
+        assert!(CHROME_MCP_SCRIPT.contains("applescript-test.sock"));
         assert!(CHROME_MCP_SCRIPT.contains("_run_osascript_via_bob_work"));
-        assert!(CHROME_MCP_SCRIPT.contains("BRIDGE_REQUIRED_ERROR"));
+        assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_APP_NAME"));
+        assert!(CHROME_MCP_SCRIPT.contains("bridge_required_error"));
         assert!(
             !CHROME_MCP_SCRIPT.contains("[\"osascript\""),
             "Chrome MCP must not spawn /usr/bin/osascript (TCC would attach to python3)"
         );
+        assert!(
+            CHROME_MCP_SCRIPT.contains(r#""action": "screencapture""#),
+            "Screen Recording must go through the native bridge, not python3 screencapture"
+        );
+        assert!(CHROME_MCP_SCRIPT.contains("BOB_WORK_BUNDLE_ID"));
     }
 }

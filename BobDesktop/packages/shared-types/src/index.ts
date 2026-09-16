@@ -175,6 +175,7 @@ export interface Conversation {
   title: string;
   type: ConversationType;
   businessMode?: string;
+  /** Persisted execution mode owned by this conversation. */
   bobMode?: string;
   date: string;
   pinned: boolean;
@@ -182,6 +183,8 @@ export interface Conversation {
   summary?: string;
   bobContextState?: Record<string, unknown>;
   archived: boolean;
+  /** Latest execution-plan snapshots persisted with this conversation. */
+  planActivities?: ToolUse[];
 }
 
 export interface ConversationTransferSummary {
@@ -424,6 +427,24 @@ export interface TaskDetail {
   outputs: TaskIO[];
 }
 
+// ── Task permissions (composer auto-approve) ───────────────────
+
+export type TaskPermissionId =
+  | "read"
+  | "edit"
+  | "execute"
+  | "mcp"
+  | "skill"
+  | "todo"
+  | "subtask"
+  | "subagent"
+  | "mode";
+
+export interface TaskApprovalSettings {
+  autoApprovalEnabled: boolean;
+  allowedPermissions: TaskPermissionId[];
+}
+
 // ── Approval ──────────────────────────────────────────────────
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -602,6 +623,7 @@ export interface MacosChromeControlStatus {
   mcpEnabled: boolean;
   automation: 'granted' | 'denied' | 'chrome_missing' | 'unavailable' | 'unknown';
   automationMessage: string;
+  appName: string;
 }
 
 export interface MacosComputerUseStatus {
@@ -611,12 +633,11 @@ export interface MacosComputerUseStatus {
   accessibilityMessage: string;
 }
 
-export interface MacosChromeControlStatus {
-  chromeInstalled: boolean;
-  mcpConfigured: boolean;
-  mcpEnabled: boolean;
-  automation: 'granted' | 'denied' | 'chrome_missing' | 'unavailable' | 'unknown';
-  automationMessage: string;
+export interface OrcaCliStatus {
+  installed: boolean;
+  path?: string;
+  supportsSkillsGet: boolean;
+  message: string;
 }
 
 export interface PluginBrowserExtension {
@@ -760,24 +781,6 @@ export interface Plugin {
   createdAt: string;
   updatedAt: string;
   lastExecutedAt?: string;
-  availableVersion?: string;
-}
-
-export interface PluginVersion {
-  pluginId: string;
-  version: string;
-  releaseNotes?: string;
-  createdAt: string;
-  installedAt?: string;
-  state: "current" | "available" | "previous";
-}
-
-export interface PluginVersionDiff {
-  fromVersion: string;
-  toVersion: string;
-  changes: string[];
-  warnings: string[];
-  permissionsChanged: boolean;
 }
 
 // ── Integration ───────────────────────────────────────────────
@@ -922,11 +925,11 @@ export interface AppSettings {
   telemetryEnabled: boolean;
   computerUseEnabled: boolean;
   chromeControlEnabled: boolean;
-  /** Confine bob run to the workspace (no --trust; no Computer Use / Chrome for the session). */
+  /** Confine bob run via Seatbelt (Computer Use off; Chrome/subagents follow settings). `--trust` is passed so skill/plugin writes under ~/.bob/skills are not soft-blocked. */
   sandboxMode: boolean;
   /**
    * When true, Bob Work may retrieve short excerpts from other conversations
-   * (preferring the same project) to enrich prompts — ChatGPT-style.
+   * (preferring the same project) to enrich prompts.
    */
   crossConversationContext: boolean;
   /** Recall explicit native memories across Bob Work sessions. */
@@ -1042,6 +1045,8 @@ export interface SearchResult {
   title: string;
   snippet: string;
   score: number;
+  /** Creation date of the matching message, when the result is a message. */
+  messageCreatedAt?: string;
 }
 
 export interface WorkspaceSkill {
@@ -1060,6 +1065,12 @@ export interface WorkspaceSkill {
   createdAt?: string;
   /** Filesystem mtime of SKILL.md. */
   updatedAt?: string;
+  /** Parent pack slug when this skill lives under `skills/<slug>/SKILL.md`. */
+  parentSlug?: string | null;
+  /** Path relative to the parent pack root (e.g. `skills/compliance/SKILL.md`). */
+  relativePath?: string;
+  /** Nested skills discovered under a pack skills directory (nested skill packs). */
+  childSkills?: WorkspaceSkill[];
 }
 
 export interface SaveSkillInput {
@@ -1098,6 +1109,16 @@ export interface SaveMcpServerInput {
   envRemove?: string[];
   /** Optional HTTP headers for remote MCP (Authorization, X-Api-Key, …). */
   headers?: Record<string, string>;
+}
+
+export interface SaveApiConnectionInput {
+  originalName?: string;
+  name: string;
+  url: string;
+  authMode: "none" | "query" | "bearer" | "header";
+  authName?: string;
+  secret?: string;
+  enabled: boolean;
 }
 
 export type DbEngine =

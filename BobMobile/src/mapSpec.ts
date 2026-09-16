@@ -26,6 +26,10 @@ function findMapSpec(value: unknown, seen: Set<unknown>): MapSpec | undefined {
     for (const item of candidate.content) {
       const found = findMapSpec(item, seen)
       if (found) return found
+      if (item && typeof item === 'object') {
+        const foundInText = findMapSpec((item as Record<string, unknown>).text, seen)
+        if (foundInText) return foundInText
+      }
     }
   }
   return undefined

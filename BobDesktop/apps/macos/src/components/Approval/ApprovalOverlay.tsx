@@ -11,6 +11,11 @@ import { useAppStore } from '../../stores/appStore';
 import { errorMessage } from '../../lib/errorMessage';
 import { useT } from '../../i18n';
 import { useAppDialog } from '../AppDialog';
+import {
+  approvalGroupFromActionType,
+  isComposerPermissionAction,
+} from '../../lib/taskPermissions';
+import { useTaskPermissionStore } from '../../stores/taskPermissionStore';
 
 interface ApprovalOverlayProps {
   approval: Approval;
@@ -35,25 +40,36 @@ export function ApprovalOverlay({ approval }: ApprovalOverlayProps) {
   const riskLabel = t(riskLabelKey);
   const RiskIcon = riskKey === 'low' ? ShieldCheck : ShieldAlert;
 
+  const group = approvalGroupFromActionType(approval.actionType)
+  const composerStyle = isComposerPermissionAction(approval.actionType)
+  // Same as Bob IDE: Deny / Allow once / Allow <group> for every composer
+  // permission — including MCP (persist for this task via Accès permissions).
+  const showGroupApprove = Boolean(composerStyle && group)
+  const groupLabel = group ? t(`composer.permissions.${group}`) : ''
+  const togglePermission = useTaskPermissionStore(state => state.togglePermission)
+
   const handleDecision = async (decision: string, duration?: string) => {
-    setBusy(true);
-    setError('');
-    setLastAttempt({ decision, duration });
+    setBusy(true)
+    setError('')
+    setLastAttempt({ decision, duration })
     try {
-      await resolveApproval(approval.id, { decision, permissionDuration: duration });
-      removeApproval(approval.id);
+      if (decision === 'approved' && duration === 'task' && group) {
+        togglePermission(group, true)
+      }
+      await resolveApproval(approval.id, { decision, permissionDuration: duration })
+      removeApproval(approval.id)
     } catch (err) {
-      setError(errorMessage(err, t('approval.resolveFailed')));
+      setError(errorMessage(err, t('approval.resolveFailed')))
     } finally {
-      setBusy(false);
+      setBusy(false)
     }
-  };
+  }
 
   return (
     <div className="approval-overlay">
       <div
         role="dialog"
-        aria-modal="true"
+        aria-modal="false"
         aria-labelledby="approval-title"
         className={`approval-card approval-card--${riskKey}`}
       >
@@ -145,15 +161,26 @@ export function ApprovalOverlay({ approval }: ApprovalOverlayProps) {
             </button>
           </div>
           <div className="approval-actions-secondary">
-            <button
-              type="button"
-              className="approval-btn approval-btn-quiet"
-              disabled={busy}
-              onClick={() => void handleDecision('approved', 'task')}
-            >
-              {t('approval.allowTask')}
-            </button>
-            {riskKey !== 'critical' && (
+            {showGroupApprove ? (
+              <button
+                type="button"
+                className="approval-btn approval-btn-quiet"
+                disabled={busy}
+                onClick={() => void handleDecision('approved', 'task')}
+              >
+                {t('approval.allowGroup', { group: groupLabel })}
+              </button>
+            ) : composerStyle ? null : (
+              <button
+                type="button"
+                className="approval-btn approval-btn-quiet"
+                disabled={busy}
+                onClick={() => void handleDecision('approved', 'task')}
+              >
+                {t('approval.allowTask')}
+              </button>
+            )}
+            {!composerStyle && riskKey !== 'critical' && (
               <button
                 type="button"
                 className="approval-btn approval-btn-quiet approval-btn-always"

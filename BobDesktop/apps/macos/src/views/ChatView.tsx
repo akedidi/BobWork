@@ -1,36 +1,43 @@
+import { PdfViewer } from '../components/PdfViewer/PdfViewer'
 // ============================================================
 // Bob Work – ChatView
 // Conversations réelles : IPC → DB → streaming Tauri events
 // ============================================================
 
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type MutableRefObject } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ComponentPropsWithoutRef, type MutableRefObject } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { stat } from '@tauri-apps/plugin-fs'
 import {
   Bot, Check, CircleAlert, Copy, Database, FilePlus2, FilePenLine, FileSearch,
   FileX2, Globe2, MousePointer2, Pencil, Search, Terminal, Wrench, ChevronRight,
 } from 'lucide-react'
 import Composer from '../components/Composer/Composer'
+import type { ComposerDraftRequest } from '../components/Composer/Composer'
+import { ApprovalOverlay } from '../components/Approval/ApprovalOverlay'
 import WorkspacePanel, { type PanelActivity, type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { taskApprovalSnapshot } from '../components/Composer/ComposerPermissionsMenu'
 import {
   sendMessage, stopTask,
   getConversation, getMessages, createConversation, updateConversation, getTaskDetail, cancelTask, getTasks, getPlugin,
   rewindConversationFromMessage,
   registerExternalArtifact,
   getCodeGraphSuggestion, installExternalRuntime,
+  prepareFilePreview,
 } from '../lib/ipc'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import type { ConversationChoice, ConversationInteraction, FileChange, MessageAttachment, MessageSource, TaskDetail, ToolUse } from '@bob-work/shared-types'
 import { localeToBcp47, useI18n, useT } from '../i18n'
 import { errorMessage } from '../lib/errorMessage'
-import { formatMessageTimestamp } from '../lib/messageTimestamp'
+import { formatMessageTimestamp, normalizeAssistantMarkdown } from '@bob-work/chat-display'
+export { normalizeAssistantMarkdown } from '@bob-work/chat-display'
 import { isActiveTaskState, latestActiveTaskForConversation } from '../lib/activeTasks'
 import { useAppStore, useConversationStore } from '../stores/appStore'
 import { useConversationUpdated, useConversationMessagesChanged, useTaskUpdated, useBobSessionDone } from '../hooks/useTauriEvents'
-import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath } from '../lib/localFilePaths'
+import { extractLocalFilePaths, fileNameFromPath, linkifyLocalFilePaths, normalizeLocalFilePathKey, preferAbsoluteLocalPath, resolveDurableLocalPath } from '../lib/localFilePaths'
 import { PluginIcon, iconForFileName } from '../components/PluginIcon'
 import { ChromeSnapshotCard } from '../components/ChromeSnapshot/ChromeSnapshotCard'
 import { INLINE_IMAGE_EXT, INLINE_VISUALIZATION_EXT } from "../constants/fileTypes"
@@ -44,6 +51,10 @@ import { ExecutionPlanCard } from '../components/ExecutionPlan/ExecutionPlanCard
 import { executionPlanFromActivities } from '../lib/executionPlan'
 import bobAvatarIcon from '../assets/bob-avatar.png'
 import { mergeVisibleMessages } from '../lib/chatUtils'
+import {
+  isGenericFinishedTitleRaw,
+  localizeActivityTitle,
+} from '../lib/activityLabels'
 
 
 function sourcesFromLocalPaths(content: string): MessageSource[] {
@@ -52,6 +63,11 @@ function sourcesFromLocalPaths(content: string): MessageSource[] {
     title: fileNameFromPath(path),
     path,
   }))
+}
+
+/** Paths cited in a user prompt are instructions, not created files. */
+function sourcesInferredFromMessage(role: string, content: string): MessageSource[] {
+  return role === 'assistant' ? sourcesFromLocalPaths(content) : []
 }
 
 /**
@@ -66,16 +82,34 @@ function sourcesFromDeliverablePaths(paths: string[] | undefined): MessageSource
 }
 
 /** Replace only links whose filename matches a persisted session deliverable. */
-function resolveDeliverableLinks(markdown: string, sources: MessageSource[]): string {
+function resolveDeliverableLinks(markdown: string, sources: MessageSource[], homeDir = ''): string {
   if (!markdown || !sources.length) return markdown
   const byName = new Map(
     sources
       .filter((source): source is MessageSource & { path: string } => !!source.path)
       .map(source => [fileNameFromPath(source.path).toLowerCase(), source.path]),
   )
+  const byKey = new Map(
+    sources
+      .filter((source): source is MessageSource & { path: string } => !!source.path)
+      .map(source => [normalizeLocalFilePathKey(source.path), source.path]),
+  )
   return markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (whole, label: string, rawTarget: string) => {
     const target = rawTarget.trim().replace(/^<|>$/g, '')
-    if (/^(?:[a-z]+:|\/|~\/)/i.test(target)) return whole
+    const durable = homeDir ? resolveDurableLocalPath(target, homeDir) : target
+    const key = normalizeLocalFilePathKey(durable)
+    const fromSource = byKey.get(key)
+    if (fromSource) {
+      const name = label.includes('/') || label.includes('~') ? fileNameFromPath(fromSource) : label
+      return `[${name}](${/\s/.test(fromSource) ? `<${fromSource}>` : fromSource})`
+    }
+    if (/^(?:[a-z]+:|\/|~\/)/i.test(target)) {
+      if (durable !== target && durable.startsWith('/')) {
+        const name = label.includes('/') || label.includes('~') ? fileNameFromPath(durable) : label
+        return `[${name}](${/\s/.test(durable) ? `<${durable}>` : durable})`
+      }
+      return whole
+    }
     const resolved = byName.get(fileNameFromPath(target).toLowerCase())
     if (!resolved) return whole
     return `[${label}](${/\s/.test(resolved) ? `<${resolved}>` : resolved})`
@@ -121,135 +155,6 @@ async function registerMessageArtifacts(
     for (const path of paths) registrations.push(registerExternalArtifact(path, conversationId))
   }
   await Promise.allSettled(registrations)
-}
-
-export function normalizeAssistantMarkdown(markdown: string): string {
-  const expandedLines: string[] = []
-  let fence: { character: string; length: number } | null = null
-
-  for (const originalLine of markdown.replace(/\r\n?/g, '\n').split('\n')) {
-    const marker = originalLine.match(/^\s{0,3}(`{3,}|~{3,})/)
-    const markerText = marker?.[1]
-    if (fence) {
-      expandedLines.push(originalLine)
-      if (markerText && markerText[0] === fence.character && markerText.length >= fence.length) fence = null
-      continue
-    }
-    if (markerText) {
-      fence = { character: markerText[0], length: markerText.length }
-      expandedLines.push(originalLine)
-      continue
-    }
-
-    let line = originalLine.replace(/^(\s{0,3})(#{1,6})(?=[^\s#])/, '$1$2 ')
-    // Streaming can flatten a complete table onto one line. Identify the
-    // delimiter block itself: an empty header such as `| | |---|---|` does
-    // not contain the usual double-pipe boundary before that block.
-    const delimiterBlock = line.match(/\|(?:\s*:?-+:?\s*\|){2,}/)
-    if (delimiterBlock?.index !== undefined) {
-      let before = line.slice(0, delimiterBlock.index).trimEnd()
-      const after = line.slice(delimiterBlock.index + delimiterBlock[0].length).trimStart()
-      // Bob occasionally emits `| | |---|---|`: the empty two-column header
-      // has lost its final closing pipe while being streamed.
-      if (/^\s*\|\s*\|\s*$/.test(before)) before = '| | |'
-      line = [before, delimiterBlock[0], after].filter(Boolean).join('\n')
-      line = line.replace(/\|\s*\|(?=\s*[^\s|\-])/g, '|\n|')
-    }
-    expandedLines.push(...line.split('\n'))
-  }
-
-  const lines = expandedLines
-  const tableCells = (line: string): string[] | null => {
-    const trimmed = line.trim()
-    if (!trimmed.includes('|')) return null
-    let body = trimmed
-    if (body.startsWith('|')) body = body.slice(1)
-    if (body.endsWith('|')) body = body.slice(0, -1)
-
-    const cells: string[] = []
-    let cell = ''
-    let inlineCodeTicks = 0
-    for (let cursor = 0; cursor < body.length; cursor += 1) {
-      const character = body[cursor]
-      if (character === '\\' && cursor + 1 < body.length) {
-        cell += character + body[cursor + 1]
-        cursor += 1
-        continue
-      }
-      if (character === '`') {
-        let count = 1
-        while (body[cursor + count] === '`') count += 1
-        if (inlineCodeTicks === 0) inlineCodeTicks = count
-        else if (inlineCodeTicks === count) inlineCodeTicks = 0
-        cell += '`'.repeat(count)
-        cursor += count - 1
-        continue
-      }
-      if (character === '|' && inlineCodeTicks === 0) {
-        cells.push(cell.trim())
-        cell = ''
-      } else {
-        cell += character
-      }
-    }
-    cells.push(cell.trim())
-    return cells
-  }
-
-  for (let index = 1; index < lines.length; index += 1) {
-    const delimiters = tableCells(lines[index])
-    if (!delimiters || delimiters.length < 2 || !delimiters.every(cell => /^:?-+:?$/.test(cell))) continue
-    if (/^\s*\|\s*\|\s*$/.test(lines[index - 1])) {
-      lines[index - 1] = '| | |'
-    }
-    for (let cellIndex = 0; cellIndex < delimiters.length; cellIndex += 1) {
-      const delimiter = delimiters[cellIndex]
-      delimiters[cellIndex] = `${delimiter.startsWith(':') ? ':' : ''}---${delimiter.endsWith(':') ? ':' : ''}`
-    }
-
-    // A flattened block can leave prose/the heading directly before the first
-    // header pipe. Move that prefix back to its own line.
-    const firstPipe = lines[index - 1].indexOf('|')
-    if (lines[index].trimStart().startsWith('|') && firstPipe > 0 && lines[index - 1].slice(0, firstPipe).trim()) {
-      const prefix = lines[index - 1].slice(0, firstPipe).trimEnd()
-      const header = lines[index - 1].slice(firstPipe)
-      lines.splice(index - 1, 1, prefix, header)
-      index += 1
-    }
-
-    const headerCells = tableCells(lines[index - 1])
-    if (!headerCells || headerCells.length < 2) continue
-
-    // Some streamed responses omit the last separator cell even though the
-    // header and data rows contain it, for example a 3-column action table
-    // emitted as `|---|---|`. GFM rejects the whole table in that case.
-    if (headerCells.length > delimiters.length) {
-      while (delimiters.length < headerCells.length) delimiters.push('---')
-      lines[index] = `| ${delimiters.join(' | ')} |`
-      lines[index - 1] = `| ${headerCells.join(' | ')} |`
-      continue
-    }
-    if (headerCells.length === delimiters.length) {
-      lines[index - 1] = `| ${headerCells.join(' | ')} |`
-      lines[index] = `| ${delimiters.join(' | ')} |`
-      continue
-    }
-
-    // This is the malformed header emitted by the architecture report:
-    // `Label Couleur` represents two data columns. Repair it semantically.
-    const lastHeader = headerCells[headerCells.length - 1] ?? ''
-    const splitHeader = lastHeader.match(/^(Label)\s+(Couleur|Color)$/i)
-    if (headerCells.length + 1 === delimiters.length && splitHeader) {
-      headerCells.splice(-1, 1, splitHeader[1], splitHeader[2])
-    }
-
-    // Keep other imperfect LLM tables renderable without inventing labels.
-    while (headerCells.length < delimiters.length) headerCells.push('')
-    lines[index - 1] = `| ${headerCells.join(' | ')} |`
-    lines[index] = `| ${delimiters.join(' | ')} |`
-  }
-
-  return lines.join('\n')
 }
 
 function renderableImageSource(source: string): string {
@@ -448,13 +353,13 @@ export function interactionFromActivity(event: BobActivityEvent): ConversationIn
     }
     const option = recordValue(raw)
     if (!option) return null
-    const label = String(option.label ?? option.title ?? option.value ?? '').trim()
+    const label = String(option.label ?? option.title ?? option.text ?? option.answer ?? option.value ?? '').trim()
     if (!label) return null
     return {
       id: String(option.id ?? `choice-${index}`),
       label,
       description: typeof option.description === 'string' ? option.description : undefined,
-      value: String(option.value ?? option.prompt ?? label),
+      value: String(option.value ?? option.prompt ?? option.answer ?? label),
     }
   }).filter((choice): choice is ConversationChoice => choice !== null)
   // Bob may ask a genuinely open-ended question with no suggested options.
@@ -496,6 +401,7 @@ export default function ChatView() {
   const titleInputRef = useRef<HTMLInputElement>(null)
   const editingTitleRef = useRef(false)
   const [conversationPinned, setConversationPinned] = useState(false)
+  const [conversationProjectId, setConversationProjectId] = useState<string | undefined>(undefined)
   const setConversationStoreMsgs = useConversationStore(s => s.setMessages)
   const msgs = useConversationStore(s => convId ? (s.messages[convId] || []) : [])
   const setMsgs = useCallback((updater: Msg[] | ((prev: Msg[]) => Msg[])) => {
@@ -508,8 +414,11 @@ export default function ChatView() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [previewRequest, setPreviewRequest] = useState<PreviewRequest | null>(null)
   const [activities, setActivities] = useState<BobActivityEvent[]>([])
+  const [conversationPlanActivities, setConversationPlanActivities] = useState<BobActivityEvent[]>([])
   const [thinkingText, setThinkingText] = useState('')
   const [promptQueue, setPromptQueue] = useState<QueuedPrompt[]>([])
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null)
+  const [composerDraftRequest, setComposerDraftRequest] = useState<ComposerDraftRequest | null>(null)
   const [optimisticUserTurns, setOptimisticUserTurns] = useState<Msg[]>([])
   const [loadingHistory, setLoadingHistory] = useState(!!id)
   const [loadError, setLoadError] = useState<unknown>(null)
@@ -517,6 +426,20 @@ export default function ChatView() {
   const [bobMode, setBobMode] = useState('agent')
   const [interaction, setInteraction] = useState<ConversationInteraction | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
+  const [homeDir, setHomeDir] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void import('@tauri-apps/api/path')
+      .then(api => api.homeDir())
+      .then(path => {
+        if (!cancelled) setHomeDir(path)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const messageScrollRef = useRef<HTMLDivElement>(null)
@@ -524,6 +447,8 @@ export default function ChatView() {
   const unlistenRef = useRef<UnlistenFn[]>([])
   const runningRef = useRef(false)
   const queueRef = useRef<QueuedPrompt[]>([])
+  const editingQueuedIdRef = useRef<string | null>(null)
+  editingQueuedIdRef.current = editingQueuedId
   const activeSessionRef = useRef<{ conversationId: string; sessionId: string | null } | null>(null)
   const completedSessionsRef = useRef(new Set<string>())
   const pendingInteractionPromptRef = useRef<QueuedPrompt | null>(null)
@@ -599,8 +524,10 @@ export default function ChatView() {
       setEditingTitle(false)
       editingTitleRef.current = false
       setConversationPinned(false)
+      setConversationProjectId(routeState?.projectId)
       activitiesRef.current = []
       setActivities([])
+      setConversationPlanActivities([])
       setThinkingText('')
       setTaskId(null)
       setTaskDetail(null)
@@ -618,12 +545,17 @@ export default function ChatView() {
     setConvId(id)
     setEditingTitle(false)
     editingTitleRef.current = false
+    // Clear route-owned settings before the asynchronous load so a fast
+    // interaction can never reuse the previous conversation's mode/project.
+    setConversationProjectId(routeState?.projectId)
+    setBobMode('agent')
     // Activity is live, conversation-scoped state. Never let the previous
     // conversation's tools or sub-agents flash while this history is loading.
     if (!ownsInFlightPromptAtNavigation) {
       activitiesRef.current = []
       setActivities([])
     }
+    setConversationPlanActivities([])
     useAppStore.getState().markConversationRead(id)
     setConversationPinned(false)
     setLoadingHistory(true)
@@ -639,23 +571,30 @@ export default function ChatView() {
         if (conv) {
           setConvTitle(conv.title)
           setConversationPinned(conv.pinned)
+          setConversationProjectId(conv.projectId ?? routeState?.projectId)
           setBobMode(conv.bobMode ?? 'agent')
+          setConversationPlanActivities(activitiesFromToolsUsed(conv.planActivities))
         }
         const ownsInFlightPrompt = runningRef.current
           && activeSessionRef.current?.conversationId === id
         setConversationStoreMsgs(id, prev => {
-          const loaded = messages.map(m => ({
-            id: m.id,
-            role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-            content: m.content,
-            ts: m.createdAt,
-            state: 'done' as const,
-            persisted: true,
-            attachments: m.attachments,
-            sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
-            fileChanges: m.fileChanges,
-            activities: activitiesFromToolsUsed(m.toolsUsed),
-          }))
+          const loaded = messages.map(m => {
+            const role = (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant'
+            return {
+              id: m.id,
+              role,
+              content: m.content,
+              ts: m.createdAt,
+              state: 'done' as const,
+              persisted: true,
+              attachments: m.attachments,
+              // Keep DB/session sources only. Paths merely printed in prose are
+              // inferred at render time and existence-checked before preview.
+              sources: m.sources,
+              fileChanges: m.fileChanges,
+              activities: activitiesFromToolsUsed(m.toolsUsed),
+            }
+          })
           const optimistic = ownsInFlightPrompt
             ? prev.filter(p => p.state !== 'done' && !loaded.some(l => l.content === p.content))
             : []
@@ -695,11 +634,29 @@ export default function ChatView() {
       getConversation(convId).then(conversation => {
         if (!disposed && conversation && !editingTitleRef.current) {
           setConvTitle(conversation.title)
+          setConversationPlanActivities(activitiesFromToolsUsed(conversation.planActivities))
           setLoadError(null)
         }
       }).catch(error => {
         if (!disposed) setLoadError(error)
       })
+    }).then(fn => {
+      if (disposed) fn(); else unlisten = fn
+    })
+    return () => { disposed = true; unlisten?.() }
+  }, [convId])
+
+  useEffect(() => {
+    if (!convId) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    listen<string>('conversation-plan-updated', event => {
+      if (event.payload !== convId) return
+      getConversation(convId).then(conversation => {
+        if (!disposed && conversation) {
+          setConversationPlanActivities(activitiesFromToolsUsed(conversation.planActivities))
+        }
+      }).catch(() => {})
     }).then(fn => {
       if (disposed) fn(); else unlisten = fn
     })
@@ -716,18 +673,21 @@ export default function ChatView() {
         if (disposed || runningRef.current) return
         await registerMessageArtifacts(messages, convId)
         if (disposed || runningRef.current) return
-        setConversationStoreMsgs(convId, messages.map(m => ({
-          id: m.id,
-          role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-          content: m.content,
-          ts: m.createdAt,
-          state: 'done' as const,
-          persisted: true,
-          attachments: m.attachments,
-          sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
-          fileChanges: m.fileChanges,
-          activities: activitiesFromToolsUsed(m.toolsUsed),
-        })))
+        setConversationStoreMsgs(convId, messages.map(m => {
+          const role = (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant'
+          return {
+            id: m.id,
+            role,
+            content: m.content,
+            ts: m.createdAt,
+            state: 'done' as const,
+            persisted: true,
+            attachments: m.attachments,
+            sources: m.sources,
+            fileChanges: m.fileChanges,
+            activities: activitiesFromToolsUsed(m.toolsUsed),
+          }
+        }))
         activitiesRef.current = []
         setActivities([])
         setTaskDetail(null)
@@ -760,6 +720,14 @@ export default function ChatView() {
   }, [initialPrompt, location.key])
 
   const builderSession = useAppStore(s => s.builderSession)
+  const pendingApprovals = useAppStore(s => s.pendingApprovals)
+  const tasks = useAppStore(s => s.tasks)
+  const conversationApproval = pendingApprovals.find(approval => {
+    if (approval.decision !== 'pending') return false
+    if (taskId && approval.taskId === taskId) return true
+    if (!convId) return false
+    return tasks.some(task => task.id === approval.taskId && task.conversationId === convId)
+  })
   const routeBuilderMode = routeState?.mode === 'plugin_builder' || routeState?.mode === 'skill_builder'
     ? routeState.mode
     : null
@@ -786,7 +754,7 @@ export default function ChatView() {
     listen<string>('plugin-updated', event => {
       if (disposed || !event.payload) return
       useAppStore.getState().clearBuilderSession()
-      navigate('/plugins', { state: { selectPluginId: event.payload, openCommissioning: true } })
+      navigate('/plugins', { state: { selectPluginId: event.payload } })
     }).then(fn => { unlisten = fn })
     return () => {
       disposed = true
@@ -798,11 +766,22 @@ export default function ChatView() {
   const subscribeToSession = useCallback(async (conversationId: string) => {
 
     const matchesActiveSession = (payload: { sessionId: string; conversationId: string }) => {
+      if (payload.conversationId !== conversationId) return false
       const active = activeSessionRef.current
-      return !!active
-        && payload.conversationId === conversationId
-        && payload.conversationId === active.conversationId
-        && (!active.sessionId || payload.sessionId === active.sessionId)
+      if (!active || active.conversationId !== conversationId) {
+        activeSessionRef.current = { conversationId, sessionId: payload.sessionId }
+        runningRef.current = true
+        setIsRunning(true)
+        setSessionId(payload.sessionId)
+        return true
+      }
+      if (!active.sessionId || payload.sessionId === active.sessionId) return true
+      // Follow-up run after « Autoriser une fois » / « Autoriser le groupe ».
+      activeSessionRef.current = { conversationId, sessionId: payload.sessionId }
+      runningRef.current = true
+      setIsRunning(true)
+      setSessionId(payload.sessionId)
+      return true
     }
 
     // bob-token: streaming chunk
@@ -898,21 +877,56 @@ export default function ChatView() {
 
     // bob-session-done: finalise + persist
     const unDone = await listen<BobSessionDoneEvent>('bob-session-done', async event => {
-      if (!matchesActiveSession(event.payload)) return
+      if (event.payload.conversationId !== conversationId) return
+      const active = activeSessionRef.current
+      if (active?.sessionId && event.payload.sessionId !== active.sessionId) return
+      if (event.payload.cancelled) {
+        if (active?.sessionId === event.payload.sessionId) {
+          activeSessionRef.current = { conversationId, sessionId: '' }
+          // Stop the spinner while an approval card is waiting. A follow-up
+          // « Autoriser une fois » run will set running again via bob-token.
+          runningRef.current = false
+          setIsRunning(false)
+          setSessionId(null)
+          setThinkingText('')
+        }
+        return
+      }
 
       const { success, fullOutput, error } = event.payload
       const completedActivities = activitiesRef.current.filter(activity => (
         activity.conversationId === event.payload.conversationId
         && (!activity.sessionId || activity.sessionId === event.payload.sessionId)
       ))
+      // Older Bob Shell builds do not always emit their final `run_finished`
+      // event. Preserve the successful session result with the assistant turn
+      // so the last plan snapshot is finalized now and after history reload.
+      if (
+        success
+        && !event.payload.cancelled
+        && !completedActivities.some(activity => activity.eventType === 'user_input_required')
+        && !completedActivities.some(activity => activity.eventType === 'run_finished')
+      ) {
+        completedActivities.push({
+          sessionId: event.payload.sessionId,
+          conversationId: event.payload.conversationId,
+          taskId: event.payload.taskId,
+          eventType: 'session_completed',
+          title: 'Tâche terminée',
+          payload: { status: 'success' },
+          receivedAt: new Date().toISOString(),
+        })
+      }
       completedSessionsRef.current.add(event.payload.sessionId)
       activeSessionRef.current = null
 
-      const localSources = mergeMessageSources(
-        sourcesFromLocalPaths(fullOutput || ''),
-        sourcesFromDeliverablePaths(event.payload.deliverablePaths),
-      )
-      await Promise.allSettled(localSources
+      // Only backend-verified deliverables become trusted message sources.
+      // Paths merely printed by the model are still used to rewrite markdown
+      // links, but MessageResources existence-checks them before preview.
+      const durableSources = sourcesFromDeliverablePaths(event.payload.deliverablePaths)
+      const citedSources = sourcesFromLocalPaths(fullOutput || '')
+      const linkSources = mergeMessageSources(durableSources, citedSources)
+      await Promise.allSettled(durableSources
         .map(source => source.path)
         .filter((path): path is string => !!path)
         .map(path => registerExternalArtifact(path, event.payload.conversationId)))
@@ -920,13 +934,13 @@ export default function ChatView() {
       // Finalize the streaming message or create it if it didn't exist (fast execution)
       setConversationStoreMsgs(conversationId, prev => {
         const finalizeAssistant = (contentRaw: string, priorError?: string, priorSources?: MessageSource[]): Pick<Msg, 'content' | 'error' | 'state' | 'sources'> => {
-          const content = resolveDeliverableLinks(contentRaw.trim(), localSources)
+          const content = resolveDeliverableLinks(contentRaw.trim(), linkSources)
           const errorText = success ? undefined : (error || priorError)
           const errorOnly = !success && !!content && (
             /^(error|erreur)\b/i.test(content)
             || (!!errorText && content === errorText.trim())
           )
-          const sources = mergeMessageSources(priorSources, localSources, sourcesFromLocalPaths(content))
+          const sources = mergeMessageSources(priorSources, durableSources)
           if (errorOnly) {
             return { content, error: undefined, state: 'error', sources }
           }
@@ -974,10 +988,6 @@ export default function ChatView() {
         getTaskDetail(completedTaskId).then(detail => setTaskDetail(detail)).catch(() => {})
       }
 
-      // Clean up listeners
-      unlistenRef.current.forEach(fn => fn())
-      unlistenRef.current = []
-
       // Persist assistant message to DB
       // The Rust side already saves it via bob-session-done handler — no duplicate needed
     })
@@ -989,9 +999,13 @@ export default function ChatView() {
   }, [setConversationStoreMsgs])
 
   useEffect(() => {
-    if (!convId || !isRunning) return
+    if (!convId) return
     void subscribeToSession(convId)
-  }, [convId, isRunning, subscribeToSession])
+    return () => {
+      unlistenRef.current.forEach(fn => fn())
+      unlistenRef.current = []
+    }
+  }, [convId, subscribeToSession])
 
   useEffect(() => {
     if (!convId || convId.startsWith('ephemeral-')) return
@@ -1025,25 +1039,26 @@ export default function ChatView() {
           setThinkingText('')
           activitiesRef.current = []
           setActivities([])
-          unlistenRef.current.forEach(fn => fn())
-          unlistenRef.current = []
           // The final session event can race with listener registration. The
           // terminal task state is authoritative, so replace any stale
           // "Réflexion" placeholder with messages already persisted by Rust.
           getMessages(convId).then(messages => {
             if (disposed) return
-            setConversationStoreMsgs(convId, messages.map(message => ({
-              id: message.id,
-              role: (message.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-              content: message.content,
-              ts: message.createdAt,
-              state: 'done' as const,
-              persisted: true,
-              attachments: message.attachments,
-              sources: mergeMessageSources(message.sources, sourcesFromLocalPaths(message.content)),
-              fileChanges: message.fileChanges,
-              activities: activitiesFromToolsUsed(message.toolsUsed),
-            })))
+            setConversationStoreMsgs(convId, messages.map(message => {
+              const role = (message.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant'
+              return {
+                id: message.id,
+                role,
+                content: message.content,
+                ts: message.createdAt,
+                state: 'done' as const,
+                persisted: true,
+                attachments: message.attachments,
+                sources: message.sources,
+                fileChanges: message.fileChanges,
+                activities: activitiesFromToolsUsed(message.toolsUsed),
+              }
+            }))
           }).catch(error => {
             if (!disposed) setLoadError(error)
           })
@@ -1056,9 +1071,12 @@ export default function ChatView() {
   }, [convId, taskId])
 
   const openPreview = useCallback((target: string, title?: string, kind?: 'file' | 'web') => {
-    setPreviewRequest({ id: `${Date.now()}-${Math.random()}`, target, title, kind })
+    const durable = kind === 'web' || !homeDir
+      ? target
+      : (resolveDurableLocalPath(target, homeDir) || target)
+    setPreviewRequest({ id: `${Date.now()}-${Math.random()}`, target: durable, title, kind })
     setPanelOpen(true)
-  }, [])
+  }, [homeDir])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1088,7 +1106,7 @@ export default function ChatView() {
     autoScrollEnabledRef.current = true
     runningRef.current = true
     setIsRunning(true)
-    setThinkingText(FALLBACK_THINKING)
+    setThinkingText(t('chat.analyzingRequest'))
     const { text, mode, attachmentPaths, projectId, resumeTaskId } = prompt
 
     // Render the user's intent immediately. Conversation creation can involve
@@ -1131,12 +1149,22 @@ export default function ChatView() {
         setConvId(cid)
         setConvTitle(conv.title)
         setConversationPinned(conv.pinned)
-      } catch {
-        // fallback: use ephemeral ID
-        cid = `ephemeral-${Date.now()}`
-        userMsg.conversationId = cid
-        setOptimisticUserTurns(current => current.map(message => message.id === userMsg.id ? { ...message, conversationId: cid! } : message))
-        setConvId(cid)
+        setConversationProjectId(conv.projectId ?? projectId)
+      } catch (error) {
+        const errorText = errorMessage(error)
+        setConversationStoreMsgs(displayConversationScope, prev => [...prev, userMsg, {
+          id: `err-${Date.now()}`,
+          role: 'assistant',
+          content: `Erreur : ${errorText}`,
+          ts: new Date().toISOString(),
+          state: 'error',
+        }])
+        setOptimisticUserTurns(current => current.filter(message => message.id !== userMsg.id))
+        activeSessionRef.current = null
+        runningRef.current = false
+        setIsRunning(false)
+        setThinkingText('')
+        return
       }
     }
 
@@ -1204,6 +1232,7 @@ export default function ChatView() {
         attachmentPaths,
         resumeTaskId,
         approvedPluginIds,
+        taskApproval: taskApprovalSnapshot(),
       })
 
       setConversationStoreMsgs(cid, prev => prev.map(m =>
@@ -1225,21 +1254,69 @@ export default function ChatView() {
       activeSessionRef.current = null
       unlistenRef.current.forEach(fn => fn())
       unlistenRef.current = []
-      setConversationStoreMsgs(cid, prev => [...prev, {
-        id: `err-${Date.now()}`,
-        role: 'assistant',
-        content: `Erreur : ${errorMessage(err)}`,
-        ts: new Date().toISOString(),
-        state: 'error',
-      }])
+      const errorText = errorMessage(err)
+      setConversationStoreMsgs(cid, prev => {
+        const withoutDuplicateErrors = prev.filter(message =>
+          !(message.role === 'assistant' && message.state === 'error' && message.content === `Erreur : ${errorText}`))
+        return [...withoutDuplicateErrors, {
+          id: `err-${Date.now()}`,
+          role: 'assistant',
+          content: `Erreur : ${errorText}`,
+          ts: new Date().toISOString(),
+          state: 'error',
+        }, {
+          ...userMsg,
+          persisted: true,
+        }]
+      })
       setOptimisticUserTurns(current => current.filter(message => message.id !== userMsg.id))
+      if (!cid.startsWith('ephemeral-')) {
+        void getMessages(cid).then(messages => {
+          const loaded = messages.map(m => ({
+            id: m.id,
+            role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+            content: m.content,
+            ts: m.createdAt,
+            state: 'done' as const,
+            persisted: true,
+            attachments: m.attachments,
+          }))
+          setConversationStoreMsgs(cid, () => loaded)
+        }).catch(() => undefined)
+      }
       runningRef.current = false
       setIsRunning(false)
+      setThinkingText('')
     }
-  }, [builderMode, convId, id, navigate, replaceQueue, setConversationStoreMsgs, subscribeToSession, t])
+  }, [builderMode, convId, displayConversationScope, id, navigate, replaceQueue, setConversationStoreMsgs, subscribeToSession, t])
 
   const handleSend = useCallback((text: string, mode: string, attachmentPaths: string[] = [], projectId?: string, resumeTaskId?: string) => {
     if (!text.trim()) return
+
+    if (editingQueuedId) {
+      const editingId = editingQueuedId
+      const current = [...queueRef.current]
+      const index = current.findIndex(item => item.id === editingId)
+      if (index >= 0) {
+        const builderKind = useAppStore.getState().builderSession?.kind
+        const resolvedMode = builderKind === 'plugin_builder' || builderKind === 'skill_builder' || mode === 'plugin_builder' || mode === 'skill_builder'
+          ? 'agent'
+          : (builderKind ?? mode)
+        current[index] = {
+          ...current[index],
+          text: text.trim(),
+          mode: resolvedMode,
+          attachmentPaths: [...attachmentPaths],
+          projectId,
+          resumeTaskId: resumeTaskId ?? current[index].resumeTaskId,
+        }
+        replaceQueue(current)
+      }
+      setEditingQueuedId(null)
+      setComposerDraftRequest(null)
+      return
+    }
+
     const builderKind = useAppStore.getState().builderSession?.kind
     const resolvedMode = builderKind === 'plugin_builder' || builderKind === 'skill_builder' || mode === 'plugin_builder' || mode === 'skill_builder'
       ? 'agent'
@@ -1294,19 +1371,27 @@ export default function ChatView() {
       return
     }
     void executePrompt(prompt)
-  }, [convId, executePrompt, id, replaceQueue])
+  }, [convId, editingQueuedId, executePrompt, id, replaceQueue])
 
   useEffect(() => {
     if (isRunning || runningRef.current || promptQueue.length === 0) return
     const [next, ...remaining] = queueRef.current
     if (!next) return
+    if (editingQueuedIdRef.current === next.id) {
+      setEditingQueuedId(null)
+      setComposerDraftRequest(null)
+    }
     replaceQueue(remaining)
     void executePrompt(next)
   }, [executePrompt, isRunning, promptQueue, replaceQueue])
 
   const removeQueuedPrompt = useCallback((queuedId: string) => {
+    if (editingQueuedId === queuedId) {
+      setEditingQueuedId(null)
+      setComposerDraftRequest(null)
+    }
     replaceQueue(queueRef.current.filter(item => item.id !== queuedId))
-  }, [replaceQueue])
+  }, [editingQueuedId, replaceQueue])
 
   const moveQueuedPrompt = useCallback((queuedId: string, direction: -1 | 1) => {
     const current = [...queueRef.current]
@@ -1315,6 +1400,27 @@ export default function ChatView() {
     if (index < 0 || target < 0 || target >= current.length) return
     ;[current[index], current[target]] = [current[target], current[index]]
     replaceQueue(current)
+  }, [replaceQueue])
+
+  const beginEditQueuedPrompt = useCallback((queuedId: string) => {
+    const item = queueRef.current.find(entry => entry.id === queuedId)
+    if (!item) return
+    setEditingQueuedId(item.id)
+    setBobMode(item.mode)
+    if (item.projectId !== undefined) setConversationProjectId(item.projectId)
+    setComposerDraftRequest({
+      key: `queue-edit-${item.id}-${Date.now()}`,
+      text: item.text,
+      mode: item.mode,
+      attachmentPaths: item.attachmentPaths,
+      projectId: item.projectId,
+    })
+  }, [])
+
+  const clearPromptQueue = useCallback(() => {
+    setEditingQueuedId(null)
+    setComposerDraftRequest(null)
+    replaceQueue([])
   }, [replaceQueue])
 
   // ── Stop ─────────────────────────────────────────────────────
@@ -1339,8 +1445,6 @@ export default function ChatView() {
     activitiesRef.current = []
     setActivities([])
     if (currentTaskId) setTaskId(null)
-    unlistenRef.current.forEach(fn => fn())
-    unlistenRef.current = []
     setMsgs(prev =>
       prev.map(m => m.state === 'streaming' ? { ...m, state: 'done' } : m)
     )
@@ -1424,6 +1528,8 @@ export default function ChatView() {
     }
 
     setEditingMessageId(null)
+    setEditingQueuedId(null)
+    setComposerDraftRequest(null)
     replaceQueue([])
 
     if (runningRef.current) {
@@ -1521,11 +1627,10 @@ export default function ChatView() {
   const visibleActivities = displayedConversationId
     ? activities.filter(event => event.conversationId === displayedConversationId)
     : []
-  const showSubagentStatus = isRunning
-    && !!displayedConversationId
-    && activeSessionRef.current?.conversationId === displayedConversationId
+  const showSubagentStatus = isRunning && !!displayedConversationId
   const liveExecutionPlan = executionPlanFromActivities(visibleActivities)
-  const persistedExecutionPlan = (() => {
+  const persistedConversationPlan = executionPlanFromActivities(conversationPlanActivities)
+  const persistedMessagePlan = (() => {
     for (let index = visibleMsgs.length - 1; index >= 0; index -= 1) {
       const message = visibleMsgs[index]
       if (message.role !== 'assistant') continue
@@ -1536,7 +1641,7 @@ export default function ChatView() {
   })()
   // Keep the last plan pinned while a continuation starts. It remains visibly
   // interrupted until Bob Shell publishes the first fresh plan snapshot.
-  const displayedExecutionPlan = liveExecutionPlan ?? persistedExecutionPlan
+  const displayedExecutionPlan = liveExecutionPlan ?? persistedConversationPlan ?? persistedMessagePlan
   const executionPlanIsLive = isRunning && liveExecutionPlan !== null
 
   // ── Render ───────────────────────────────────────────────────
@@ -1630,7 +1735,7 @@ export default function ChatView() {
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
               {builderMode === 'plugin_builder'
                 ? (builderSession?.guided
-                  ? 'Cahier des charges validé — Bob génère le bundle, puis mise en service dans Plugins'
+                  ? 'Cahier des charges validé — Bob génère le bundle, puis l’ouvre dans Plugins'
                   : 'Décrivez l’idée ici. Collez une URL de base si besoin — Bob Work crée la connexion et la lie au plugin.')
                 : 'Décrivez le skill. Bob pose quelques questions, puis écrit le fichier d’instructions.'}
             </div>
@@ -1674,19 +1779,23 @@ export default function ChatView() {
                     setConvTitle(conv.title)
                     setConversationPinned(conv.pinned)
                     setBobMode(conv.bobMode ?? 'agent')
+                    setConversationPlanActivities(activitiesFromToolsUsed(conv.planActivities))
                   }
-                  setConversationStoreMsgs(id, messages.map(m => ({
-                    id: m.id,
-                    role: (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-                    content: m.content,
-                    ts: m.createdAt,
-                    state: 'done' as const,
-                    persisted: true,
-                    attachments: m.attachments,
-                    sources: mergeMessageSources(m.sources, sourcesFromLocalPaths(m.content)),
-                    fileChanges: m.fileChanges,
-                    activities: activitiesFromToolsUsed(m.toolsUsed),
-                  })))
+                  setConversationStoreMsgs(id, messages.map(m => {
+                    const role = (m.author === 'user' ? 'user' : 'assistant') as 'user' | 'assistant'
+                    return {
+                      id: m.id,
+                      role,
+                      content: m.content,
+                      ts: m.createdAt,
+                      state: 'done' as const,
+                      persisted: true,
+                      attachments: m.attachments,
+                      sources: m.sources,
+                      fileChanges: m.fileChanges,
+                      activities: activitiesFromToolsUsed(m.toolsUsed),
+                    }
+                  }))
                   void registerMessageArtifacts(messages, id)
                   const allTasks = await getTasks().catch(() => [])
                   applyActiveTaskForConversation(
@@ -1719,6 +1828,7 @@ export default function ChatView() {
                 )}
                 <MessageBubble
                   msg={msg}
+                  homeDir={homeDir}
                   onOpenResource={openPreview}
                   canEdit={
                     msg.role === 'user'
@@ -1768,12 +1878,17 @@ export default function ChatView() {
         {promptQueue.length > 0 && (
           <PromptQueuePanel
             items={promptQueue}
+            editingId={editingQueuedId}
+            onEdit={beginEditQueuedPrompt}
             onRemove={removeQueuedPrompt}
             onMove={moveQueuedPrompt}
-            onClear={() => replaceQueue([])}
+            onClear={clearPromptQueue}
           />
         )}
         {showSubagentStatus && <SubagentStatusPanel events={visibleActivities} />}
+        {conversationApproval && (
+          <ApprovalOverlay approval={conversationApproval} />
+        )}
         <Composer
           placeholder={
             builderMode === 'plugin_builder'
@@ -1784,16 +1899,41 @@ export default function ChatView() {
           }
           showModePill
           showProjectPill
-          initialProjectId={routeState?.projectId}
+          initialProjectId={id ? (conversationProjectId ?? routeState?.projectId) : routeState?.projectId}
+          initialMode={id ? bobMode : (routeState?.mode ?? bobMode)}
+          onProjectChange={(projectId) => {
+            setConversationProjectId(projectId)
+            if (convId && !convId.startsWith('ephemeral-')) {
+              void updateConversation(convId, { projectId: projectId ?? '' }).catch(() => {})
+            }
+          }}
+          onModeChange={(mode) => {
+            setBobMode(mode)
+            if (convId && !convId.startsWith('ephemeral-')) {
+              void updateConversation(convId, { bobMode: mode }).catch(() => {})
+            }
+          }}
           focusRequestKey={routeState?.focusComposer ? location.key : undefined}
+          draftRequest={composerDraftRequest}
+          queueEditActive={!!editingQueuedId}
+          toolbarEpoch={conversationApproval ? `approval-${conversationApproval.id}` : 'idle'}
           onSend={handleSend}
           onStop={handleStop}
           busy={isRunning}
           queueCount={promptQueue.length}
         />
         <div style={{ textAlign: 'center', marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-          {isRunning ? 'Entrée pour ajouter à la file' : 'Entrée pour envoyer'} · Maj+Entrée pour nouvelle ligne
-          {isRunning && <span style={{ marginLeft: 12, color: 'var(--accent)' }}>● Bob travaille{promptQueue.length ? ` · ${promptQueue.length} en attente` : '…'}</span>}
+          {editingQueuedId
+            ? t('chat.enterToUpdateQueue')
+            : isRunning
+              ? t('chat.enterToQueue')
+              : t('chat.enterToSend')} · {t('chat.shiftEnterNewline')}
+          {isRunning && (
+            <span style={{ marginLeft: 12, color: 'var(--accent)' }}>
+              ● {t('chat.activityRunning')}
+              {promptQueue.length ? ` · ${t('chat.queueWaiting', { count: promptQueue.length })}` : '…'}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -1802,8 +1942,79 @@ export default function ChatView() {
 
 // ── Message Bubble ────────────────────────────────────────────
 
+function MarkdownCodeFrame({ node: _node, ...props }: ComponentPropsWithoutRef<'pre'> & { node?: unknown }) {
+  const t = useT()
+  const [copied, setCopied] = useState(false)
+  const codeRef = useRef<HTMLPreElement>(null)
+
+  const copyCode = async () => {
+    const value = codeRef.current?.textContent ?? ''
+    await navigator.clipboard.writeText(value)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1600)
+  }
+
+  return (
+    <div className="markdown-code-frame">
+      <button
+        type="button"
+        className="markdown-code-copy"
+        aria-label={t('chat.copy')}
+        title={t('chat.copy')}
+        onClick={() => void copyCode()}
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+      <pre ref={codeRef} {...props} />
+    </div>
+  )
+}
+
+function tableToClipboardText(table: HTMLTableElement): string {
+  return Array.from(table.querySelectorAll('tr'))
+    .map(row => Array.from(row.querySelectorAll('th, td'))
+      .map(cell => {
+        const text = (cell.textContent ?? '').replace(/\u00a0/g, ' ').trim().replace(/\s+/g, ' ')
+        return /[\t\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+      })
+      .join('\t'))
+    .join('\n')
+}
+
+function MarkdownTableFrame({ node: _node, ...props }: ComponentPropsWithoutRef<'table'> & { node?: unknown }) {
+  const t = useT()
+  const [copied, setCopied] = useState(false)
+  const tableRef = useRef<HTMLTableElement>(null)
+
+  const copyTable = async () => {
+    const table = tableRef.current
+    if (!table) return
+    await navigator.clipboard.writeText(tableToClipboardText(table))
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1600)
+  }
+
+  return (
+    <div className="markdown-table-frame">
+      <button
+        type="button"
+        className="markdown-code-copy markdown-table-copy"
+        aria-label={t('chat.copyTable')}
+        title={t('chat.copyTable')}
+        onClick={() => void copyTable()}
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+      <div className="markdown-table-scroll" role="region" aria-label={t('chat.tableScroll')} tabIndex={0}>
+        <table ref={tableRef} {...props} />
+      </div>
+    </div>
+  )
+}
+
 export function MessageBubble({
   msg,
+  homeDir = '',
   onOpenResource,
   canEdit = false,
   isEditing = false,
@@ -1812,6 +2023,7 @@ export function MessageBubble({
   onSubmitEdit,
 }: {
   msg: Msg
+  homeDir?: string
   onOpenResource: (target: string, title?: string, kind?: 'file' | 'web') => void
   canEdit?: boolean
   isEditing?: boolean
@@ -1852,24 +2064,7 @@ export function MessageBubble({
 
   if (msg.role === 'user') {
     return (
-      <div className="msg-user-row group items-center gap-2">
-        <div className="msg-user-actions">
-          {canEdit && !isEditing && (
-            <button
-              onClick={onStartEdit}
-              className="msg-action-btn"
-              title={t('chat.edit')}
-              style={{ cursor: 'pointer' }}
-            >
-              <Pencil size={14} />
-            </button>
-          )}
-          {!isEditing && (
-            <button onClick={handleCopy} className="msg-action-btn" title={t('chat.copy')} type="button">
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-            </button>
-          )}
-        </div>
+      <div className="msg-user-row group">
         <div className="msg-user-stack">
           {isEditing ? (
             <div className="msg-user-edit">
@@ -1898,7 +2093,25 @@ export function MessageBubble({
             <div className="msg-user" data-testid="chat-message-user">{msg.content}</div>
           )}
           {!isEditing && timestamp && <time className="message-timestamp" dateTime={msg.ts}>{timestamp}</time>}
-          {!isEditing && <MessageResources msg={msg} onOpen={onOpenResource} />}
+          {!isEditing && <MessageResources msg={msg} homeDir={homeDir} onOpen={onOpenResource} />}
+          {!isEditing && (
+            <div className="msg-user-actions message-actions-below">
+              {canEdit && (
+                <button
+                  onClick={onStartEdit}
+                  className="msg-action-btn"
+                  title={t('chat.edit')}
+                  style={{ cursor: 'pointer' }}
+                  type="button"
+                >
+                  <Pencil size={14} />
+                </button>
+              )}
+              <button onClick={handleCopy} className="msg-action-btn" title={t('chat.copy')} type="button">
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     )
@@ -1908,60 +2121,61 @@ export function MessageBubble({
   const showErrorFooter = Boolean(msg.error) || msg.state === 'error'
 
   return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }} className="group">
+    <div className="msg-assistant-row group">
       <BobAvatar streaming={msg.state === 'streaming'} error={showErrorFooter} />
-      <div className="msg-assistant prose">
-        {msg.state !== 'streaming' && msg.activities?.length ? (
-          <ActivityDisclosure events={msg.activities} live={false} />
-        ) : null}
-        {msg.content && (
-          <div style={isHardError ? { color: 'var(--danger)' } : undefined}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-              table: ({ node: _node, ...props }) => (
-                <div className="markdown-table-scroll" role="region" aria-label="Tableau défilant horizontalement" tabIndex={0}>
-                  <table {...props} />
-                </div>
-              ),
-              a: ({ href, children }) => <a href={href} onClick={event => {
-                if (!href) return
-                event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
-              }}>{children}</a>,
-              img: ({ src, alt }) => (
-                <ResilientImage source={src || ''} alt={alt || 'Image'} className="markdown-inline-image" />
-              ),
-            }}>{normalizeAssistantMarkdown(linkifyLocalFilePaths(resolveDeliverableLinks(msg.content, msg.sources ?? [])))}</ReactMarkdown>
-          </div>
-        )}
-        {mapSpecsFromActivities(msg.activities).map((spec, index) => (
-          <ConversationMapCard key={`${spec.title}-${index}`} spec={spec} />
-        ))}
-        {msg.error && (
-          <p style={{ color: 'var(--danger)', marginTop: msg.content ? 10 : 0, fontSize: 13, lineHeight: 1.45 }}>
-            {msg.error}
-          </p>
-        )}
-        <MessageResources msg={msg} onOpen={onOpenResource} />
-        <FileChanges changes={msg.fileChanges} onOpen={onOpenResource} />
-        {msg.snapshots?.some(snapshot => !snapshot.background) ? (
-          <div className="chrome-snapshot-stack">
-            {msg.snapshots.filter(snapshot => !snapshot.background).map(snapshot => (
-              <ChromeSnapshotCard key={snapshot.id} snapshot={snapshot} onOpen={(url, title) => onOpenResource(url, title, 'web')} />
-            ))}
-          </div>
-        ) : null}
-        {msg.state === 'streaming' && (
-          <span style={{
-            display: 'inline-block', width: 8, height: 14,
-            background: 'var(--accent)', borderRadius: 2,
-            marginLeft: 2, verticalAlign: 'text-bottom',
-            animation: 'blink 1s step-end infinite',
-          }} />
-        )}
-        {timestamp && <time className="message-timestamp" dateTime={msg.ts}>{timestamp}</time>}
+      <div className="msg-assistant-stack">
+        <div className="msg-assistant prose">
+          {msg.state !== 'streaming' && msg.activities?.length ? (
+            <ActivityDisclosure events={msg.activities} live={false} />
+          ) : null}
+          {msg.content && (
+            <div style={isHardError ? { color: 'var(--danger)' } : undefined}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+                pre: MarkdownCodeFrame,
+                table: MarkdownTableFrame,
+                a: ({ href, children }) => <a href={href} onClick={event => {
+                  if (!href) return
+                  event.preventDefault(); onOpenResource(href, String(children), href.startsWith('http') ? 'web' : 'file')
+                }}>{children}</a>,
+                img: ({ src, alt }) => (
+                  <ResilientImage source={src || ''} alt={alt || 'Image'} className="markdown-inline-image" />
+                ),
+              }}>{normalizeAssistantMarkdown(linkifyLocalFilePaths(resolveDeliverableLinks(msg.content, msg.sources ?? [], homeDir)))}</ReactMarkdown>
+            </div>
+          )}
+          {mapSpecsFromActivities(msg.activities).map((spec, index) => (
+            <ConversationMapCard key={`${spec.title}-${index}`} spec={spec} />
+          ))}
+          {msg.error && (
+            <p style={{ color: 'var(--danger)', marginTop: msg.content ? 10 : 0, fontSize: 13, lineHeight: 1.45 }}>
+              {msg.error}
+            </p>
+          )}
+          <MessageResources msg={msg} homeDir={homeDir} onOpen={onOpenResource} />
+          <FileChanges changes={msg.fileChanges} onOpen={onOpenResource} />
+          {msg.snapshots?.some(snapshot => !snapshot.background) ? (
+            <div className="chrome-snapshot-stack">
+              {msg.snapshots.filter(snapshot => !snapshot.background).map(snapshot => (
+                <ChromeSnapshotCard key={snapshot.id} snapshot={snapshot} onOpen={(url, title) => onOpenResource(url, title, 'web')} />
+              ))}
+            </div>
+          ) : null}
+          {msg.state === 'streaming' && (
+            <span style={{
+              display: 'inline-block', width: 8, height: 14,
+              background: 'var(--accent)', borderRadius: 2,
+              marginLeft: 2, verticalAlign: 'text-bottom',
+              animation: 'blink 1s step-end infinite',
+            }} />
+          )}
+          {timestamp && <time className="message-timestamp" dateTime={msg.ts}>{timestamp}</time>}
+        </div>
+        <div className="message-actions-below">
+          <button onClick={handleCopy} className="msg-action-btn" title={t('chat.copy')} type="button">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
       </div>
-      <button onClick={handleCopy} className="msg-action-btn msg-action-btn--assistant" title={t('chat.copy')} type="button">
-         {copied ? <Check size={14} /> : <Copy size={14} />}
-      </button>
     </div>
   )
 }
@@ -1970,30 +2184,36 @@ function FileChanges({ changes, onOpen }: { changes?: FileChange[]; onOpen: (tar
   const t = useT()
   if (!changes?.length) return null
   const presentation = {
-    created: { label: t('chat.fileCreated'), Icon: FilePlus2, color: '#22c55e' },
-    modified: { label: t('chat.fileModified'), Icon: FilePenLine, color: '#f59e0b' },
-    deleted: { label: t('chat.fileDeleted'), Icon: FileX2, color: '#ef4444' },
+    created: { title: t('chat.filesCreated'), label: t('chat.fileCreated'), Icon: FilePlus2, color: '#22c55e' },
+    modified: { title: t('chat.filesModified'), label: t('chat.fileModified'), Icon: FilePenLine, color: '#f59e0b' },
+    deleted: { title: t('chat.filesDeleted'), label: t('chat.fileDeleted'), Icon: FileX2, color: '#ef4444' },
   } as const
   return (
     <section className="message-file-changes" aria-label={t('chat.fileChanges')}>
-      <div className="message-file-changes__title">{t('chat.fileChanges')}</div>
-      {changes.map(change => {
-        const item = presentation[change.changeType]
-        const name = fileNameFromPath(change.path)
-        return (
-          <button
-            key={`${change.changeType}:${change.path}`}
-            type="button"
-            className="message-file-change"
-            disabled={change.changeType === 'deleted'}
-            onClick={() => change.changeType !== 'deleted' && onOpen(change.path, name, 'file')}
-            title={change.path}
-          >
-            <item.Icon size={16} style={{ color: item.color, flexShrink: 0 }} />
-            <span className="message-file-change__path">{name}</span>
-            <span className="message-file-change__status" style={{ color: item.color }}>{item.label}</span>
-          </button>
-        )
+      {(['created', 'modified', 'deleted'] as const).map(type => {
+        const files = changes.filter(change => change.changeType === type)
+        if (!files.length) return null
+        return <div key={type}>
+          <div className="message-file-changes__title">{presentation[type].title}</div>
+          {files.map(change => {
+            const item = presentation[change.changeType]
+            const name = fileNameFromPath(change.path)
+            return (
+              <button
+                key={`${change.changeType}:${change.path}`}
+                type="button"
+                className="message-file-change"
+                disabled={change.changeType === 'deleted'}
+                onClick={() => change.changeType !== 'deleted' && onOpen(change.path, name, 'file')}
+                title={change.path}
+              >
+                <item.Icon size={16} style={{ color: item.color, flexShrink: 0 }} />
+                <span className="message-file-change__path">{name}</span>
+                <span className="message-file-change__status" style={{ color: item.color }}>{item.label}</span>
+              </button>
+            )
+          })}
+        </div>
       })}
     </section>
   )
@@ -2032,14 +2252,14 @@ export function ConversationInteractionCard({
   }
   return (
     <section
-      className="conversation-interaction"
+      className="conversation-interaction conversation-interaction--right"
       aria-labelledby={`interaction-title-${interaction.id}`}
       data-testid="conversation-interaction"
     >
       <div className="conversation-interaction__eyebrow">{interaction.title}</div>
       <h3 id={`interaction-title-${interaction.id}`}>{interaction.question}</h3>
       {interaction.detail && <p>{interaction.detail}</p>}
-      <div className="conversation-interaction__choices">
+      <div className="conversation-interaction__choices conversation-interaction__choices--right">
         {fixedChoices.map((choice, index) => (
           <button
             key={choice.id}
@@ -2084,6 +2304,22 @@ export function ConversationInteractionCard({
   )
 }
 
+function selectPrimaryVisualizations<T extends { target?: string | null; name?: string }>(
+  resources: T[],
+  messageContent: string,
+): T[] {
+  const html = resources.filter(item => item.target && /\.html?$/i.test(item.target))
+  if (html.length <= 1) return html
+  const cited = html.filter(item => {
+    const name = item.name || fileNameFromPath(item.target || '')
+    return Boolean(name) && messageContent.includes(name)
+  })
+  if (cited.length === 1) return cited
+  if (cited.length > 1) return [cited[cited.length - 1]!]
+  // Prefer the last HTML path (usually the final dashboard over an early stub).
+  return [html[html.length - 1]!]
+}
+
 function InlineVisualizationPreview({ src, label, onOpen }: { src: string; label: string; onOpen: () => void }) {
   const t = useT()
 
@@ -2098,11 +2334,11 @@ function InlineVisualizationPreview({ src, label, onOpen }: { src: string; label
   )
 }
 
-function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
+function MessageResources({ msg, homeDir = '', onOpen }: { msg: Msg; homeDir?: string; onOpen: (target: string, title?: string, kind?: 'file' | 'web') => void }) {
   const t = useT()
   const merged = mergeMessageSources(
     msg.sources,
-    sourcesFromLocalPaths(msg.content),
+    sourcesInferredFromMessage(msg.role, msg.content),
     (msg.attachments ?? []).map(item => ({
       id: item.id,
       title: item.name,
@@ -2117,21 +2353,147 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
         url: snapshot.url,
       })),
   )
-  const resources = merged
-    .map(item => ({
-      id: item.id,
-      name: item.title,
-      target: item.url || item.path,
-      kind: item.url && !item.path ? 'web' as const : 'file' as const,
-    }))
-    .filter(item => item.target)
-  if (!resources.length) return null
+  const candidates = (() => {
+    const byKey = new Map<string, {
+      id: string
+      name?: string
+      target: string
+      kind: 'web' | 'file'
+      fromAttachment: boolean
+    }>()
+    for (const item of merged) {
+      const rawTarget = item.url || item.path
+      if (!rawTarget) continue
+      const isWeb = Boolean(item.url && !item.path)
+      const durable = !isWeb && homeDir
+        ? resolveDurableLocalPath(rawTarget, homeDir)
+        : rawTarget
+      const target = durable || rawTarget
+      const key = isWeb ? `web:${target}` : `file:${normalizeLocalFilePathKey(target)}`
+      const existing = byKey.get(key)
+      if (!existing) {
+        byKey.set(key, {
+          id: item.id,
+          name: item.title,
+          target,
+          kind: isWeb ? 'web' : 'file',
+          fromAttachment: Boolean((msg.attachments ?? []).some(att => att.path === item.path || att.url === item.url)),
+        })
+        continue
+      }
+      // Prefer a host absolute path and a more specific title (slug > "SKILL").
+      const preferred = existing.kind === 'file'
+        ? preferAbsoluteLocalPath(existing.target, target)
+        : existing.target
+      const name = (() => {
+        const next = item.title || existing.name
+        if (!next) return existing.name
+        if (!existing.name) return next
+        if (existing.name.toUpperCase() === 'SKILL' && next.toUpperCase() !== 'SKILL') return next
+        if (next.toUpperCase() === 'SKILL' && existing.name.toUpperCase() !== 'SKILL') return existing.name
+        return existing.name.length >= next.length ? existing.name : next
+      })()
+      byKey.set(key, {
+        ...existing,
+        target: preferred,
+        name,
+        fromAttachment: existing.fromAttachment
+          || Boolean((msg.attachments ?? []).some(att => att.path === item.path || att.url === item.url)),
+      })
+    }
+    return Array.from(byKey.values())
+  })()
+
+  // Paths cited in prose (e.g. sandbox "BLOCKED: …/Desktop/probe.txt") must not
+  // become openable chips unless the file actually exists on disk.
+  // Deliverables already attached on `msg.sources` (session-done / register) are
+  // trusted: plugin-fs `stat` is often unavailable for Application Support paths
+  // without broad FS scopes, and blocking them hides HTML visualization previews.
+  const trustedSourcePaths = new Set(
+    (msg.sources ?? [])
+      .map(item => item.path)
+      .filter((path): path is string => Boolean(path)),
+  )
+  const [existingFiles, setExistingFiles] = useState<Set<string>>(() => new Set())
+  const candidateKey = candidates
+    .map(item => `${item.kind}:${item.target}`)
+    .join('\n')
+  useEffect(() => {
+    let cancelled = false
+    const fileTargets = candidates
+      .filter(item => item.kind === 'file' && item.target && !item.fromAttachment && !trustedSourcePaths.has(item.target))
+      .map(item => item.target!)
+    if (!fileTargets.length) {
+      setExistingFiles(new Set())
+      return
+    }
+    void Promise.all(fileTargets.map(async target => {
+      try {
+        const info = await stat(target)
+        return info.isFile ? target : null
+      } catch {
+        return null
+      }
+    })).then(results => {
+      if (cancelled) return
+      setExistingFiles(new Set(results.filter((path): path is string => Boolean(path))))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [candidateKey])
+
+  const resources = candidates.filter(item => {
+    if (!item.target) return false
+    if (item.kind === 'web' || item.fromAttachment) return true
+    if (trustedSourcePaths.has(item.target)) return true
+    return existingFiles.has(item.target)
+  })
   const imageResources = msg.role === 'assistant'
     ? resources.filter(item => item.target && INLINE_IMAGE_EXT.test(item.target))
     : []
-  const visualizationResources = msg.role === 'assistant'
-    ? resources.filter(item => item.kind === 'file' && item.target && INLINE_VISUALIZATION_EXT.test(item.target))
+  const pdfCandidates = msg.role === 'assistant'
+    ? resources.filter(item => item.kind === 'file' && item.target && /\.pdf$/i.test(item.target))
     : []
+  const [readablePdfs, setReadablePdfs] = useState<Set<string>>(() => new Set())
+  const pdfKey = pdfCandidates.map(item => item.target).join('\n')
+  useEffect(() => {
+    let cancelled = false
+    if (!pdfCandidates.length) {
+      setReadablePdfs(new Set())
+      return
+    }
+    void Promise.all(pdfCandidates.map(async item => {
+      const target = item.target!
+      try {
+        const preview = await prepareFilePreview(target)
+        const ok = preview.kind === 'pdf'
+          || Boolean(preview.previewPath?.toLowerCase().endsWith('.pdf'))
+        return ok ? target : null
+      } catch {
+        return null
+      }
+    })).then(results => {
+      if (cancelled) return
+      setReadablePdfs(new Set(results.filter((path): path is string => Boolean(path))))
+    })
+    return () => { cancelled = true }
+  }, [pdfKey])
+  const pdfResources = pdfCandidates.filter(item => item.target && readablePdfs.has(item.target))
+  // Hide phantom PDF chips until prepareFilePreview confirms the file is readable.
+  const chipResources = resources.filter(item => {
+    if (item.kind !== 'file' || !item.target || !/\.pdf$/i.test(item.target)) return true
+    return readablePdfs.has(item.target)
+  })
+  const visualizationResources = msg.role === 'assistant'
+    ? selectPrimaryVisualizations(
+      resources.filter(item => item.kind === 'file' && item.target && INLINE_VISUALIZATION_EXT.test(item.target)),
+      msg.content || '',
+    )
+    : []
+  if (!chipResources.length && !pdfResources.length && !imageResources.length && !visualizationResources.length) {
+    return null
+  }
   return (
     <>
       {imageResources.length > 0 && (
@@ -2154,6 +2516,15 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
           })}
         </div>
       )}
+      {pdfResources.length > 0 && (
+        <div className="message-pdf-previews" aria-label="PDF générés">
+          {pdfResources.map(item => (
+            <PdfViewer key={`pdf-${normalizeLocalFilePathKey(item.target || item.id)}`} path={item.target!}
+              title={item.name || fileNameFromPath(item.target!)}
+              onOpen={() => onOpen(item.target!, item.name, 'file')} />
+          ))}
+        </div>
+      )}
       {visualizationResources.length > 0 && (
         <div className="message-visualization-previews" aria-label={t('chat.generatedVisualizations')}>
           {visualizationResources.map(item => {
@@ -2169,8 +2540,9 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
           })}
         </div>
       )}
+      {chipResources.length > 0 && (
       <div className="message-resources">
-        {resources.map(item => {
+        {chipResources.map(item => {
           const label = item.name || fileNameFromPath(item.target || '')
           return (
             <button
@@ -2193,12 +2565,15 @@ function MessageResources({ msg, onOpen }: { msg: Msg; onOpen: (target: string, 
           )
         })}
       </div>
+      )}
     </>
   )
 }
 
-function PromptQueuePanel({ items, onRemove, onMove, onClear }: {
+function PromptQueuePanel({ items, editingId, onEdit, onRemove, onMove, onClear }: {
   items: QueuedPrompt[]
+  editingId: string | null
+  onEdit: (id: string) => void
   onRemove: (id: string) => void
   onMove: (id: string, direction: -1 | 1) => void
   onClear: () => void
@@ -2212,13 +2587,24 @@ function PromptQueuePanel({ items, onRemove, onMove, onClear }: {
       </header>
       <div className="prompt-queue-list">
         {items.map((item, index) => (
-          <article className="prompt-queue-item" key={item.id}>
+          <article
+            className={`prompt-queue-item${editingId === item.id ? ' is-editing' : ''}`}
+            key={item.id}
+          >
             <span className="prompt-queue-position">{index + 1}</span>
             <div className="prompt-queue-content">
               <strong title={item.text}>{item.text}</strong>
               <small>{item.mode}{item.attachmentPaths.length ? ` · ${t(item.attachmentPaths.length > 1 ? 'chat.attachments' : 'chat.attachment', { count: item.attachmentPaths.length })}` : ''}</small>
             </div>
             <div className="prompt-queue-actions">
+              <button
+                onClick={() => onEdit(item.id)}
+                title={t('chat.editQueued')}
+                aria-label={t('chat.editQueuedPrompt', { index: index + 1 })}
+                aria-pressed={editingId === item.id}
+              >
+                <Pencil size={12} strokeWidth={2.2} aria-hidden="true" />
+              </button>
               <button disabled={index === 0} onClick={() => onMove(item.id, -1)} title={t('chat.moveUp')} aria-label={t('chat.movePromptUp', { index: index + 1 })}>↑</button>
               <button disabled={index === items.length - 1} onClick={() => onMove(item.id, 1)} title={t('chat.moveDown')} aria-label={t('chat.movePromptDown', { index: index + 1 })}>↓</button>
               <button className="prompt-queue-remove" onClick={() => onRemove(item.id)} title={t('chat.remove')} aria-label={t('chat.removePrompt', { index: index + 1 })}>×</button>
@@ -2277,7 +2663,6 @@ function BobAvatar({ streaming, error }: { streaming?: boolean; error?: boolean 
   )
 }
 
-const FALLBACK_THINKING = 'Analyse de la demande…'
 const THINKING_SWAP_MS = 280
 
 export function appendThinkingText(current: string, chunk: string): string {
@@ -2320,7 +2705,8 @@ export function isThinkingContinuation(previous: string, next: string): boolean 
 }
 
 function ThinkingStream({ thinking }: { thinking: string }) {
-  const current = latestThinkingLine(thinking) || FALLBACK_THINKING
+  const t = useT()
+  const current = latestThinkingLine(thinking) || t('chat.analyzingRequest')
   const previousRef = useRef(current)
   const [displayed, setDisplayed] = useState(current)
   const [outgoing, setOutgoing] = useState<string | null>(null)
@@ -2408,22 +2794,6 @@ export function WorkingIndicator({
   )
 }
 
-function liveActivityLabel(type: string) {
-  return ({
-    analysis: 'Analyse',
-    tool_started: 'Outil démarré',
-    tool_finished: 'Outil terminé',
-    tool_error: 'Erreur outil',
-    usage: 'Consommation',
-    source: 'Source',
-    step: 'Étape',
-    subagent_started: 'Sous-agent démarré',
-    subagent_finished: 'Sous-agent terminé',
-    graph_started: 'Orchestration démarrée',
-    graph_finished: 'Orchestration terminée',
-  } as Record<string, string>)[type] ?? type.replace(/_/g, ' ')
-}
-
 function liveActivityState(type: string) {
   if (type === 'error' || type.endsWith('_error')) return 'failed'
   if (type.endsWith('_finished')) return 'completed'
@@ -2487,10 +2857,6 @@ function activityToolId(event: BobActivityEvent): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-function isGenericFinishedTitle(title: string | undefined) {
-  return !title || /^(?:Outil terminé|Tool finished|Herramienta finalizada)(?:\s*:.*)?$/i.test(title.trim())
-}
-
 /** Turn start/result protocol pairs into one user-facing, inspectable action. */
 export function coalesceActivityEvents(events: BobActivityEvent[]): BobActivityEvent[] {
   const displayed: BobActivityEvent[] = []
@@ -2512,7 +2878,7 @@ export function coalesceActivityEvents(events: BobActivityEvent[]): BobActivityE
       displayed[index] = {
         ...started,
         ...event,
-        title: isGenericFinishedTitle(event.title) ? started.title : event.title,
+        title: isGenericFinishedTitleRaw(event.title) ? started.title : event.title,
         content: event.content,
         payload: { parameters, result },
         receivedAt: event.receivedAt ?? started.receivedAt,
@@ -2543,7 +2909,7 @@ function ActivityDisclosure({ events, live }: { events: BobActivityEvent[]; live
         {actionEvents.map((event, index) => {
           const payload = activityPayloadText(event.payload)
           const hasDetail = !!event.content || !!payload
-          const title = event.title || event.toolName || liveActivityLabel(event.eventType)
+          const title = localizeActivityTitle(t, event)
           return (
             <details
               key={`${event.eventType}-${event.toolName ?? ''}-${index}`}

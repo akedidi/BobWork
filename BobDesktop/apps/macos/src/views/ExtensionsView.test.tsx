@@ -30,6 +30,8 @@ const skills = [{
   scope: 'global-bob',
   enabled: true,
   sourcePath: '/Users/me/.bob/skills/analyse-contrats/SKILL.md',
+  createdAt: '2026-08-11T12:00:00Z',
+  updatedAt: '2026-08-12T09:30:00Z',
 }]
 
 describe('ExtensionsView', () => {
@@ -50,7 +52,7 @@ describe('ExtensionsView', () => {
       </MemoryRouter>,
     )
     expect(await screen.findByRole('button', { name: 'Formulaire' })).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Importer Claude' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Importer un skill' })).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: '+ Nouveau skill' }))
 
     await waitFor(() => {
@@ -62,7 +64,7 @@ describe('ExtensionsView', () => {
     expect(screen.queryByRole('dialog', { name: 'Nouveau skill' })).not.toBeInTheDocument()
   })
 
-  it('ouvre le chat avec le prompt d’import Claude open-source', async () => {
+  it('ouvre le chat avec le prompt d’import skill open-source', async () => {
     render(
       <MemoryRouter initialEntries={['/skills']}>
         <Routes>
@@ -71,13 +73,13 @@ describe('ExtensionsView', () => {
         </Routes>
       </MemoryRouter>,
     )
-    fireEvent.click(await screen.findByRole('button', { name: 'Importer Claude' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Importer un skill' }))
 
     await waitFor(() => {
       const probe = screen.getByTestId('location').textContent ?? ''
       expect(probe.startsWith('/chat|')).toBe(true)
-      expect(probe).toContain('rapatrier un skill Claude')
-      expect(probe).toContain('attribution')
+      expect(probe).toContain('rapatrier un skill open-source')
+      expect(probe).toContain('skill-creator')
     })
   })
 
@@ -127,8 +129,8 @@ describe('ExtensionsView', () => {
     const titles = document.querySelectorAll('.skill-row-copy strong')
     expect([...titles].map(node => node.textContent)).toEqual([
       'Nouveau brief',
-      'Computer Use',
       'Ancien brief',
+      'Computer Use',
     ])
   })
 
@@ -153,5 +155,7 @@ describe('ExtensionsView', () => {
     )
     expect(await screen.findByRole('complementary', { name: 'Détails du skill Analyse contrats' })).toBeVisible()
     expect(screen.getByText('/Users/me/.bob/skills/analyse-contrats/SKILL.md')).toBeVisible()
+    expect(screen.getByText('Créé le')).toBeVisible()
+    expect(screen.getByText('Modifié le')).toBeVisible()
   })
 })

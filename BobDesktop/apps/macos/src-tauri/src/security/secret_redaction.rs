@@ -50,6 +50,57 @@ pub fn redact_secrets(text: &str) -> String {
     result
 }
 
+/// Redact both recognizable credentials and exact secret values held by a
+/// connector configuration. The latter protects against third-party error
+/// messages that echo a credential without its field name.
+pub fn redact_config_secrets(text: &str, config: &serde_json::Value) -> String {
+    fn is_secret_key(key: &str) -> bool {
+        let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
+        normalized == "key"
+            || normalized.ends_with("apikey")
+            || normalized.ends_with("token")
+            || normalized.ends_with("password")
+            || normalized.ends_with("secret")
+            || normalized == "authorization"
+            || normalized.ends_with("authheader")
+    }
+
+    fn collect(value: &serde_json::Value, parent_is_secret: bool, secrets: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(value) if parent_is_secret => {
+                if value.len() >= 4
+                    && value != "<redacted>"
+                    && value != "<stored securely>"
+                    && !value.starts_with("${")
+                {
+                    secrets.push(value.clone());
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, parent_is_secret, secrets);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    collect(value, is_secret_key(key), secrets);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut result = redact_secrets(text);
+    let mut secrets = Vec::new();
+    collect(config, false, &mut secrets);
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    secrets.dedup();
+    for secret in secrets {
+        result = result.replace(&secret, "***REDACTED***");
+    }
+    result
+}
+
 /// Recursively redact string values in parsed JSON (stdout stream-json).
 pub fn redact_json(value: &mut serde_json::Value) {
     match value {
@@ -136,5 +187,24 @@ mod tests {
         assert!(!dumped.contains("super-secret-key-9999"));
         assert!(!dumped.contains("sk-abcdefghijklmnopqrstuvwxyz"));
         assert!(dumped.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_redact_url_query_api_key() {
+        let text = "Endpoint HTTP joignable (https://api.example.test/3/configuration?api_key=1234567890abcdef1234567890abcdef).";
+        let redacted = redact_secrets(text);
+        assert!(!redacted.contains("1234567890abcdef1234567890abcdef"));
+        assert!(redacted.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_redact_exact_config_secret_without_label() {
+        let config = serde_json::json!({
+            "env": { "BOB_WORK_API_SECRET": "opaque-value-123456" },
+            "BOB_WORK_API_BASE_URL": "https://api.example.test/3"
+        });
+        let redacted = redact_config_secrets("Remote error: opaque-value-123456", &config);
+        assert_eq!(redacted, "Remote error: ***REDACTED***");
+        assert!(!redacted.contains("api.example.test"));
     }
 }

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatView, {
   appendThinkingText,
   coalesceActivityEvents,
@@ -9,10 +9,12 @@ import ChatView, {
   WorkingIndicator,
 } from './ChatView'
 import { useAppStore } from '../stores/appStore'
+import { setTestLocale } from '../i18n'
 
 const mocks = vi.hoisted(() => ({
-  listeners: new Map<string, (event: { payload: Record<string, unknown> }) => unknown>(),
+  listeners: new Map<string, (event: { payload: any }) => unknown>(),
   sendMessage: vi.fn(),
+  getConversation: vi.fn(),
   getMessages: vi.fn(),
   getTasks: vi.fn(),
 }))
@@ -23,7 +25,7 @@ function ConversationSwitcher() {
 }
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async (name: string, callback: (event: { payload: Record<string, unknown> }) => unknown) => {
+  listen: vi.fn(async (name: string, callback: (event: { payload: any }) => unknown) => {
     mocks.listeners.set(name, callback)
     return vi.fn()
   }),
@@ -38,7 +40,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('../lib/ipc', () => ({
   sendMessage: mocks.sendMessage,
   stopTask: vi.fn().mockResolvedValue(undefined),
-  getConversation: vi.fn().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false }),
+  getConversation: mocks.getConversation,
   getMessages: mocks.getMessages,
   createConversation: vi.fn(),
   updateConversation: vi.fn().mockResolvedValue(undefined),
@@ -57,7 +59,9 @@ vi.mock('../lib/ipc', () => ({
   getMcpServers: vi.fn().mockResolvedValue([]),
   getDbConnections: vi.fn().mockResolvedValue([]),
   listBobSlashCommands: vi.fn().mockResolvedValue([]),
-  allowComposerAttachments: vi.fn(async (paths: string[]) => paths),
+  allowComposerAttachments: vi.fn(async (paths: string[]) =>
+    paths.map(path => ({ path, isDirectory: false })),
+  ),
   registerExternalArtifact: vi.fn().mockResolvedValue(null),
 }))
 
@@ -117,6 +121,7 @@ describe('Chat live thinking', () => {
     useAppStore.setState({ builderSession: null })
     mocks.listeners.clear()
     mocks.sendMessage.mockReset().mockResolvedValue({ sessionId: 'session-1', taskId: 'task-1' })
+    mocks.getConversation.mockReset().mockResolvedValue({ id: 'conv-1', title: 'Conversation de test', pinned: false })
     mocks.getMessages.mockReset().mockResolvedValue([])
     mocks.getTasks.mockReset().mockResolvedValue([])
   })
@@ -150,6 +155,54 @@ describe('Chat live thinking', () => {
 
     expect(screen.getByText(/Je vérifie la structure du projet/)).toBeVisible()
     expect(screen.getByRole('status', { name: 'Réflexion en cours' })).toBeVisible()
+  })
+
+  it('restaure le plan persisté avec la conversation après remontage', async () => {
+    mocks.getMessages.mockResolvedValue([{
+      id: 'message-1', conversationId: 'conv-1', author: 'user', content: 'Exécute ce travail',
+      attachments: [], sources: [], citations: [], toolsUsed: [], sendState: 'sent',
+      errors: [], associatedArtifacts: [], associatedApprovals: [], fileChanges: [],
+      createdAt: '2026-09-09T07:59:00Z',
+    }])
+    mocks.getConversation.mockResolvedValue({
+      id: 'conv-1', title: 'Conversation avec plan', pinned: false,
+      planActivities: [{
+        name: 'update_todo_list', timestamp: '2026-09-09T08:00:00Z',
+        eventType: 'tool_started', toolName: 'update_todo_list',
+        payload: { parameters: { todos: [
+          { content: 'Analyser la demande', status: 'completed' },
+          { content: 'Persister le plan', status: 'in_progress' },
+        ] } },
+        createdAt: '2026-09-09T08:00:00Z',
+      }],
+    })
+
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText(/Analyser la demande/)).toBeVisible()
+    expect(screen.getByText(/Persister le plan/)).toBeVisible()
+
+    mocks.getConversation.mockResolvedValue({
+      id: 'conv-1', title: 'Conversation avec plan', pinned: false,
+      planActivities: [{
+        name: 'update_todo_list', timestamp: '2026-09-09T08:01:00Z',
+        eventType: 'tool_started', toolName: 'update_todo_list',
+        payload: { parameters: { todos: [
+          { content: 'Analyser la demande', status: 'completed' },
+          { content: 'Persister le plan', status: 'completed' },
+        ] } },
+        createdAt: '2026-09-09T08:01:00Z',
+      }],
+    })
+    await waitFor(() => expect(mocks.listeners.has('conversation-plan-updated')).toBe(true))
+    await act(async () => {
+      await mocks.listeners.get('conversation-plan-updated')?.({ payload: 'conv-1' })
+    })
+    expect(await screen.findByText('2/2 terminées')).toBeVisible()
   })
 
   it('renders Bob follow-up options as separate buttons in the conversation', async () => {
@@ -438,6 +491,43 @@ describe('Chat live thinking', () => {
     expect(within(pinnedPlan).getByText(/Créer l’interface/).closest('li')).toHaveClass('is-running')
   })
 
+  it('marks stale final plan steps complete when the session succeeds', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.change(await screen.findByPlaceholderText('Sur quoi travailler ?'), { target: { value: 'Termine le projet' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.listeners.has('bob-activity')).toBe(true))
+    await waitFor(() => expect(mocks.listeners.has('bob-session-done')).toBe(true))
+
+    await act(async () => {
+      await mocks.listeners.get('bob-activity')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', eventType: 'tool_started',
+        toolName: 'update_todo_list', payload: { parameters: { todos: [
+          { content: 'Implémenter', status: 'completed' },
+          { content: 'Vérifier', status: 'in_progress' },
+          { content: 'Finaliser', status: 'pending' },
+        ] } },
+      } })
+    })
+
+    await act(async () => {
+      await mocks.listeners.get('bob-session-done')?.({ payload: {
+        sessionId: 'session-1', conversationId: 'conv-1', success: true,
+        fullOutput: 'Projet terminé.', taskId: 'task-1',
+      } })
+    })
+
+    const plan = screen.getByRole('region', { name: 'Plan d’exécution' })
+    expect(within(plan).getByText('3/3 terminées')).toBeVisible()
+    expect(within(plan).queryByText('Interrompue')).not.toBeInTheDocument()
+    expect(within(plan).getByText(/Vérifier/).closest('li')).toHaveClass('is-completed')
+    expect(within(plan).getByText(/Finaliser/).closest('li')).toHaveClass('is-completed')
+  })
+
   it('renders and advances the textual plan format emitted by the real Bob Shell', async () => {
     render(
       <MemoryRouter initialEntries={['/chat/conv-1']}>
@@ -559,6 +649,35 @@ describe('Chat live thinking', () => {
 })
 
 describe('WorkingIndicator thought swap', () => {
+  afterEach(() => setTestLocale('fr'))
+
+  it('shows english activity labels when locale is en', () => {
+    setTestLocale('en')
+    render(<WorkingIndicator
+      thinking=""
+      loading
+      activities={[{
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'tool_finished',
+        title: 'Tool finished',
+        toolName: 'read_file',
+        payload: {},
+      }, {
+        sessionId: 'session-1',
+        conversationId: 'conv-1',
+        eventType: 'tool_started',
+        title: 'Updating plan',
+        toolName: 'update_todo_list',
+        payload: {},
+      }]}
+    />)
+
+    expect(screen.getByText('Tool finished')).toBeVisible()
+    expect(screen.getByText('Updating plan')).toBeVisible()
+    expect(screen.getByText('Analyzing request…')).toBeVisible()
+  })
+
   it('shows live actions and keeps their payload available in expandable rows', () => {
     render(<WorkingIndicator
       thinking="Consultation des sources."

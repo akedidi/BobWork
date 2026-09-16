@@ -21,7 +21,10 @@ export function ConnectionScreen() {
       else if (caught instanceof ApiError && caught.message === 'invalid-link') setError(t('invalidLink'))
       else if (caught instanceof ApiError && caught.message === 'request-timeout') setError(t('connectionTimeout'))
       else if (caught instanceof ApiError && caught.message === 'api-unavailable') setError(t('apiUnavailable'))
-      else if (caught instanceof ApiError && [401, 403, 404, 410].includes(caught.status ?? 0)) setError(t('connectionExpired'))
+      else if (caught instanceof ApiError && (
+        [401, 403, 404, 410].includes(caught.status ?? 0)
+        || ((caught.status ?? 0) >= 520 && (caught.status ?? 0) <= 530)
+      )) setError(t('connectionExpired'))
       else setError(t('connectionFailed'))
     } finally {
       setBusy(false)

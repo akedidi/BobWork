@@ -188,39 +188,4 @@ export function isPlaceholderConversationTitle(title: string): boolean {
   return ['', 'Nouvelle conversation', 'Nouveau chat'].includes(title.trim())
 }
 
-export function normalizeAssistantMarkdown(markdown: string): string {
-  let normalized = markdown.replace(/^(#{1,6})(?=[^\s#])/gm, '$1 ')
-  if (/\|\s*\|\s*:?-{3}/.test(normalized)) {
-    normalized = normalized.replace(/\|\s*\|(?=\s*-)/g, '|\n|')
-    normalized = normalized.replace(/\|\s*\|(?=\s*[^|\-])/g, '|\n|')
-  }
-
-  const lines = normalized.split('\n')
-  const tableCells = (line: string): string[] | null => {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null
-    return trimmed.slice(1, -1).split('|').map(cell => cell.trim())
-  }
-
-  for (let index = 1; index < lines.length; index += 1) {
-    const delimiters = tableCells(lines[index])
-    if (!delimiters?.length || !delimiters.every(cell => /^:?-{3,}:?$/.test(cell))) continue
-    const firstPipe = lines[index - 1].indexOf('|')
-    if (firstPipe > 0 && lines[index - 1].slice(0, firstPipe).trim()) {
-      const prefix = lines[index - 1].slice(0, firstPipe).trimEnd()
-      const header = lines[index - 1].slice(firstPipe)
-      lines.splice(index - 1, 1, prefix, header)
-      index += 1
-    }
-    const headerCells = tableCells(lines[index - 1])
-    if (!headerCells || headerCells.length >= delimiters.length) continue
-    const lastHeader = headerCells[headerCells.length - 1] ?? ''
-    const splitHeader = lastHeader.match(/^(Label)\s+(Couleur|Color)$/i)
-    if (headerCells.length + 1 === delimiters.length && splitHeader) {
-      headerCells.splice(-1, 1, splitHeader[1], splitHeader[2])
-    }
-    while (headerCells.length < delimiters.length) headerCells.push('')
-    lines[index - 1] = `| ${headerCells.join(' | ')} |`
-  }
-  return lines.join('\n')
-}
+export { normalizeAssistantMarkdown } from '@bob-work/chat-display'

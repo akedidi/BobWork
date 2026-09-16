@@ -1,0 +1,12 @@
+.bob-pdf-viewer { border: 1px solid var(--border-color, #ddd); border-radius: 10px; overflow: hidden; min-width: 0; width: 100%; background: var(--bg-surface); }
+.bob-pdf-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border-color, #ddd); font-size: 12px; }
+.bob-pdf-toolbar strong { flex: 1; min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bob-pdf-toolbar button { padding: 4px 7px; border-radius: 5px; background: var(--bg-hover); color: var(--text-primary); }
+.bob-pdf-toolbar button:disabled { opacity: .35; }
+.bob-pdf-scroll { overflow: auto; max-height: 650px; padding: 12px; background: var(--bg-secondary, #eee); }
+.bob-pdf-page { position: relative; width: max-content; margin: 0 auto; background: white; }
+.bob-pdf-page canvas { display: block; }
+.bob-pdf-page .textLayer { position: absolute; inset: 0; }
+.bob-pdf-loading, .bob-pdf-error { padding: 8px 12px; font-size: 12px; }
+.bob-pdf-error { color: var(--error, #b91c1c); }
+.message-pdf-previews { display: grid; gap: 12px; margin: 12px 0; min-width: 0; }

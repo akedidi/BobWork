@@ -1,12 +1,12 @@
 ---
-description: Barre qualité plugins Bob Work (niveau ChatGPT Work) et initiative CLI/OSS à la création
+description: Barre qualité plugins Bob Work (plugin Bob Work complet) et initiative CLI/OSS à la création
 globs: apps/macos/**/*.{rs,py,tsx,ts,json}
 alwaysApply: false
 ---
 
 # Plugins Bob Work — barre qualité
 
-Quand tu crées ou refactors un **plugin** (pas un skill seul), vise le niveau **ChatGPT Work**.
+Quand tu crées ou refactors un **plugin** (pas un skill seul), vise une qualité plugin complète (bundle, connecteurs, livrables).
 
 ## Initiative (chat, pas seulement le wizard)
 

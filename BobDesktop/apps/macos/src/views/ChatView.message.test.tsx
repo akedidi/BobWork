@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConversationInteractionCard, MessageBubble, interactionFromActivity, normalizeAssistantMarkdown } from './ChatView'
 import { setTestLocale } from '../i18n'
@@ -7,11 +7,144 @@ vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://${path}`,
 }))
 
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  stat: vi.fn(async (path: string) => {
+    if (path.includes('.bob-sandbox-ui-probe.txt')) {
+      throw new Error('ENOENT')
+    }
+    // Simulate missing FS scope on Application Support (production capability gap).
+    if (path.includes('Application Support')) {
+      throw new Error('path not allowed on the configured scope')
+    }
+    if (path.includes('missing-file')) {
+      throw new Error('ENOENT')
+    }
+    return { isFile: true, isDirectory: false, size: 12 }
+  }),
+}))
+
+vi.mock('../lib/ipc', async () => {
+  const actual = await vi.importActual<typeof import('../lib/ipc')>('../lib/ipc')
+  return {
+    ...actual,
+    prepareFilePreview: vi.fn(async (path: string) => {
+      if (path.includes('missing') || path.includes('mainIBM') || path.includes('startedIBM')) {
+        throw new Error('ENOENT')
+      }
+      return {
+        path,
+        name: path.split('/').pop() || 'file',
+        kind: path.toLowerCase().endsWith('.pdf') ? 'pdf' : 'file',
+        mimeType: path.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+        size: 12,
+        previewPath: path,
+        previewPaths: [],
+      }
+    }),
+  }
+})
+
+vi.mock('../components/FittedHtmlFrame', () => ({
+  FittedHtmlFrame: ({ src, title }: { src: string; title: string }) => (
+    <div data-testid="inline-html-preview" data-src={src}>{title}</div>
+  ),
+  openHtmlPreviewExternally: vi.fn(),
+}))
+
+vi.mock('../components/PdfViewer/PdfViewer', () => ({
+  PdfViewer: ({ path, title }: { path: string; title: string }) => <div data-testid="native-pdf" data-path={path}>{title}</div>,
+}))
+
 describe('MessageBubble', () => {
   beforeEach(() => setTestLocale('fr'))
   afterEach(() => {
     setTestLocale(null)
     vi.useRealTimers()
+  })
+
+  it('intègre les PDF produits par Bob dans le lecteur de la conversation', async () => {
+    render(<MessageBubble msg={{
+      id: 'generated-pdf', role: 'assistant', content: 'Document prêt.',
+      ts: '2026-09-08T12:00:00Z', state: 'done',
+      sources: [{ id: 'pdf', title: 'Rapport.pdf', path: '/tmp/Rapport.pdf' }],
+    }} onOpenResource={vi.fn()} />)
+    await waitFor(() => {
+      expect(screen.getByTestId('native-pdf')).toHaveAttribute('data-path', '/tmp/Rapport.pdf')
+      expect(screen.getByLabelText('PDF générés')).toBeVisible()
+    })
+  })
+
+  it('n’affiche pas les aperçus PDF pour des chemins inventés absents du disque', async () => {
+    render(<MessageBubble msg={{
+      id: 'phantom-pdfs',
+      role: 'assistant',
+      content: [
+        'Livrables :',
+        '/tmp/Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf',
+        '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf',
+      ].join('\n'),
+      ts: '2026-09-14T22:45:00Z',
+      state: 'done',
+      sources: [
+        { id: 'bad', title: 'Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf', path: '/tmp/Guide_installation_prise_en_mainIBM_Bob_Work_v2.pdf' },
+        { id: 'good', title: 'Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf', path: '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf' },
+      ],
+    }} onOpenResource={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('native-pdf')).toHaveAttribute(
+        'data-path',
+        '/tmp/Guide_installation_prise_en_main_IBM_Bob_Work_v2.pdf',
+      )
+    })
+    expect(screen.queryByTestId('native-pdf')).toBeVisible()
+    expect(screen.getAllByTestId('native-pdf')).toHaveLength(1)
+    expect(screen.queryByText('Impossible de charger le PDF')).not.toBeInTheDocument()
+  })
+
+  it('n’affiche pas en chips les chemins sandbox bloqués absents du disque', async () => {
+    render(<MessageBubble msg={{
+      id: 'sandbox-blocked-paths',
+      role: 'assistant',
+      content: [
+        'Workspace OK.',
+        '[.bob-sandbox-ui-probe.txt](/Users/me/Desktop/.bob-sandbox-ui-probe.txt) — 🚫 BLOCKED',
+        '[.bob-sandbox-ui-probe.txt](/Users/me/Documents/.bob-sandbox-ui-probe.txt) — 🚫 BLOCKED',
+        'Créé : /tmp/sandbox-write-ok.txt',
+      ].join('\n'),
+      ts: '2026-09-11T22:38:00Z',
+      state: 'done',
+      fileChanges: [{ path: '/tmp/sandbox-write-ok.txt', changeType: 'created' }],
+    }} onOpenResource={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'sandbox-write-ok.txt Créé' })).toBeVisible()
+    })
+    expect(screen.queryAllByRole('button', { name: '.bob-sandbox-ui-probe.txt' })).toHaveLength(0)
+    expect(screen.queryByTitle('/Users/me/Desktop/.bob-sandbox-ui-probe.txt')).toBeNull()
+    expect(screen.queryByTitle('/Users/me/Documents/.bob-sandbox-ui-probe.txt')).toBeNull()
+  })
+
+  it('sépare les documents créés des documents modifiés et supprimés', () => {
+    const onOpen = vi.fn()
+    render(<MessageBubble msg={{
+      id: 'file-changes', role: 'assistant', content: 'Documents prêts',
+      ts: '2026-09-08T12:00:00Z', state: 'done',
+      fileChanges: [
+        { path: '/tmp/ancien.docx', changeType: 'modified' },
+        { path: '/tmp/nouveau.docx', changeType: 'created' },
+        { path: '/tmp/supprime.docx', changeType: 'deleted' },
+      ],
+    }} onOpenResource={onOpen} />)
+    const created = screen.getByText('Fichiers créés').parentElement!
+    const modified = screen.getByText('Fichiers modifiés').parentElement!
+    expect(created).toHaveTextContent('nouveau.docxCréé')
+    expect(created).not.toHaveTextContent('ancien.docx')
+    expect(modified).toHaveTextContent('ancien.docxModifié')
+    expect(modified).not.toHaveTextContent('nouveau.docx')
+    fireEvent.click(screen.getByRole('button', { name: 'nouveau.docx Créé' }))
+    expect(onOpen).toHaveBeenCalledWith('/tmp/nouveau.docx', 'nouveau.docx', 'file')
+    expect(screen.getByRole('button', { name: 'supprime.docx Supprimé' })).toBeDisabled()
   })
 
   it('affiche la date locale sur les messages utilisateur et Bob', () => {
@@ -29,6 +162,19 @@ describe('MessageBubble', () => {
     expect(dates.every(element => element.tagName === 'TIME')).toBe(true)
   })
 
+  it('does not treat paths cited in a user prompt as created files', () => {
+    render(<MessageBubble msg={{
+      id: 'user-sandbox-prompt',
+      role: 'user',
+      content: 'écris /tmp/bob-sandbox-escape.txt puis ~/Desktop/bob-sandbox-escape.txt.',
+      ts: '2026-09-11T16:52:00Z',
+      state: 'sent',
+    }} onOpenResource={vi.fn()} />)
+
+    expect(screen.queryByRole('button', { name: 'bob-sandbox-escape.txt' })).not.toBeInTheDocument()
+    expect(screen.queryByText('bob-sandbox-escape.txt')).not.toBeInTheDocument()
+  })
+
   it('keeps long unbroken user content inside the message bubble', () => {
     const content = `Texte ${'x'.repeat(240)}\nDeuxième ligne`
     render(<MessageBubble msg={{
@@ -44,6 +190,32 @@ describe('MessageBubble', () => {
     expect(bubble.parentElement).toHaveClass('msg-user-stack')
     expect(bubble.parentElement?.parentElement).toHaveClass('msg-user-row')
     expect(bubble).toHaveTextContent('Deuxième ligne')
+  })
+
+  it('place les actions du message utilisateur sous sa bulle', () => {
+    const { container } = render(<MessageBubble msg={{
+      id: 'user-copy-below', role: 'user', content: 'Message à copier',
+      ts: '2026-09-09T00:00:00Z', state: 'done',
+    }} onOpenResource={vi.fn()} />)
+
+    const stack = container.querySelector('.msg-user-stack')!
+    const bubble = stack.querySelector('.msg-user')!
+    const actions = stack.querySelector('.message-actions-below')!
+    expect(actions).toContainElement(screen.getByRole('button', { name: 'Copier' }))
+    expect(bubble.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('place le bouton de copie de Bob sous son message', () => {
+    const { container } = render(<MessageBubble msg={{
+      id: 'assistant-copy-below', role: 'assistant', content: 'Réponse à copier',
+      ts: '2026-09-09T00:00:00Z', state: 'done',
+    }} onOpenResource={vi.fn()} />)
+
+    const stack = container.querySelector('.msg-assistant-stack')!
+    const message = stack.querySelector('.msg-assistant')!
+    const actions = stack.querySelector('.message-actions-below')!
+    expect(actions).toContainElement(screen.getByRole('button', { name: 'Copier' }))
+    expect(message.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('affiche l’icône officielle de Bob à la place de la lettre B', () => {
@@ -102,7 +274,7 @@ describe('MessageBubble', () => {
     expect(onSubmitEdit).toHaveBeenCalledWith('Question modifiée')
   })
 
-  it('affiche les images locales comme des aperçus cliquables', () => {
+  it('affiche les images locales comme des aperçus cliquables', async () => {
     const onOpenResource = vi.fn()
     render(<MessageBubble msg={{
       id: 'assistant-images',
@@ -113,9 +285,29 @@ describe('MessageBubble', () => {
       sources: [{ id: 'image-1', title: 'proposition.png', path: '/tmp/proposition.png' }],
     }} onOpenResource={onOpenResource} />)
 
-    expect(screen.getByRole('img', { name: 'Aperçu de proposition.png' })).toHaveAttribute('src', 'asset:///tmp/proposition.png')
+    await waitFor(() => {
+      expect(screen.getByRole('img', { name: 'Aperçu de proposition.png' })).toHaveAttribute('src', 'asset:///tmp/proposition.png')
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir l’aperçu proposition.png' }))
     expect(onOpenResource).toHaveBeenCalledWith('/tmp/proposition.png', 'proposition.png', 'file')
+  })
+
+  it('affiche la preview HTML inline même si plugin-fs refuse Application Support', async () => {
+    const htmlPath =
+      '/Users/demo/Library/Application Support/com.bobwork.desktop.test/workspaces/run/chart-e2e.html'
+    render(<MessageBubble msg={{
+      id: 'assistant-html-preview',
+      role: 'assistant',
+      content: 'Dashboard prêt.',
+      ts: '2026-09-14T12:00:00Z',
+      state: 'done',
+      sources: [{ id: 'html-1', title: 'chart-e2e.html', path: htmlPath }],
+    }} onOpenResource={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Visualisations générées')).toBeVisible()
+      expect(screen.getByTestId('inline-html-preview')).toHaveAttribute('data-src', htmlPath)
+    })
   })
 
   it('convertit les images locales intégrées au Markdown', () => {
@@ -166,14 +358,15 @@ describe('MessageBubble', () => {
     expect(screen.queryByText('Contenu récupéré en arrière-plan')).not.toBeInTheDocument()
   })
 
-  it('remplace une image en échec par un état explicite', () => {
+  it('remplace une image en échec par un état explicite', async () => {
     render(<MessageBubble msg={{
       id: 'assistant-broken-image', role: 'assistant', content: 'Image générée.',
       ts: '2026-08-24T12:00:00Z', state: 'done',
       sources: [{ id: 'broken', title: 'cassée.png', path: '/tmp/cassee.png' }],
     }} onOpenResource={vi.fn()} />)
 
-    fireEvent.error(screen.getByRole('img', { name: 'Aperçu de cassée.png' }))
+    const image = await screen.findByRole('img', { name: 'Aperçu de cassée.png' })
+    fireEvent.error(image)
     expect(screen.getByText('Aperçu de l’image indisponible')).toBeVisible()
   })
 
@@ -189,7 +382,47 @@ describe('MessageBubble', () => {
 
     expect(screen.getByRole('table')).toBeVisible()
     expect(container.querySelector('.markdown-table-scroll')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Copier le tableau' })).toBeVisible()
     expect(screen.getByText('https://api.weatherapi.com/v1/forecast.json?key=CLEF')).toBeVisible()
+  })
+
+  it('ajoute un bouton avec icône pour copier chaque tableau généré par Bob', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(<MessageBubble msg={{
+      id: 'assistant-table-copy', role: 'assistant',
+      content: [
+        '| Ville | Temp |',
+        '|---|---|',
+        '| Paris | 18 °C |',
+      ].join('\n'),
+      ts: '2026-09-13T00:00:00Z', state: 'done',
+    }} onOpenResource={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copier le tableau' }))
+    expect(writeText).toHaveBeenCalledWith('Ville\tTemp\nParis\t18 °C')
+  })
+
+  it('ajoute un bouton avec icône pour copier chaque cadre de code généré par Bob', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(<MessageBubble msg={{
+      id: 'assistant-code', role: 'assistant',
+      content: '```sh\necho "Bob Work"\n```',
+      ts: '2026-09-09T00:00:00Z', state: 'done',
+    }} onOpenResource={vi.fn()} />)
+
+    const frame = screen.getByText('echo "Bob Work"').closest('.markdown-code-frame')!
+    const copy = frame.querySelector('button[aria-label="Copier"]')!
+    expect(copy).toBeVisible()
+    fireEvent.click(copy)
+    expect(writeText).toHaveBeenCalledWith('echo "Bob Work"\n')
   })
 
   it('répare les titres Markdown sans espace', () => {
@@ -246,6 +479,29 @@ describe('MessageBubble', () => {
     expect(screen.getByText('Référent santé')).toBeVisible()
   })
 
+  it('répare un résumé sandbox aplati avec un seul séparateur |---|', () => {
+    const malformed = [
+      'Résumé du test sandbox:',
+      '',
+      '| Action | Résultat | |---| | Création de sandbox-ok.txt dans le workspace | ✅ Réussi — fichier créé avec le contenu sandbox-works | | Listage de ~/Desktop | 🚫 Bloqué — le chemin ~/Desktop est redirigé vers un répertoire isolé |',
+    ].join('\n')
+    const repaired = normalizeAssistantMarkdown(malformed)
+
+    expect(repaired).toContain('| Action | Résultat |\n| --- | --- |')
+    expect(repaired).toContain('\n| Création de sandbox-ok.txt dans le workspace | ✅ Réussi — fichier créé avec le contenu sandbox-works |')
+    expect(repaired).toContain('\n| Listage de ~/Desktop | 🚫 Bloqué — le chemin ~/Desktop est redirigé vers un répertoire isolé |')
+
+    render(<MessageBubble msg={{
+      id: 'assistant-sandbox-flat-table', role: 'assistant', content: malformed,
+      ts: '2026-09-11T22:24:00Z', state: 'done',
+    }} onOpenResource={vi.fn()} />)
+
+    expect(screen.getByRole('table')).toBeVisible()
+    expect(screen.getByRole('columnheader', { name: 'Action' })).toBeVisible()
+    expect(screen.getByRole('columnheader', { name: 'Résultat' })).toBeVisible()
+    expect(screen.getByText(/sandbox-ok\.txt/)).toBeVisible()
+  })
+
   it('répare le tableau d’itinéraire aplati avec un en-tête vide', () => {
     const malformed = '| | |---|---| | **Distance** | 3,8 km | | **Durée estimée** | ~49 minutes | | **Mode** | 🚶 À pied |'
     const repaired = normalizeAssistantMarkdown(malformed)
@@ -295,6 +551,24 @@ describe('MessageBubble', () => {
 describe('structured conversation interactions', () => {
   beforeEach(() => setTestLocale('fr'))
   afterEach(() => setTestLocale(null))
+
+  it('affiche les réponses follow_up de Bob comme boutons cliquables', () => {
+    const interaction = interactionFromActivity({
+      sessionId: 'session-followup', conversationId: 'conversation-1',
+      eventType: 'user_input_required', toolName: 'ask_followup_question',
+      payload: { parameters: {
+        question: 'Quel format souhaitez-vous ?',
+        follow_up: [{ text: 'PDF' }, { text: 'Document Word' }],
+      } },
+    })!
+    expect(interaction.choices).toHaveLength(2)
+    const onChoose = vi.fn()
+    const { container } = render(<ConversationInteractionCard interaction={interaction} busy={false} onChoose={onChoose} />)
+    expect(screen.getByTestId('conversation-interaction')).toHaveClass('conversation-interaction--right')
+    expect(container.querySelector('.conversation-interaction__choices')).toHaveClass('conversation-interaction__choices--right')
+    fireEvent.click(screen.getByRole('button', { name: 'Document Word' }))
+    expect(onChoose).toHaveBeenCalledWith(expect.objectContaining({ label: 'Document Word', value: 'Document Word' }))
+  })
 
   it('normalizes Bob IDE ask_followup_question choices', () => {
     const interaction = interactionFromActivity({

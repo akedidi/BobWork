@@ -17,7 +17,9 @@ import ModesSettingsTab from './SettingsTabs/ModesSettingsTab'
 import AppearanceSettingsTab from './SettingsTabs/AppearanceSettingsTab'
 import DataSettingsTab from './SettingsTabs/DataSettingsTab'
 import MemorySettingsTab from './SettingsTabs/MemorySettingsTab'
-import SshSettingsTab from './SettingsTabs/SshSettingsTab'
+
+/** Hidden from Settings until these surfaces are ready to ship. */
+const HIDDEN_SETTINGS_TABS = new Set(['ssh'])
 
 export default function SettingsView() {
   const t = useT()
@@ -32,9 +34,10 @@ export default function SettingsView() {
     chromeStatus, chromeLoading, chromeError,
     computerUseStatus, computerUseLoading, computerUseError,
     computerUseTools, chromeTools,
-    notificationBundleHint, updateInfo, updateBusy,
+    notificationBundleHint, updateInfo, appVersion, appName, updateBusy,
     status, setStatus, showTransientStatus,
-    checkUpdate, installUpdate, refreshChromeStatus, refreshComputerUseStatus, change
+    checkUpdate, installUpdate, refreshChromeStatus, refreshComputerUseStatus,
+    orcaCliStatus, orcaCliLoading, orcaCliError, refreshOrcaCliStatus, change
   } = useSettingsData()
 
   const {
@@ -42,11 +45,12 @@ export default function SettingsView() {
     usage, usageLoading,
     grants, grantsLoading, grantsError,
     apiKey, setApiKey, sessionKeyStatus,
-    bobExtrasReady, refreshProfile, install, saveKey, revokeGrant
+    bobExtrasReady, refreshProfile, install, installingBob, uninstall, uninstallingBob, saveKey, revokeGrant
   } = useBobProfile(tab, setStatus, showTransientStatus)
 
   const tabs = useMemo(() => [
     { id: 'general' as const, label: t('settings.tabGeneral'), keywords: 'mode démarrage ouverture session barre menus notifications système position actuelle localisation itinéraire gps enable disable activer désactiver' },
+    { id: 'appearance' as const, label: t('settings.tabAppearance'), keywords: 'thème clair sombre dark light français english español taille texte dictée enregistrement audio micro système conserver animations' },
     { id: 'bob' as const, label: t('settings.tabBob'), keywords: 'clé api inférence session temporaire consommation crédits installation authentification bobalytics bobcoins adoption' },
     { id: 'instructions' as const, label: t('settings.tabInstructions'), keywords: 'prompt défaut personnalisées consignes projet réponse contexte conversations mémoire cross chatgpt' },
     { id: 'memory' as const, label: t('settings.tabMemory'), keywords: 'mémoire persistante souvenir continuité sessions recall projet utilisateur hindsight everos mnemon' },
@@ -57,9 +61,8 @@ export default function SettingsView() {
     { id: 'remote' as const, label: t('settings.tabRemote'), keywords: 'mobile télécommande remote control cloudflare tunnel lien copier téléphone' },
     { id: 'ssh' as const, label: t('settings.tabSsh'), keywords: 'ssh serveur distant terminal xterm workspace miroir fichiers remote rsync' },
     { id: 'modes' as const, label: t('settings.tabModes'), keywords: 'modes bob shell catalogue custom_modes yaml agent plan ask télécharger installer importer' },
-    { id: 'appearance' as const, label: t('settings.tabAppearance'), keywords: 'thème clair sombre dark light français english español taille texte dictée enregistrement audio micro système conserver animations' },
-    { id: 'data' as const, label: t('settings.tabData'), keywords: 'import export conversations chatgpt claude cowork télémétrie diagnostic dossier cache purge nettoyer' },
-  ], [t])
+    { id: 'data' as const, label: t('settings.tabData'), keywords: 'import export conversations chatgpt claude cowork télémétrie diagnostic dossier cache purge nettoyer supprimer delete all' },
+  ].filter(item => !HIDDEN_SETTINGS_TABS.has(item.id)), [t])
 
   const visibleTabs = useMemo(() => {
     const query = normalizeSettingsSearch(settingsSearch)
@@ -70,7 +73,7 @@ export default function SettingsView() {
   const installationFound = profile?.detection.found ?? authSnapshot?.found ?? false
   const installationLabel = installationFound
     ? `Bob Shell ${profile?.detection.version ?? authSnapshot?.version ?? ''}`.trim()
-    : profileLoading ? 'Vérification…' : 'Non installé'
+    : profileLoading ? t('settings.checking') : t('settings.statusNotInstalled')
   const authReady = sessionKeyStatus.active
     || profile?.detection.authenticated
     || authSnapshot?.authenticated
@@ -89,13 +92,18 @@ export default function SettingsView() {
     if (contentRef.current) contentRef.current.scrollTop = 0
   }, [tab])
 
+  useEffect(() => {
+    if (tab === 'ssh') setTab('general')
+  }, [tab, setTab])
+
   const tabProps = {
-    t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate,
+    t, settings, change, settingsError, updateInfo, appVersion, appName, updateBusy, checkUpdate, installUpdate,
     notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel,
-    authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile,
+    authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, uninstall, uninstallingBob, refreshProfile,
     apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant,
     chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools,
     computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools,
+    orcaCliStatus, orcaCliLoading, orcaCliError, refreshOrcaCliStatus,
     exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus
   }
 
@@ -129,11 +137,10 @@ export default function SettingsView() {
           {tab === 'extensions' && <ExtensionsSettingsTab {...tabProps} />}
           {tab === 'runtimes' && <RuntimesSettingsTab setStatus={setStatus} />}
           {tab === 'remote' && <RemoteSettingsTab {...tabProps} />}
-          {tab === 'ssh' && <SshSettingsTab t={t} />}
           {tab === 'modes' && <ModesSettingsTab {...tabProps} />}
           {tab === 'appearance' && <AppearanceSettingsTab {...tabProps} />}
           {tab === 'data' && <DataSettingsTab {...tabProps} />}
-          {status && <div className="settings-status">{status}</div>}
+          {status && <div className="settings-status" role="status" aria-live="polite">{status}</div>}
         </div>
         {visibleTabs.length === 0 && <div className="settings-no-results"><span>⌕</span><h1>{t('settings.searchEmptyTitle')}</h1><p>{t('settings.searchEmptyHint')}</p></div>}
       </main>

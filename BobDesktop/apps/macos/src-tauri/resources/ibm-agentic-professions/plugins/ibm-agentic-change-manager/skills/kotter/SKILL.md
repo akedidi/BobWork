@@ -1,44 +1,52 @@
 ---
 name: kotter
-description: "Utiliser les huit étapes de Kotter comme grille de transformation organisationnelle."
+description: "Use Kotter's eight steps as an organizational transformation framework."
 icon: change
 ---
 
 # Kotter
 
-Utiliser ce skill pour utiliser les huit étapes de Kotter comme grille de transformation organisationnelle.
+Use this skill to use Kotter's eight steps as an organizational transformation framework.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Évaluer urgence, coalition et vision de changement.
-2. Examiner mobilisation, suppression des obstacles et résultats précoces.
-3. Planifier accélération et ancrage organisationnel.
-4. Adapter la séquence au contexte en conservant les dépendances critiques.
+1. Assess urgency, coalition, and change vision.
+2. Examine mobilization, obstacle removal, and early wins.
+3. Plan acceleration and organizational anchoring.
+4. Adapt the sequence to context while preserving critical dependencies.
 
-## Livrable
+## Deliverable
 
-Diagnostic Kotter et roadmap de mobilisation.
+Kotter diagnosis and mobilization roadmap.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Référencer la source officielle.
-- Ne pas copier de supports propriétaires.
-- Les résultats rapides renforcent la vision sans la remplacer.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Reference the official source.
+- Do not copy proprietary materials.
+- Quick wins reinforce the vision without replacing it.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

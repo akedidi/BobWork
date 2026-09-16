@@ -1,26 +1,28 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { save as chooseSavePath } from '@tauri-apps/plugin-dialog';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
-import { exportPluginZip, comparePluginVersion, getPluginExtensionStatus, getPluginMcpStatus, getPluginResourceStatus, getPluginVersions, getSkills, rollbackPluginVersion, installPluginUpdate, testPluginMcp, validatePlugin } from '../../lib/ipc';
+import { exportPluginZip, getPluginExtensionStatus, getPluginMcpStatus, getPluginResourceStatus, getSkills, testPluginMcp } from '../../lib/ipc';
 import { errorMessage } from '../../lib/errorMessage';
 import { useAppStore } from '../../stores/appStore';
-import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, PluginVersion, PluginVersionDiff, WorkspaceSkill } from '@bob-work/shared-types';
+import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, WorkspaceSkill } from '@bob-work/shared-types';
 import { metadataOf, isEnabled, isProtectedBuiltin, pluginKindLabel, permissionLabel, friendlyCapabilities, pluginSkillsOf, catalogSlugForPluginSkill, PluginMetadata } from '../../lib/pluginUtils';
+import { localizePluginResourceMessage, localizePluginResourceSetupHint } from '../../lib/pluginResourceMessages';
 import { useAppDialog } from '../AppDialog';
 import { LoadErrorBanner } from '../LoadErrorBanner';
 import { statusTone } from '../../lib/statusTone';
 import { PluginIcon, resolvePluginIcon, resolveSkillIcon } from '../PluginIcon';
 import { PluginFileResourcesSection } from './PluginFileResources';
+import { formatCatalogDate } from '../../lib/formatDate';
 import { useT } from '../../i18n';
+import { isBuiltinPlugin } from '../../lib/builtinCatalog';
 
 type OpenIntegrationsOpts = { tab?: string; highlight?: string; provider?: string };
 
-export default function PluginDetail({ plugin, mcpRevision, toggling, openCommissioning, onClose, onToggle, onEdit, onDelete, onStatus, onOpenIntegrations, onUseSchedule, onVersionChanged }: {
+export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, onToggle, onEdit, onDelete, onStatus, onOpenIntegrations, onUseSchedule }: {
   plugin: Plugin
   mcpRevision: number
   toggling: boolean
-  openCommissioning?: boolean
   onClose: () => void
   onToggle: (enabled: boolean) => void
   onEdit: () => void
@@ -28,9 +30,9 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, openCommis
   onStatus: (message: string) => void
   onOpenIntegrations: (opts?: OpenIntegrationsOpts) => void
   onUseSchedule: (template: PluginScheduleTemplate) => void
-  onVersionChanged: (message: string, expectedVersion?: string) => Promise<void>
 }) {
   const navigate = useNavigate()
+  const t = useT()
   const manifest = metadataOf(plugin)
   const enabled = isEnabled(plugin)
   const protectedBuiltin = isProtectedBuiltin(plugin)
@@ -83,8 +85,27 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, openCommis
       </>}
       {protectedBuiltin && <p className="settings-note" style={{ margin: 0 }}>Plugin intégré : désactivation possible, suppression impossible.</p>}
     </div>
-    <PluginCommissioningSection plugin={plugin} autoStart={openCommissioning} />
     <section className="skill-detail-section"><h3>Description</h3><p>{plugin.description || 'Aucune description.'}</p></section>
+    {(plugin.createdAt || plugin.updatedAt || plugin.author) ? (
+      <section className="skill-detail-section">
+        <h3>{t('plugins.metadata')}</h3>
+        <dl>
+          {plugin.createdAt ? (
+            <div>
+              <dt>{isBuiltinPlugin(plugin) ? t('plugins.availableSince') : t('plugins.createdAt')}</dt>
+              <dd>{formatCatalogDate(plugin.createdAt)}</dd>
+            </div>
+          ) : null}
+          {plugin.updatedAt && plugin.updatedAt !== plugin.createdAt ? (
+            <div><dt>{t('plugins.updatedAt')}</dt><dd>{formatCatalogDate(plugin.updatedAt)}</dd></div>
+          ) : null}
+          {plugin.author ? (
+            <div><dt>{t('plugins.author')}</dt><dd>{plugin.author}</dd></div>
+          ) : null}
+        </dl>
+      </section>
+    ) : null}
+    <PluginBundledContentSection manifest={manifest} />
     <PluginSkillsSection plugin={plugin} manifest={manifest} />
     <PluginResourcesSection
       pluginId={plugin.id}
@@ -109,15 +130,59 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, openCommis
         })
       }}
     />
-    <PluginFileResourcesSection pluginId={plugin.id} revision={mcpRevision} onStatus={onStatus} />
+    {!isProtectedBuiltin(plugin) && (
+      <PluginFileResourcesSection pluginId={plugin.id} revision={mcpRevision} onStatus={onStatus} />
+    )}
     <section className="skill-detail-section"><h3>Ce plugin peut faire</h3>{capabilities.length ? <ul className="plugin-friendly-list">{capabilities.map((value: any) => <li key={value}>{value}</li>)}</ul> : <p>Aider Bob à réaliser les demandes correspondant à sa description.</p>}</section>
     {manifest.mcpServers && <PluginMcpSection key={`${plugin.id}-${plugin.installState}-${mcpRevision}`} plugin={plugin} onOpenIntegrations={onOpenIntegrations} />}
     {(Boolean(manifest.integrations?.length) || Boolean(manifest.browserExtensions?.length) || Boolean(manifest.hooks?.length) || Boolean(manifest.scheduledTaskTemplates?.length)) && <PluginExtensionsSection key={`extensions-${plugin.id}-${plugin.installState}-${mcpRevision}`} plugin={plugin} onOpenIntegrations={onOpenIntegrations} onUseSchedule={onUseSchedule} />}
     <section className="skill-detail-section"><h3>Autorisations</h3>{permissions.length ? <ul className="plugin-friendly-list">{permissions.map((value: any) => <li key={value}>{value}</li>)}</ul> : <p>Aucune autorisation supplémentaire.</p>}</section>
-    <PluginVersionsSection plugin={plugin} onVersionChanged={onVersionChanged} />
+    <PluginCurrentVersionSection plugin={plugin} />
     <ManifestReadOnlySection plugin={plugin} />
     {manifest.requiresIntegration && <section className="skill-detail-section"><h3>Connexion</h3><p>Ce plugin nécessite un compte ou un service connecté.</p><button className="link-btn" onClick={() => onOpenIntegrations({ tab: 'integrations' })}>Gérer les connexions</button></section>}
   </aside>
+}
+
+function PluginBundledContentSection({ manifest }: { manifest: PluginMetadata }) {
+  const t = useT()
+  const content = manifest.bundledContent
+  if (!content) return null
+
+  const icons = content.icons
+  const providerParts = icons?.providers
+    ? Object.entries(icons.providers)
+      .filter(([, count]) => count > 0)
+      .map(([provider, count]) => `${count} ${provider.toUpperCase()}`)
+    : []
+
+  const rows: string[] = []
+  const instructionCount = (content.instructions?.length ?? 0) + (manifest.skills?.length ?? 0)
+  if (instructionCount > 0) {
+    rows.push(t('plugins.bundledInstructions', { count: instructionCount }))
+  }
+  if (typeof content.referenceDocs === 'number' && content.referenceDocs > 0) {
+    rows.push(t('plugins.bundledReferenceDocs', { count: content.referenceDocs }))
+  }
+  if (typeof content.scripts === 'number' && content.scripts > 0) {
+    rows.push(t('plugins.bundledScripts', { count: content.scripts }))
+  }
+  if (icons?.total) {
+    rows.push(t('plugins.bundledIcons', {
+      total: icons.total,
+      details: providerParts.join(', '),
+    }))
+  }
+  if (rows.length === 0) return null
+
+  return (
+    <section className="skill-detail-section" aria-label={t('plugins.bundledContentHeading')}>
+      <h3>{t('plugins.bundledContentHeading')}</h3>
+      <p className="settings-note" style={{ marginTop: 0 }}>{t('plugins.bundledContentNote')}</p>
+      <ul className="plugin-friendly-list">
+        {rows.map(row => <li key={row}>{row}</li>)}
+      </ul>
+    </section>
+  )
 }
 
 function PluginSkillsSection({ plugin, manifest }: { plugin: Plugin; manifest: PluginMetadata }) {
@@ -144,6 +209,8 @@ function PluginSkillsSection({ plugin, manifest }: { plugin: Plugin; manifest: P
       <div className="plugin-mcp-list">
         {skills.map(skill => {
           const match = catalog ? catalogSlugForPluginSkill(skill.name, catalog, parentSlug) : null
+          const bundled = match?.kind === 'plugin-skill'
+            || Boolean(skill.path?.replace(/\\/g, '/').includes('/skills/') || skill.path?.startsWith('skills/'))
           return (
             <div className="plugin-mcp-card" key={skill.name}>
               <div className="plugin-mcp-heading">
@@ -151,7 +218,7 @@ function PluginSkillsSection({ plugin, manifest }: { plugin: Plugin; manifest: P
                   <PluginIcon icon={resolveSkillIcon({ slug: skill.name, name: skill.displayName })} size="sm" className="skill-row-icon" />
                   {skill.displayName}
                 </strong>
-                {match?.kind === 'plugin-skill' ? (
+                {bundled ? (
                   <span className="plugin-mcp-state">{t('plugins.skillBundled')}</span>
                 ) : null}
               </div>
@@ -173,72 +240,13 @@ function PluginSkillsSection({ plugin, manifest }: { plugin: Plugin; manifest: P
   )
 }
 
-function PluginVersionsSection({ plugin, onVersionChanged }: { plugin: Plugin; onVersionChanged: (message: string, expectedVersion?: string) => Promise<void> }) {
-  const dialog = useAppDialog()
-  const t = useT()
-  const [versions, setVersions] = useState<PluginVersion[]>([])
-  const [diff, setDiff] = useState<PluginVersionDiff | null>(null)
-  const [busyVersion, setBusyVersion] = useState<string | null>(null)
-  const [error, setError] = useState('')
-  const protectedBuiltin = isProtectedBuiltin(plugin)
-  const canRestore = !protectedBuiltin
-
-  const loadVersions = async () => setVersions(await getPluginVersions(plugin.id))
-  useEffect(() => {
-    setDiff(null)
-    setError('')
-    void loadVersions().catch(error => setError(errorMessage(error)))
-  }, [plugin.id, plugin.version, plugin.availableVersion])
-
-  const inspect = async (version: string) => {
-    setError('')
-    try { setDiff(await comparePluginVersion(plugin.id, version)) } catch (error) { setError(errorMessage(error)) }
-  }
-  const change = async (version: string, update: boolean) => {
-    if (!update && !canRestore) return
-    if (!update && !await dialog.confirm({ message: t('plugins.restoreConfirm', { version, name: plugin.name }), confirmLabel: t('plugins.restore') })) return
-    setBusyVersion(version)
-    setError('')
-    try {
-      const updated = update
-        ? await installPluginUpdate(plugin.id, version)
-        : await rollbackPluginVersion(plugin.id, version)
-      if (updated.version !== version) {
-        throw new Error(`${plugin.name} est resté en version ${updated.version} (cible ${version} non appliquée).`)
-      }
-      await onVersionChanged(
-        update ? `${plugin.name} a été mis à jour vers la version ${version}.` : `${plugin.name} utilise de nouveau la version ${version}.`,
-        version,
-      )
-      setDiff(null)
-      await loadVersions()
-    } catch (error) {
-      const message = errorMessage(error)
-      setError(message)
-      await onVersionChanged(`Mise à jour impossible : ${message}`)
-    } finally { setBusyVersion(null) }
-  }
-
-  const available = versions.find(version => version.state === 'available')
-  return <section className="skill-detail-section plugin-versions" aria-label="Versions du plugin">
-    <h3>Versions</h3>
-    {protectedBuiltin && <p className="settings-note">Plugin intégré : la version livrée avec Bob Work est conservée ; les anciennes versions restent consultables.</p>}
-    {available && <div className="plugin-update-card">
-      <div><strong>Version {available.version} disponible</strong><small>{available.releaseNotes || 'Une nouvelle version locale a été détectée.'}</small></div>
-      <div className="plugin-version-actions"><button type="button" className="link-btn" onClick={() => void inspect(available.version)}>Voir les changements</button><button type="button" className="btn-primary compact" disabled={busyVersion === available.version} onClick={() => void change(available.version, true)}>{busyVersion === available.version ? 'Installation…' : 'Mettre à jour'}</button></div>
-    </div>}
-    {diff && <div className="plugin-version-diff" aria-label={`Changements de la version ${diff.toVersion}`}>
-      <strong>{diff.fromVersion} → {diff.toVersion}</strong>
-      <ul>{diff.changes.map(change => <li key={change}>{change}</li>)}</ul>
-      {diff.warnings.map(warning => <p className="plugin-version-warning" key={warning}>{warning}</p>)}
-    </div>}
-    <div className="plugin-version-list">
-      {versions.map(version => <div className="plugin-version-row" key={version.version}>
-        <div><strong>Version {version.version}</strong><small>{version.state === 'current' ? 'Version utilisée actuellement' : version.state === 'available' ? 'Prête à être installée' : formatVersionDate(version.installedAt || version.createdAt)}</small></div>
-        {version.state === 'current' ? <span className="plugin-current-version">Actuelle</span> : version.state === 'available' ? <div className="plugin-version-actions"><button type="button" className="btn-primary compact" disabled={busyVersion === version.version} onClick={() => void change(version.version, true)}>{busyVersion === version.version ? 'Installation…' : 'Mettre à jour'}</button></div> : <div className="plugin-version-actions"><button type="button" className="link-btn" onClick={() => void inspect(version.version)}>Comparer</button>{canRestore && <button type="button" className="secondary-btn compact" disabled={busyVersion === version.version} onClick={() => void change(version.version, false)}>Restaurer</button>}</div>}
-      </div>)}
+function PluginCurrentVersionSection({ plugin }: { plugin: Plugin }) {
+  return <section className="skill-detail-section plugin-versions" aria-label="Version du plugin">
+    <h3>Version</h3>
+    <div className="plugin-version-row">
+      <div><strong>Version {plugin.version}</strong><small>Version utilisée actuellement</small></div>
+      <span className="plugin-current-version">Actuelle</span>
     </div>
-    {error && <p className="plugin-version-warning" role="alert">{error}</p>}
   </section>
 }
 
@@ -257,7 +265,11 @@ function localResourceKindLabel(kind: string, t: (key: string) => string) {
     'computer-use': 'plugins.resourceKindComputerUse',
     chrome: 'plugins.resourceKindChrome',
     'stdio-cli': 'plugins.resourceKindStdioCli',
+    'host-cli': 'plugins.resourceKindHostCli',
     'bundled-bin': 'plugins.resourceKindBundledBin',
+    'bundled-python': 'plugins.resourceKindBundledPython',
+    'bundled-assets': 'plugins.resourceKindBundledAssets',
+    'shared-runtime': 'plugins.resourceKindSharedRuntime',
     shell: 'plugins.resourceKindShell',
     'node-cli': 'plugins.resourceKindNodeCli',
     'web-reference': 'plugins.resourceKindWebReference',
@@ -434,8 +446,10 @@ function PluginResourcesSection({
                   </span>
                 ) : null}
               </div>
-              <p>{resource.message || localResourceKindLabel(resource.kind, t)}</p>
-              {'setupHint' in resource && resource.setupHint && <p className="settings-note">{resource.setupHint}</p>}
+              <p>{localizePluginResourceMessage(resource, t) || localResourceKindLabel(resource.kind, t)}</p>
+              {'setupHint' in resource && resource.setupHint && (
+                <p className="settings-note">{localizePluginResourceSetupHint(resource.setupHint, t)}</p>
+              )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 6 }}>
                 <small>{localResourceKindLabel(resource.kind, t)}</small>
                 {showOpenReference && (
@@ -617,107 +631,6 @@ function PluginMcpSection({ plugin, onOpenIntegrations }: { plugin: Plugin; onOp
   </section>
 }
 
-function PluginCommissioningSection({ plugin, autoStart }: { plugin: Plugin; autoStart?: boolean }) {
-  type CheckLevel = 'ok' | 'warn' | 'error'
-  type CheckItem = { id: string; label: string; level: CheckLevel; detail?: string }
-  const [items, setItems] = useState<CheckItem[] | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const autoRanFor = useRef<string | null>(null)
-
-  const run = async () => {
-    setBusy(true)
-    setError('')
-    try {
-      const checklist: CheckItem[] = []
-      const validation = await validatePlugin(plugin.manifest)
-      if (validation.valid && validation.errors.length === 0) {
-        checklist.push({
-          id: 'manifest',
-          label: 'Manifeste',
-          level: validation.warnings.length ? 'warn' : 'ok',
-          detail: validation.warnings.length ? validation.warnings.join(' · ') : 'Valide',
-        })
-      } else {
-        checklist.push({
-          id: 'manifest',
-          label: 'Manifeste',
-          level: 'error',
-          detail: validation.errors.join(' · ') || 'Validation échouée',
-        })
-      }
-
-      const servers = await getPluginMcpStatus(plugin.id)
-      if (servers.length === 0) {
-        checklist.push({ id: 'mcp', label: 'Serveurs MCP', level: 'ok', detail: 'Aucun serveur MCP à vérifier' })
-      } else {
-        const notReady = servers.filter(server => !server.configured || !server.enabled)
-        checklist.push({
-          id: 'mcp',
-          label: 'Serveurs MCP',
-          level: notReady.length ? 'warn' : 'ok',
-          detail: notReady.length
-            ? `${notReady.length} serveur(s) à configurer ou activer`
-            : `${servers.length} serveur(s) prêts`,
-        })
-        try {
-          const results = await testPluginMcp(plugin.id)
-          const failed = results.filter(result => !result.ok)
-          checklist.push({
-            id: 'mcp-test',
-            label: 'Test MCP',
-            level: failed.length ? 'error' : 'ok',
-            detail: failed.length ? failed.map(result => result.message).join(' · ') : 'Connexion MCP OK',
-          })
-        } catch (testError) {
-          checklist.push({ id: 'mcp-test', label: 'Test MCP', level: 'warn', detail: errorMessage(testError) })
-        }
-      }
-
-      setItems(checklist)
-    } catch (runError) {
-      setError(errorMessage(runError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  useEffect(() => {
-    setItems(null)
-    setError('')
-    if (autoRanFor.current === plugin.id) autoRanFor.current = null
-  }, [plugin.id])
-
-  useEffect(() => {
-    if (!autoStart || autoRanFor.current === plugin.id) return
-    autoRanFor.current = plugin.id
-    void run()
-  }, [autoStart, plugin.id])
-
-  const levelLabel = (level: CheckLevel) => (level === 'ok' ? 'OK' : level === 'warn' ? 'Attention' : 'Erreur')
-
-  return <section className="skill-detail-section plugin-commissioning" aria-label="Mise en service du plugin">
-    <h3>Mise en service</h3>
-    <p className="settings-note" style={{ marginTop: 0 }}>
-      Vérifie le manifeste, l’état des outils MCP, puis lance un test de connexion si besoin.
-    </p>
-    <button type="button" className="btn-primary compact" disabled={busy} onClick={() => void run()}>
-      {busy ? 'Vérification…' : 'Lancer la mise en service'}
-    </button>
-    {error && <p className="plugin-version-warning" role="alert">{error}</p>}
-    {items && <ul className="plugin-friendly-list">
-      {items.map((item: any) => (
-        <li key={item.id}>
-          <strong>{levelLabel(item.level)}</strong>
-          {' · '}
-          {item.label}
-          {item.detail ? ` — ${item.detail}` : ''}
-        </li>
-      ))}
-    </ul>}
-  </section>
-}
-
 function ManifestReadOnlySection({ plugin }: { plugin: Plugin }) {
   const [expanded, setExpanded] = useState(false)
   return <section className="skill-detail-section" aria-label="Manifeste du plugin">
@@ -732,7 +645,3 @@ function ManifestReadOnlySection({ plugin }: { plugin: Plugin }) {
 
 function Empty({ text }: { text: string }) { return <div className="task-empty"><span>{text}</span></div> }
 function hookEventLabel(event: string) { return ({ before_task: 'avant la tâche', after_task: 'après la tâche', task_error: 'en cas d’erreur' } as Record<string, string>)[event] ?? event }
-function formatVersionDate(value: string) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? 'Version précédente' : `Installée le ${new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' }).format(date)}`
-}

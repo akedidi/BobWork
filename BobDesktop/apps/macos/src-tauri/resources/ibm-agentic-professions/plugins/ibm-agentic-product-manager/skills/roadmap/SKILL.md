@@ -1,44 +1,52 @@
 ---
 name: roadmap
-description: "Communiquer une séquence orientée résultats, adaptable aux preuves."
+description: "Communicate a result-oriented sequence adaptable to evidence."
 icon: product
 ---
 
 # roadmap
 
-Utiliser ce skill pour communiquer une séquence orientée résultats, adaptable aux preuves.
+Use this skill to communicate a result-oriented sequence adaptable to evidence.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- Expected goal or decision;
+- Scope, audience, deadline, and constraints;
+- Available sources, assumptions, and confidence level;
+- Output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Partir des objectifs et problèmes, non d’une liste de fonctionnalités.
-2. Regrouper thèmes, outcomes, paris et jalons de validation.
-3. Ordonnancer par dépendances, capacité et apprentissage.
-4. Afficher niveau de confiance, horizons et règles de changement.
+1. Start from goals and problems, not a feature list.
+2. Group themes, outcomes, bets, and validation milestones.
+3. Order by dependencies, capacity, and learning.
+4. Show confidence level, horizons, and change rules.
 
-## Livrable
+## Deliverable
 
-Roadmap Now/Next/Later ou datée, outcomes, dépendances et confiance.
+Now/Next/Later or dated roadmap, outcomes, dependencies, and confidence.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Pas de fausse précision sur les dates.
-- Chaque item a un résultat attendu.
-- La roadmap distingue engagement et exploration.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- No false precision on dates.
+- Each item has an expected result.
+- The roadmap distinguishes commitment from exploration.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, a client reference, a compliance claim, or an approval.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points only — do not reproduce their protected materials.

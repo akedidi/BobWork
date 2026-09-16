@@ -41,18 +41,20 @@ impl PluginUserResourceService {
             .collect())
     }
 
-    pub fn paths_for_plugin_mentions(&self, message: &str) -> Vec<String> {
-        let Ok(regex) = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)") else {
-            return vec![];
-        };
+    pub fn paths_for_plugin_mentions(
+        &self,
+        message: &str,
+        known_plugin_ids: &[String],
+    ) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut paths = Vec::new();
-        for captures in regex.captures_iter(message) {
-            let plugin_id = &captures[1];
-            if !seen.insert(plugin_id.to_string()) {
+        for plugin_id in
+            crate::services::prompt_mentions::collect_plugin_mention_ids(message, known_plugin_ids)
+        {
+            if !seen.insert(plugin_id.clone()) {
                 continue;
             }
-            if let Ok(files) = self.file_paths(plugin_id) {
+            if let Ok(files) = self.file_paths(&plugin_id) {
                 paths.extend(files);
             }
         }
@@ -61,6 +63,7 @@ impl PluginUserResourceService {
 
     pub fn upload(&self, plugin_id: &str, source_path: &str) -> AppResult<PluginFileResource> {
         let plugin_id = sanitize_plugin_id(plugin_id)?;
+        reject_builtin_mutation(&plugin_id)?;
         let source = Path::new(source_path);
         if source_path.contains("..") {
             return Err(AppError::ValidationFailed(
@@ -108,6 +111,7 @@ impl PluginUserResourceService {
 
     pub fn delete_file(&self, plugin_id: &str, file_id: &str) -> AppResult<()> {
         let plugin_id = sanitize_plugin_id(plugin_id)?;
+        reject_builtin_mutation(&plugin_id)?;
         let mut overlay = Overlay::load(&plugin_id)?;
         let Some(index) = overlay.files.iter().position(|file| file.id == file_id) else {
             return Err(AppError::NotFound("Fichier introuvable.".into()));
@@ -174,15 +178,17 @@ impl PluginUserResourceService {
         Ok(overlay.linked_databases)
     }
 
-    pub fn linked_connection_ids_for_message(&self, message: &str) -> Vec<String> {
-        let Ok(regex) = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)") else {
-            return vec![];
-        };
+    pub fn linked_connection_ids_for_message(
+        &self,
+        message: &str,
+        known_plugin_ids: &[String],
+    ) -> Vec<String> {
         let mut ids = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for captures in regex.captures_iter(message) {
-            let plugin_id = &captures[1];
-            if let Ok(linked) = self.list_linked_databases(plugin_id) {
+        for plugin_id in
+            crate::services::prompt_mentions::collect_plugin_mention_ids(message, known_plugin_ids)
+        {
+            if let Ok(linked) = self.list_linked_databases(&plugin_id) {
                 for item in linked {
                     if seen.insert(item.connection_id.clone()) {
                         ids.push(item.connection_id);
@@ -227,6 +233,15 @@ fn sanitize_plugin_id(plugin_id: &str) -> AppResult<String> {
         ));
     }
     Ok(plugin_id.to_string())
+}
+
+fn reject_builtin_mutation(plugin_id: &str) -> AppResult<()> {
+    if plugin_id.starts_with("builtin-") {
+        return Err(AppError::ValidationFailed(
+            "Les plugins intégrés ne peuvent pas recevoir de fichiers ressources.".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn extension_of(file_name: &str) -> AppResult<String> {
@@ -339,29 +354,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_builtin_file_mutations() {
+        let (_home, svc) = setup();
+        let pdf = std::env::temp_dir().join(format!("bob-doc-{}.pdf", Uuid::new_v4()));
+        fs::write(&pdf, b"%PDF-1.4").unwrap();
+        let err = svc
+            .upload("builtin-word", &pdf.to_string_lossy())
+            .unwrap_err();
+        assert!(err.to_string().contains("intégrés"));
+        let err = svc.delete_file("builtin-word", "any").unwrap_err();
+        assert!(err.to_string().contains("intégrés"));
+    }
+
+    #[test]
     fn upload_list_delete_pdf_and_xlsx() {
         let (_home, svc) = setup();
         let pdf = std::env::temp_dir().join(format!("bob-doc-{}.pdf", Uuid::new_v4()));
         let xlsx = std::env::temp_dir().join(format!("bob-sheet-{}.xlsx", Uuid::new_v4()));
         fs::write(&pdf, b"%PDF-1.4").unwrap();
         fs::write(&xlsx, b"PK").unwrap();
-        let uploaded_pdf = svc.upload("builtin-word", &pdf.to_string_lossy()).unwrap();
-        let uploaded_xlsx = svc.upload("builtin-word", &xlsx.to_string_lossy()).unwrap();
-        let files = svc.list_files("builtin-word").unwrap();
+        let uploaded_pdf = svc.upload("personal-docs", &pdf.to_string_lossy()).unwrap();
+        let uploaded_xlsx = svc.upload("personal-docs", &xlsx.to_string_lossy()).unwrap();
+        let files = svc.list_files("personal-docs").unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(uploaded_pdf.kind, "pdf");
         assert_eq!(uploaded_xlsx.kind, "spreadsheet");
-        svc.delete_file("builtin-word", &uploaded_pdf.id).unwrap();
-        assert_eq!(svc.list_files("builtin-word").unwrap().len(), 1);
+        svc.delete_file("personal-docs", &uploaded_pdf.id).unwrap();
+        assert_eq!(svc.list_files("personal-docs").unwrap().len(), 1);
         let linked = svc
-            .link_database("builtin-word", "conn-1", "sales")
+            .link_database("personal-docs", "conn-1", "sales")
             .unwrap();
         assert_eq!(linked.len(), 1);
+        let known = vec!["personal-docs".to_string()];
         assert_eq!(
-            svc.linked_connection_ids_for_message("@plugin:builtin-word hello"),
+            svc.linked_connection_ids_for_message("@plugin:personal-docs hello", &known),
             vec!["conn-1"]
         );
-        let paths = svc.paths_for_plugin_mentions("@plugin:builtin-word go");
+        let paths = svc.paths_for_plugin_mentions("@plugin:personal-docs go", &known);
         assert_eq!(paths.len(), 1);
     }
 

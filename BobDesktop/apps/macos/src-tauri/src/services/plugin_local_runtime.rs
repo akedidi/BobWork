@@ -58,6 +58,12 @@ pub fn missing_tools(plugin_name: &str, manifest: &Value) -> Vec<MissingLocalToo
 }
 
 pub fn prompt_block(tools: &[MissingLocalTool]) -> Option<String> {
+    prompt_block_with_sandbox(tools, false)
+}
+
+/// Like [`prompt_block`], plus sandbox wording when host CLIs / external
+/// runtimes cannot be installed or used under isolation.
+pub fn prompt_block_with_sandbox(tools: &[MissingLocalTool], sandbox: bool) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
@@ -90,12 +96,35 @@ pub fn prompt_block(tools: &[MissingLocalTool]) -> Option<String> {
     lines.push(
         "Ne simule pas le résultat du plugin. Ne prétends pas qu’une conversion ou une commande a réussi.".to_string(),
     );
-    if tools.iter().any(|tool| tool.can_self_install) {
+    if sandbox {
+        lines.push(
+            "Mode sandbox actif : commence par « Cette action est bloquée par les limitations de la sandbox Bob Work : ce plugin dépend d’un runtime externe ». Explique que l’installation ou l’usage d’un runtime / CLI externe hors runtimes partagés plateforme n’est pas fiable en sandbox, et invite l’utilisateur à désactiver le mode sandbox dans Réglages → Permissions, puis à relancer.".to_string(),
+        );
+    } else if tools.iter().any(|tool| tool.can_self_install) {
         lines.push(
             "Si le plugin expose un outil d’installation locale (ex. docling_ensure_runtime) et que Python 3.10+ est présent, tu peux l’essayer ; si ça échoue, répète ce qu’il faut installer.".to_string(),
         );
     }
+    if sandbox && tools.iter().any(|tool| tool.can_self_install) {
+        lines.push(
+            "N’essaie pas d’installer le runtime depuis la session sandbox (HOME éphémère / ~/.bob en lecture seule) : oriente l’utilisateur vers Réglages → Runtimes hors sandbox, ou vers la désactivation du mode sandbox.".to_string(),
+        );
+    }
     Some(lines.join("\n"))
+}
+
+/// User-facing + agent text when a sandboxed session cannot run a plugin that
+/// declares `externalRuntimes`.
+pub fn external_runtime_sandbox_blocked(plugin_name: &str, runtime_id: &str, detail: &str) -> String {
+    format!(
+        "{} Plugin « {} », runtime `{}`. ({})",
+        crate::security::terminal_sandbox::sandbox_limit_message(
+            crate::security::terminal_sandbox::SandboxLimitKind::ExternalRuntime
+        ),
+        plugin_name,
+        runtime_id,
+        detail
+    )
 }
 
 /// Readiness for a stdio-cli / bundled-bin / shell / node-cli resource card.
@@ -121,7 +150,7 @@ pub fn resource_readiness(
         "shell" => {
             return (
                 "ready".into(),
-                "Script shell du plugin disponible.".into(),
+                "Plugin shell script available.".into(),
                 None,
             );
         }
@@ -133,10 +162,11 @@ pub fn resource_readiness(
         .collect::<Vec<_>>();
     if missing.is_empty() {
         let message = match kind {
-            "bundled-bin" => "Binaire trouvé (bundle plugin ou PATH).",
-            "shell" => "Script shell du plugin disponible.",
-            "node-cli" => "CLI Node du plugin disponible.",
-            _ => "CLI locale détectée.",
+            "bundled-bin" => "Binary found (plugin bundle or PATH).",
+            "shell" => "Plugin shell script available.",
+            "node-cli" => "Plugin Node CLI available.",
+            "host-cli" => "System CLI detected on this Mac.",
+            _ => "Local CLI detected.",
         };
         return ("ready".into(), message.into(), None);
     }
@@ -194,7 +224,7 @@ fn required_host_runtimes(manifest: &Value) -> Vec<String> {
     runtimes
 }
 
-fn host_runtime_available(runtime: &str) -> bool {
+pub(crate) fn host_runtime_available(runtime: &str) -> bool {
     match runtime {
         "python3" => command_on_path("python3") || command_on_path("python"),
         "node" => command_on_path("node"),
@@ -240,7 +270,7 @@ fn declared_cli_requirements(plugin_name: &str, manifest: &Value) -> Vec<CliRequ
         .unwrap_or_default();
     for resource in &resources {
         let kind = resource.get("kind").and_then(Value::as_str).unwrap_or("");
-        if !matches!(kind, "stdio-cli" | "bundled-bin") {
+        if !matches!(kind, "stdio-cli" | "bundled-bin" | "host-cli" | "external-runtime") {
             continue;
         }
         if resource.get("optional").and_then(Value::as_bool) == Some(true) {
@@ -292,6 +322,19 @@ fn inferred_command(
     resource: &Value,
     kind: &str,
 ) -> Option<String> {
+    if let Some(runtime_id) = resource
+        .get("runtimeId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(entry) = crate::services::cli_runtime_catalog::catalog_entries()
+            .iter()
+            .find(|entry| entry.runtime_id == runtime_id)
+        {
+            return Some(entry.command.to_string());
+        }
+    }
     if let Some(command) = resource
         .get("command")
         .and_then(Value::as_str)
@@ -332,26 +375,44 @@ fn inferred_command(
 
 fn default_install_hint(command: &str, package: Option<&str>, docling: bool) -> String {
     if docling || command == "docling" {
-        return "Python ≥ 3.10, puis `pip install 'docling==2.123.0'` ou l’outil MCP docling_ensure_runtime (venv ~/.bob/runtimes/docling)".into();
+        return "Installez la CLI `docling` depuis Réglages → Runtimes, ou sur le Mac ; Bob Work ne crée son venv géré qu’en secours si aucune CLI externe n’est détectée".into();
     }
     let pkg = package.unwrap_or(command);
     format!("`brew install {pkg}` ou installez la CLI `{command}`")
 }
 
 fn extra_search_paths(manifest: &Value, command: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    let mut paths = crate::services::cli_runtime_catalog::bob_cli_search_paths(command);
     if command == "docling" || is_docling(manifest) {
         if let Some(env_bin) = std::env::var_os("DOCLING_BIN") {
             paths.push(PathBuf::from(env_bin));
         }
-        let root = bob_home().join("runtimes").join("docling");
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                let bin = entry.path().join("bin").join("docling");
-                paths.push(bin);
+        for root in [
+            bob_home().join("runtimes").join("external").join("docling-cli"),
+            bob_home().join("runtimes").join("docling"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let base = entry.path();
+                    paths.push(base.join("bin").join("docling"));
+                    paths.push(base.join("venv").join("bin").join("docling"));
+                }
+            }
+            paths.push(root.join("bin").join("docling"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".local/bin/docling"));
+            let python_root = home.join("Library/Python");
+            if let Ok(entries) = std::fs::read_dir(python_root) {
+                let mut user_bins = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join("bin/docling"))
+                    .collect::<Vec<_>>();
+                user_bins.sort();
+                user_bins.reverse();
+                paths.extend(user_bins);
             }
         }
-        paths.push(root.join("bin").join("docling"));
     }
     paths
 }
@@ -446,6 +507,14 @@ fn resource_matches_tool(resource: &Value, tool: &MissingLocalTool) -> bool {
     if let Some(command) = tool.command.as_deref() {
         if resource.get("command").and_then(Value::as_str) == Some(command) {
             return true;
+        }
+        if let Some(runtime_id) = resource.get("runtimeId").and_then(Value::as_str) {
+            if crate::services::cli_runtime_catalog::catalog_entries()
+                .iter()
+                .any(|entry| entry.runtime_id == runtime_id && entry.command == command)
+            {
+                return true;
+            }
         }
         if resource.get("label").and_then(Value::as_str) == Some(tool.software.as_str()) {
             return true;
@@ -550,6 +619,42 @@ mod tests {
     }
 
     #[test]
+    fn catalog_docling_venv_counts_as_installed() {
+        let root = std::env::temp_dir().join(format!("bob-docling-catalog-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("runtimes/external/docling-cli/2.123.0/bin/docling");
+        std::fs::create_dir_all(bin.parent().unwrap()).expect("dir");
+        std::fs::write(&bin, "#!/bin/sh\necho docling 2.123.0\n").expect("bin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let previous = std::env::var("BOB_HOME").ok();
+        std::env::set_var("BOB_HOME", &root);
+        let manifest = serde_json::json!({
+            "slug": "bob-work-docling",
+            "resources": [{
+                "kind": "external-runtime",
+                "label": "CLI Docling",
+                "runtimeId": "external.docling-cli",
+                "optional": false
+            }]
+        });
+        let missing = missing_tools("Docling", &manifest);
+        match previous {
+            Some(value) => std::env::set_var("BOB_HOME", value),
+            None => std::env::remove_var("BOB_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            missing
+                .iter()
+                .all(|tool| tool.command.as_deref() != Some("docling")),
+            "catalog docling venv should count as installed: {missing:?}"
+        );
+    }
+
+    #[test]
     fn bundled_binary_in_plugin_dir_is_ready() {
         let bundle = std::env::temp_dir().join(format!("bob-bundle-{}", uuid::Uuid::new_v4()));
         let echo = bundle.join("bin/echo-tool");
@@ -586,5 +691,26 @@ mod tests {
         .expect("prompt");
         assert!(prompt.contains("docling_ensure_runtime"));
         assert!(prompt.contains("Docling"));
+    }
+
+    #[test]
+    fn sandbox_prompt_tells_user_to_leave_sandbox_for_external_runtime() {
+        let tool = MissingLocalTool {
+            plugin_name: "Docling".into(),
+            software: "CLI Docling".into(),
+            command: Some("docling".into()),
+            package: Some("docling".into()),
+            install_hint: "Réglages → Runtimes".into(),
+            can_self_install: true,
+        };
+        let prompt = prompt_block_with_sandbox(&[tool], true).expect("prompt");
+        assert!(prompt.contains("limitations de la sandbox Bob Work"));
+        assert!(prompt.contains("runtime externe"));
+        assert!(prompt.contains("Réglages → Permissions"));
+        assert!(!prompt.contains("docling_ensure_runtime"));
+        let blocked = external_runtime_sandbox_blocked("Qiskit", "external.qiskit", "not installed");
+        assert!(blocked.contains("runtime externe"));
+        assert!(blocked.contains("external.qiskit"));
+        assert!(blocked.contains("Réglages → Permissions"));
     }
 }

@@ -1,44 +1,52 @@
 ---
 name: communication-plan
-description: "Orchestrer des communications ciblées qui permettent l’action."
+description: "Orchestrate targeted communications that enable action."
 icon: change
 ---
 
 # communication-plan
 
-Utiliser ce skill pour orchestrer des communications ciblées qui permettent l’action.
+Use this skill to orchestrate targeted communications that enable action.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Segmenter audiences par impact et besoin.
-2. Définir objectif, message, émetteur crédible, canal, moment et call to action.
-3. Coordonner répétition, localisation, accessibilité et feedback.
-4. Mesurer compréhension et comportement, pas seulement ouverture.
+1. Segment audiences by impact and need.
+2. Define objective, message, credible sender, channel, timing, and call to action.
+3. Coordinate repetition, localization, accessibility, and feedback.
+4. Measure comprehension and behavior, not just open rates.
 
-## Livrable
+## Deliverable
 
-Matrice de communication, calendrier, messages et métriques.
+Communication matrix, schedule, messages, and metrics.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Le message répond à ce qui change pour moi.
-- Les managers disposent de kits et réponses.
-- Les canaux sont accessibles.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- The message answers "what changes for me."
+- Managers have kits and talking points.
+- Channels are accessible.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

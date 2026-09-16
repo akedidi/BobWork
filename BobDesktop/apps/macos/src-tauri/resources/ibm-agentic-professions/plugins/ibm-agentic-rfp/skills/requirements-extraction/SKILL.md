@@ -1,44 +1,52 @@
 ---
 name: requirements-extraction
-description: "Extraire des exigences atomiques, testables et traçables."
+description: "Extract atomic, testable, and traceable requirements."
 icon: rfp
 ---
 
 # requirements-extraction
 
-Utiliser ce skill pour extraire des exigences atomiques, testables et traçables.
+Use this skill to extract atomic, testable, and traceable requirements.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Parcourir le corpus complet, tableaux, annexes et formulaires compris.
-2. Scinder les phrases composites en obligations atomiques.
-3. Classer obligatoire, évalué, informatif, contractuel ou ambigu.
-4. Attribuer identifiant stable, source exacte, responsable et preuve attendue.
+1. Review the full corpus, including tables, annexes, and forms.
+2. Split compound sentences into atomic obligations.
+3. Classify as mandatory, evaluated, informational, contractual, or ambiguous.
+4. Assign a stable identifier, exact source, owner, and expected evidence.
 
-## Livrable
+## Deliverable
 
-Registre d’exigences atomiques avec traçabilité source.
+Atomic requirements register with source traceability.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Exhaustivité contrôlée par seconde passe.
-- Les termes shall/must/doit et équivalents sont conservés.
-- Les doublons restent reliés à toutes leurs sources.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Completeness verified by a second pass.
+- Terms such as shall/must and equivalents are preserved.
+- Duplicates remain linked to all their sources.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.

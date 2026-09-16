@@ -1,13 +1,61 @@
 use crate::db::Database;
 use crate::error::AppError;
 use crate::models::approval::{Approval, ResolveApprovalInput};
+use crate::models::conversation::AddMessageInput;
 use crate::models::workspace::CreatePermissionGrantInput;
 use crate::services::audit::AuditService;
+use crate::services::conversation::ConversationService;
 use crate::services::permission_governance::ACTION_SESSION_START;
+use crate::services::task::TaskService;
 use crate::services::workspace::WorkspaceService;
 use chrono::Utc;
 use rusqlite::params;
-use tauri::{AppHandle, Emitter, State};
+use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+fn workspace_for_task(
+    app_handle: &AppHandle,
+    db: &Database,
+    task_id: &str,
+) -> Option<PathBuf> {
+    let task = crate::services::task::TaskService::new()
+        .get_by_id(db, task_id)
+        .ok()
+        .flatten()?;
+    let conversation_id = task.conversation_id.filter(|value| !value.is_empty())?;
+    let project_local_path = task
+        .project_id
+        .as_deref()
+        .and_then(|project_id| {
+            crate::services::project::ProjectService::new()
+                .get_by_id(db, project_id)
+                .ok()
+                .flatten()
+                .and_then(|project| project.local_path)
+        })
+        .or_else(|| {
+            crate::services::conversation::ConversationService::new()
+                .get_by_id(db, &conversation_id)
+                .ok()
+                .flatten()
+                .and_then(|conversation| {
+                    conversation.project_id.and_then(|project_id| {
+                        crate::services::project::ProjectService::new()
+                            .get_by_id(db, &project_id)
+                            .ok()
+                            .flatten()
+                            .and_then(|project| project.local_path)
+                    })
+                })
+        });
+    let app_data_dir = app_handle.path().app_data_dir().ok()?;
+    crate::services::attachment_staging::resolve_workspace_root(
+        project_local_path.as_deref(),
+        &app_data_dir,
+        &conversation_id,
+    )
+    .ok()
+}
 
 fn e2e_data_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("BOB_WORK_E2E_DATA_DIR").map(std::path::PathBuf::from)
@@ -113,10 +161,23 @@ pub async fn resolve_approval(
         )?;
     }
 
+    let permission_group = crate::services::permission_governance::approval_group(&action_type);
+    let conversation_id = crate::services::task::TaskService::new()
+        .get_by_id(&db, &task_id)
+        .ok()
+        .flatten()
+        .and_then(|task| task.conversation_id);
     let _ = AuditService::new().approval_event(&db, &approval_id, &input.decision, &risk_level);
     let _ = app_handle.emit(
         "approval-resolved",
-        serde_json::json!({ "id": &approval_id, "decision": &input.decision }),
+        serde_json::json!({
+            "id": &approval_id,
+            "decision": &input.decision,
+            "permissionDuration": input.permission_duration,
+            "permissionGroup": permission_group,
+            "taskId": task_id,
+            "conversationId": conversation_id,
+        }),
     );
 
     if input.decision == "approved" {
@@ -148,7 +209,11 @@ pub async fn resolve_approval(
                     .map(|s| s.sandbox_mode)
                     .unwrap_or(true);
                 launch.options.sandbox_mode |= sandbox;
-                launch.options.trust_workspace = !launch.options.sandbox_mode;
+                launch.options.trust_workspace =
+                    !crate::services::permission_governance::task_group_explicitly_denied(
+                        &launch.options.task_approval.allowed_permissions,
+                        "edit",
+                    );
                 bob_service.start_streaming_session(
                     app_handle.clone(),
                     launch.session_id,
@@ -166,11 +231,26 @@ pub async fn resolve_approval(
         } else {
             let _ = bob_service.take_pending_launch(&approval_id);
             if !task_id.is_empty() {
-                let _ = crate::services::task::TaskService::new().update_state(
+                let _ = TaskService::new().update_state(
                     &db,
                     &task_id,
                     "cancelled",
                 );
+                let _ = TaskService::new().clear_resumable_for_task(&db, &task_id);
+                if let Some(cid) = conversation_id.as_deref() {
+                    let locale = match crate::services::settings::SettingsService::new().get(&db) {
+                        Ok(settings) => {
+                            crate::services::agent_locale::resolve_app_locale(&settings.language)
+                        }
+                        Err(_) => crate::services::agent_locale::AppLocale::En,
+                    };
+                    post_permission_denied_message(
+                        &app_handle,
+                        &db,
+                        cid,
+                        crate::services::agent_locale::session_start_denied_message(locale),
+                    );
+                }
             }
         }
         if !task_id.is_empty() {
@@ -186,8 +266,81 @@ pub async fn resolve_approval(
         return Ok(());
     }
 
+    if crate::services::permission_governance::is_composer_permission_group(permission_group)
+        && !task_id.is_empty()
+    {
+        if input.decision == "approved" {
+            let duration = input
+                .permission_duration
+                .clone()
+                .unwrap_or_else(|| "once".into());
+            // « Autoriser le groupe » persists for the task; « une fois » only
+            // widens the follow-up launch (apply_composer_group_grant).
+            if duration != "once" {
+                if let Some(config) = bob_service.task_approval(&task_id) {
+                    if !config
+                        .allowed_permissions
+                        .iter()
+                        .any(|permission| permission == permission_group)
+                    {
+                        let mut next = config;
+                        next.allowed_permissions.push(permission_group.to_string());
+                        bob_service.set_task_approval(&task_id, next);
+                    }
+                }
+            }
+            // Wait for the blocked run to finish (WorkspaceApprovalGuard drop)
+            // before starting the follow-up — otherwise the old guard restores
+            // .bob/settings.json without the grant and the resume hangs.
+            if let Some(session_id) = bob_service.session_id_for_task(&task_id) {
+                bob_service.queue_permission_grant(
+                    &task_id,
+                    permission_group.to_string(),
+                    duration.clone(),
+                );
+                let _ = bob_service.cancel_session(&session_id);
+            } else {
+                let _ = bob_service.start_composer_permission_resume(
+                    app_handle.clone(),
+                    &db,
+                    &task_id,
+                    permission_group,
+                    &duration,
+                );
+            }
+            let _ = crate::services::task::TaskService::new()
+                .update_state(&db, &task_id, "running");
+        } else {
+            // Session is usually already cancelled when the permission card
+            // appeared (headless stdin cannot wait). Still clear resume state
+            // so the next user turn cannot revive the blocked write via
+            // `--resume`, and leave a short closing message in the thread.
+            finalize_composer_permission_denial(
+                &app_handle,
+                &db,
+                &bob_service,
+                &task_id,
+                conversation_id.as_deref(),
+                permission_group,
+            );
+        }
+        let _ = app_handle.emit("task-updated", &task_id);
+        return Ok(());
+    }
+
     // Legacy path: try to forward y/n to an active Bob stdin (usually unavailable headless).
     if !task_id.is_empty() {
+        if input.decision == "approved" {
+            if let Some(config) = bob_service.task_approval(&task_id) {
+                if let Some(workspace) = workspace_for_task(&app_handle, &db, &task_id) {
+                    let _ = crate::services::bob::grant_workspace_bob_approval_for_action(
+                        &workspace,
+                        &action_type,
+                        &config,
+                    );
+                }
+            }
+        }
         let decision_str = if input.decision == "approved" {
             "y"
         } else {
@@ -292,6 +445,63 @@ pub async fn e2e_seed_approval(
         None,
     );
     Ok(approval)
+}
+
+fn post_permission_denied_message(
+    app_handle: &AppHandle,
+    db: &Database,
+    conversation_id: &str,
+    content: &str,
+) {
+    if ConversationService::new()
+        .add_message(
+            db,
+            AddMessageInput {
+                conversation_id: conversation_id.to_string(),
+                author: "assistant".into(),
+                content: content.to_string(),
+                attachments: None,
+                sources: None,
+            },
+        )
+        .is_ok()
+    {
+        let _ = app_handle.emit("conversation-messages-changed", conversation_id);
+        let _ = app_handle.emit("conversation-updated", conversation_id);
+    }
+}
+
+fn finalize_composer_permission_denial(
+    app_handle: &AppHandle,
+    db: &Database,
+    bob_service: &crate::services::bob::BobService,
+    task_id: &str,
+    conversation_id: Option<&str>,
+    permission_group: &str,
+) {
+    bob_service.clear_permission_resume(task_id);
+    bob_service.clear_task_approval(task_id);
+    if let Some(session_id) = bob_service.session_id_for_task(task_id) {
+        let _ = bob_service.cancel_session(&session_id);
+    }
+    let _ = TaskService::new().update_state(db, task_id, "cancelled");
+    let _ = TaskService::new().clear_resumable_for_task(db, task_id);
+    if let Some(conversation_id) = conversation_id.filter(|id| !id.is_empty()) {
+        let label =
+            crate::services::permission_governance::composer_group_label_fr(permission_group);
+        let locale = match crate::services::settings::SettingsService::new().get(db) {
+            Ok(settings) => {
+                crate::services::agent_locale::resolve_app_locale(&settings.language)
+            }
+            Err(_) => crate::services::agent_locale::AppLocale::En,
+        };
+        post_permission_denied_message(
+            app_handle,
+            db,
+            conversation_id,
+            &crate::services::agent_locale::permission_group_denied_message(locale, label),
+        );
+    }
 }
 
 #[cfg(feature = "e2e")]

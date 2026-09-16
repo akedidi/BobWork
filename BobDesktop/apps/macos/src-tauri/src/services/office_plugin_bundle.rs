@@ -1,5 +1,6 @@
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,47 @@ const DOCLING_MCP_SERVER: &str = include_str!("../../resources/docling/mcp/serve
 pub struct OfficePluginBundle;
 
 impl OfficePluginBundle {
+    /// Fingerprint every packaged input that can affect the files deployed for
+    /// this plugin. A version string alone cannot detect an edited embedded
+    /// script or archive before the next public version bump.
+    pub fn deployment_fingerprint(plugin_id: &str, manifest: &Value) -> AppResult<String> {
+        let mut digest = Sha256::new();
+        digest.update(b"bob-work-plugin-deployment-v2\0");
+        // Generated at compile time from the complete resources tree. This
+        // makes newly added embedded modules participate automatically, even
+        // before a plugin-specific fingerprint branch exists for them.
+        digest.update(env!("BOB_EMBEDDED_RESOURCES_SHA256").as_bytes());
+        digest.update(b"\0");
+        digest.update(plugin_id.as_bytes());
+        digest.update(b"\0");
+        digest.update(serde_json::to_vec(manifest).map_err(|error| {
+            AppError::Plugin(format!("Failed to fingerprint plugin manifest: {error}"))
+        })?);
+
+        if Self::is_cloud_architect_bundle(manifest) {
+            digest.update(CLOUD_ARCHITECT_BUNDLE);
+        } else if Self::is_ibm_agentic_profession_bundle(manifest) {
+            digest.update(IBM_AGENTIC_PROFESSIONS_BUNDLE);
+        } else if Self::is_cto_bundle(manifest) {
+            digest.update(CTO_MARKET_LIB.as_bytes());
+            digest.update(CTO_MCP_SERVER.as_bytes());
+            digest.update(CTO_CLI_SCRIPT.as_bytes());
+        } else if Self::is_ibm_pursuit_bundle(manifest) {
+            digest.update(IBM_PURSUIT_LIB.as_bytes());
+            digest.update(IBM_PURSUIT_MCP_SERVER.as_bytes());
+            digest.update(IBM_PURSUIT_CLI_SCRIPT.as_bytes());
+        } else if Self::is_docling_bundle(manifest) {
+            digest.update(DOCLING_RUNTIME.as_bytes());
+            digest.update(DOCLING_CLI_SCRIPT.as_bytes());
+            digest.update(DOCLING_BIN_SHIM.as_bytes());
+            digest.update(DOCLING_MCP_SERVER.as_bytes());
+        } else if let Some(script) = Self::mcp_script_for(manifest) {
+            digest.update(script.as_bytes());
+        }
+
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
     pub fn is_office_bundle(manifest: &Value) -> bool {
         Self::mcp_script_for(manifest).is_some()
             || Self::is_cto_bundle(manifest)
@@ -182,6 +224,14 @@ impl OfficePluginBundle {
         manifest: &Value,
         overwrite_embedded: bool,
     ) -> AppResult<()> {
+        if overwrite_embedded {
+            let obsolete_skill = skill_dir.join("skills/senior-cloud-architect");
+            if obsolete_skill.is_dir() {
+                std::fs::remove_dir_all(&obsolete_skill)?;
+            } else if obsolete_skill.exists() {
+                std::fs::remove_file(&obsolete_skill)?;
+            }
+        }
         let cursor = Cursor::new(CLOUD_ARCHITECT_BUNDLE);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|error| {
             AppError::Plugin(format!("Failed to open Cloud Architect bundle: {}", error))
@@ -606,20 +656,22 @@ mod tests {
             "../../resources/cloud-architect/manifest.json"
         ))
         .expect("manifest");
+        let obsolete = temp.join("skills/senior-cloud-architect");
+        std::fs::create_dir_all(&obsolete).expect("obsolete skill directory");
+        std::fs::write(obsolete.join("SKILL.md"), "legacy").expect("obsolete skill");
 
-        OfficePluginBundle::write_bundle(&temp, "builtin-cloud-architect", &manifest, true)
+        OfficePluginBundle::write_bundle(&temp, "agentic-cloud-architect", &manifest, true)
             .expect("bundle");
 
-        assert!(temp
-            .join("skills/senior-cloud-architect/SKILL.md")
-            .is_file());
+        assert!(temp.join("skills/cloud-architect/SKILL.md").is_file());
+        assert!(!obsolete.exists());
         assert!(temp.join("scripts/d2_runtime.py").is_file());
         let d2 = temp.join("vendor/d2/v0.7.1/bin/d2");
         assert!(d2.is_file());
         assert!(fs::metadata(&d2).expect("D2 metadata").len() > 1_000_000);
         assert_eq!(
             fs::read_to_string(temp.join(".bob-work-plugin-id")).expect("plugin id"),
-            "builtin-cloud-architect"
+            "agentic-cloud-architect"
         );
         let _ = fs::remove_dir_all(temp);
     }
@@ -706,7 +758,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-designer/manifest.json"
                 ),
                 "skills/accessibility-audit/SKILL.md",
-                10,
             ),
             (
                 "builtin-ibm-agentic-consultant",
@@ -714,7 +765,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-consultant/manifest.json"
                 ),
                 "skills/red-team-review/SKILL.md",
-                10,
             ),
             (
                 "builtin-ibm-agentic-rfp",
@@ -722,7 +772,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-rfp/manifest.json"
                 ),
                 "skills/compliance-matrix/SKILL.md",
-                8,
             ),
             (
                 "builtin-ibm-agentic-product-manager",
@@ -730,7 +779,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-product-manager/manifest.json"
                 ),
                 "skills/rice/SKILL.md",
-                11,
             ),
             (
                 "builtin-ibm-agentic-delivery-manager",
@@ -738,7 +786,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-delivery-manager/manifest.json"
                 ),
                 "skills/raid/SKILL.md",
-                10,
             ),
             (
                 "builtin-ibm-agentic-change-manager",
@@ -746,7 +793,6 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-change-manager/manifest.json"
                 ),
                 "skills/adkar/SKILL.md",
-                10,
             ),
             (
                 "builtin-ibm-agentic-solution-architect",
@@ -754,11 +800,10 @@ mod tests {
                     "../../resources/ibm-agentic-professions/plugins/ibm-agentic-solution-architect/manifest.json"
                 ),
                 "skills/c4/SKILL.md",
-                14,
             ),
         ];
 
-        for (plugin_id, raw_manifest, expected_skill, expected_count) in cases {
+        for (plugin_id, raw_manifest, expected_skill) in cases {
             let temp = std::env::temp_dir().join(format!(
                 "bob-work-agentic-profession-bundle-{}",
                 uuid::Uuid::new_v4()
@@ -784,7 +829,7 @@ mod tests {
             assert_eq!(deployed_manifest["builtin"], true);
             assert_eq!(
                 deployed_manifest["skills"].as_array().map(Vec::len),
-                Some(expected_count),
+                manifest["skills"].as_array().map(Vec::len),
                 "{plugin_id}"
             );
             let _ = fs::remove_dir_all(temp);

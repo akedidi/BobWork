@@ -1,44 +1,52 @@
 ---
 name: adkar
-description: "Utiliser ADKAR comme grille de diagnostic individuel et collectif."
+description: "Use ADKAR as an individual and collective diagnostic framework."
 icon: change
 ---
 
 # ADKAR
 
-Utiliser ce skill pour utiliser ADKAR comme grille de diagnostic individuel et collectif.
+Use this skill to use ADKAR as an individual and collective diagnostic framework.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Identifier le résultat de changement attendu et les populations.
-2. Évaluer où se situe le principal obstacle dans la progression ADKAR.
-3. Choisir interventions adaptées au diagnostic plutôt qu’un plan générique.
-4. Mesurer progression et renforcer les nouveaux comportements.
+1. Identify the expected change outcome and populations.
+2. Assess where the main obstacle sits in the ADKAR progression.
+3. Choose interventions suited to the diagnosis rather than a generic plan.
+4. Measure progress and reinforce new behaviors.
 
-## Livrable
+## Deliverable
 
-Diagnostic ADKAR par segment et plan d’intervention.
+ADKAR diagnosis by segment and intervention plan.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Référencer la source officielle pour toute adaptation méthodologique.
-- Ne pas reproduire de contenu Prosci propriétaire.
-- Le diagnostic repose sur des observations.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Reference the official source for any methodological adaptation.
+- Do not reproduce proprietary Prosci content.
+- The diagnosis is based on observations.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

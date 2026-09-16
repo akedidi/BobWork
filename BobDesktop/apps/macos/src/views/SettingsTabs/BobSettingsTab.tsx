@@ -19,16 +19,17 @@ const BobalyticsPanel = lazy(() => import('../BobalyticsPanel'))
   
 
 export default function BobSettingsTab(props: any) {
-  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
+  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, installingBob, uninstall, uninstallingBob, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
   const dialog = useAppDialog()
   const navigate = useNavigate()
   const loadingLabel = t('common.loading')
+  const bobBusy = installingBob || uninstallingBob
 
   return (
     <>
-      <Heading title="IBM Bob Shell" description="Bob Work pilote l’installation locale et injecte la clé API uniquement dans le processus bob run." />
-          {(usageLoading || usage?.available) && (
-            <Card title="Consommation Bobcoins">
+      <Heading title={t('settings.bobHeading')} description={t('settings.bobDesc')} />
+          {authReady && (usageLoading || usage?.available) && (
+            <Card title={t('settings.bobcoinsUsage')}>
               {usageLoading ? (
                 <SectionLoader label={loadingLabel} />
               ) : (
@@ -40,84 +41,145 @@ export default function BobSettingsTab(props: any) {
             </Card>
           )}
           <Card>
-            <StatusRow title="Installation" value={installationLabel} ok={profileLoading ? undefined : installationFound} loading={profileLoading} />
             <StatusRow
-              title="Authentification · bob run"
+              title={t('settings.installation')}
+              value={installingBob
+                ? t('settings.bobInstalling')
+                : uninstallingBob
+                  ? t('settings.bobUninstalling')
+                  : installationLabel}
+              ok={profileLoading || bobBusy ? undefined : installationFound}
+              loading={profileLoading || bobBusy}
+            />
+            <StatusRow
+              title={t('settings.bobRunAuthentication')}
               value={authReady
-                ? authenticationLabel(authMethod)
-                : profileLoading ? 'Vérification…' : 'Authentification requise'}
+                ? authenticationLabel(authMethod, t)
+                : profileLoading ? t('settings.checking') : t('settings.authRequired')}
               ok={profileLoading ? undefined : authReady}
               loading={profileLoading && !authReady}
             />
-            <StatusRow title="Emplacement" value={profile?.detection.path ?? authSnapshot?.path ?? (profileLoading ? loadingLabel : '—')} loading={profileLoading && !profile && !authSnapshot} />
+            <StatusRow title={t('settings.locationPath')} value={profile?.detection.path ?? authSnapshot?.path ?? (profileLoading ? loadingLabel : '—')} loading={profileLoading && !profile && !authSnapshot} />
+            {installingBob && (
+              <div className="settings-install-busy" role="status" aria-live="polite">
+                <span className="task-spinner" aria-hidden="true" />
+                {t('settings.bobInstalling')}
+              </div>
+            )}
+            {uninstallingBob && (
+              <div className="settings-install-busy" role="status" aria-live="polite">
+                <span className="task-spinner" aria-hidden="true" />
+                {t('settings.bobUninstalling')}
+              </div>
+            )}
             <div className="settings-actions">
-              {!installationFound && !profileLoading && <button type="button" className="btn-primary" onClick={install}>Installer la version officielle</button>}
+              {(!installationFound || installingBob) && !profileLoading && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={bobBusy}
+                  aria-busy={installingBob}
+                  onClick={() => void install()}
+                >
+                  {installingBob
+                    ? <><span className="task-spinner" aria-hidden="true" />{t('settings.bobInstalling')}</>
+                    : t('settings.installOfficial')}
+                </button>
+              )}
+              {installationFound && !profileLoading && (
+                <button
+                  type="button"
+                  className="danger-link"
+                  disabled={bobBusy}
+                  aria-busy={uninstallingBob}
+                  onClick={async () => {
+                    if (!await dialog.confirm({
+                      message: t('settings.bobUninstallConfirm'),
+                      confirmLabel: t('settings.bobUninstall'),
+                      destructive: true,
+                    })) return
+                    void uninstall()
+                  }}
+                >
+                  {uninstallingBob
+                    ? <><span className="task-spinner" aria-hidden="true" />{t('settings.bobUninstalling')}</>
+                    : t('settings.bobUninstall')}
+                </button>
+              )}
               <button
                 type="button"
                 className="btn-primary"
-                disabled={profileLoading}
+                disabled={profileLoading || bobBusy}
                 aria-busy={profileLoading}
                 onClick={() => void refreshProfile(true)}
               >
                 {profileLoading
-                  ? <><span className="task-spinner" aria-hidden="true" />Vérification…</>
-                  : 'Revérifier'}
+                  ? <><span className="task-spinner" aria-hidden="true" />{t('settings.checking')}</>
+                  : t('settings.recheck')}
               </button>
             </div>
           </Card>
-          <Card title="Clé IBM Bob">
+          <Card title={t('settings.bobKeyHeading')}>
             <p className="settings-note">
-              Si vous êtes déjà connecté à IBM Bob (IDE / Shell), Bob Work réutilise cette session pour <code>bob run</code> et les Bobcoins.
-              Vous pouvez aussi enregistrer une clé d’inférence dans le coffre local chiffré (injection uniquement dans le processus <code>bob run</code>).
+              {t('settings.bobKeyDesc')}
             </p>
             <StatusRow
-              title="Coffre local"
-              value={profileLoading ? loadingLabel : sessionKeyStatus.vaultKeyPresent ? 'Clé d’inférence présente' : 'Aucune clé enregistrée'}
+              title={t('settings.localVault')}
+              value={profileLoading ? loadingLabel : sessionKeyStatus.vaultKeyPresent ? t('settings.inferenceKeyPresent') : t('settings.noSavedKey')}
               ok={profileLoading ? undefined : sessionKeyStatus.vaultKeyPresent}
               loading={profileLoading}
             />
             {!profileLoading && sessionKeyStatus.source === 'environment' && (
-              <StatusRow title="Environnement" value="Clé fournie au lancement de l’app" ok />
+              <StatusRow title={t('settings.environment')} value={t('settings.keyProvidedAtLaunch')} ok />
             )}
             {!profileLoading && (sessionKeyStatus.source === 'sso' || (sessionKeyStatus.active && !sessionKeyStatus.vaultKeyPresent && sessionKeyStatus.source !== 'environment')) && (
-              <StatusRow title="Session IBM Bob" value="SSO détectée (~/.bob/settings/auth-secrets.json)" ok />
+              <StatusRow title={t('settings.bobSession')} value={t('settings.ssoDetected')} ok />
             )}
             {sessionKeyStatus.vaultKeyPresent && <div className="settings-actions">
-              <button className="danger-link" onClick={async () => { await bobAuthService.clearSessionApiKey(); setStatus('Clé effacée du coffre local.'); await refreshProfile() }}>Effacer du coffre</button>
+              <button className="danger-link" onClick={async () => {
+                if (!await dialog.confirm({
+                  message: t('settings.clearVaultConfirm'),
+                  confirmLabel: t('settings.clearVault'),
+                  destructive: true,
+                })) return
+                await bobAuthService.clearSessionApiKey()
+                showTransientStatus(t('settings.vaultKeyCleared'))
+                await refreshProfile()
+              }}>{t('settings.clearVault')}</button>
             </div>}
             <div className="vault-secret-fields">
               <strong>
                 {sessionKeyStatus.vaultKeyPresent
-                  ? 'Remplacer la clé enregistrée'
-                  : 'Enregistrer une clé IBM Bob'}
+                  ? t('settings.replaceSavedKey')
+                  : t('settings.saveBobKey')}
               </strong>
               <input type="password" aria-label={t('onboarding.apiKeyLabel')} value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={t('onboarding.apiKeyLabel')} />
-              <button className="btn-primary" disabled={!apiKey.trim()} onClick={() => void saveKey()}>Enregistrer dans le coffre</button>
+              <button className="btn-primary" disabled={!apiKey.trim()} onClick={() => void saveKey()}>{t('settings.saveInVault')}</button>
             </div>
-            <button className="link-btn" onClick={() => openUrl('https://bob.ibm.com/')}>Ouvrir bob.ibm.com ↗</button>
+            <button className="link-btn" onClick={() => openUrl('https://bob.ibm.com/')}>{t('settings.openBobWebsite')}</button>
           </Card>
-          <div className="settings-warning">La clé et les jetons d’intégration restent disponibles après redémarrage de Bob Work tant qu’ils n’ont pas été effacés du coffre. Les planifications peuvent donc réutiliser ces secrets, y compris lorsque l’écran est verrouillé.</div>
-          {!usageLoading && !usage?.available && (
-            <Card title="Consommation Bobcoins">
+          <div className="settings-warning">{t('settings.secretsPersistenceWarning')}</div>
+          {authReady && !usageLoading && !usage?.available && (
+            <Card title={t('settings.bobcoinsUsage')}>
               <UsageMeter usage={usage} />
-              <p className="settings-note">{usage?.message ?? 'Indisponible'}</p>
+              <p className="settings-note">{usage?.message ?? t('settings.statusUnavailable')}</p>
               <div className="settings-actions">
-                <button className="secondary-btn" onClick={() => void refreshProfile(false, true)}>Actualiser</button>
+                <button className="secondary-btn" onClick={() => void refreshProfile(false, true)}>{t('settings.refresh')}</button>
               </div>
             </Card>
           )}
-          {!usageLoading && usage?.available && (
+          {authReady && !usageLoading && usage?.available && (
             <div className="settings-actions">
-              <button className="secondary-btn" onClick={() => void refreshProfile(false, true)}>Actualiser la consommation</button>
+              <button className="secondary-btn" onClick={() => void refreshProfile(false, true)}>{t('settings.refreshUsage')}</button>
             </div>
           )}
-          {bobExtrasReady ? (
+          {authReady && (bobExtrasReady ? (
             <Suspense fallback={<SectionLoader label={loadingLabel} />}>
               <BobalyticsPanel />
             </Suspense>
           ) : (
             <SectionLoader label={loadingLabel} />
-          )}
+          ))}
     </>
   )
 }

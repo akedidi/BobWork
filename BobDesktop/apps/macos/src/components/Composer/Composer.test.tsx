@@ -1,10 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { open } from '@tauri-apps/plugin-dialog'
 import Composer, { resizeComposerTextarea } from './Composer'
 import { AppDialogProvider } from '../AppDialog'
+import { useAppStore } from '../../stores/appStore'
 
 const mocks = vi.hoisted(() => ({
   getPlugins: vi.fn(),
@@ -14,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   getDbConnections: vi.fn(),
   listBobSlashCommands: vi.fn(),
   allowComposerAttachments: vi.fn(),
+  readClipboardAttachmentPaths: vi.fn(),
+  writeClipboardAttachmentImage: vi.fn(),
   startNativeAudioRecording: vi.fn(),
   stopNativeAudioRecording: vi.fn(),
   getNativeAudioRecordingLevel: vi.fn(),
@@ -54,6 +57,8 @@ vi.mock('../../lib/ipc', () => ({
   getDbConnections: mocks.getDbConnections,
   listBobSlashCommands: mocks.listBobSlashCommands,
   allowComposerAttachments: mocks.allowComposerAttachments,
+  readClipboardAttachmentPaths: mocks.readClipboardAttachmentPaths,
+  writeClipboardAttachmentImage: mocks.writeClipboardAttachmentImage,
   startNativeAudioRecording: mocks.startNativeAudioRecording,
   stopNativeAudioRecording: mocks.stopNativeAudioRecording,
   getNativeAudioRecordingLevel: mocks.getNativeAudioRecordingLevel,
@@ -70,6 +75,7 @@ async function renderComposer(props: Partial<ComponentProps<typeof Composer>> = 
 describe('Composer popovers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useAppStore.setState({ bobStatus: 'ready' })
     mocks.getPlugins.mockResolvedValue([])
     mocks.getSkills.mockResolvedValue([])
     mocks.getIntegrationStatuses.mockResolvedValue([])
@@ -83,7 +89,11 @@ describe('Composer popovers', () => {
       { name: 'copy', description: 'Copy from conversation history', source: 'fallback' },
       { name: 'init', description: 'Initialize project context', source: 'fallback' },
     ])
-    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
+    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) =>
+      paths.map(path => ({ path, isDirectory: path.endsWith('dossier-projet') })),
+    )
+    mocks.readClipboardAttachmentPaths.mockResolvedValue([])
+    mocks.writeClipboardAttachmentImage.mockResolvedValue('/tmp/paste-clipboard.png')
     mocks.startNativeAudioRecording.mockResolvedValue(undefined)
     mocks.stopNativeAudioRecording.mockResolvedValue({
       id: 'meeting-1',
@@ -154,6 +164,25 @@ describe('Composer popovers', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mode Bob : Agent' }))
     expect(screen.queryByRole('menu', { name: 'Ajouter une pièce jointe' })).not.toBeInTheDocument()
     expect(screen.getByRole('menu', { name: 'Modes Bob' })).toBeVisible()
+  })
+
+  it('restores the conversation mode and reports a user mode change', async () => {
+    const onModeChange = vi.fn()
+    const view = await renderComposer({ initialMode: 'plan', onModeChange })
+    expect(screen.getByRole('button', { name: 'Mode Bob : Plan' })).toBeVisible()
+
+    await act(async () => {
+      view.rerender(
+        <AppDialogProvider>
+          <MemoryRouter>
+            <Composer showModePill showProjectPill initialMode="agent" onModeChange={onModeChange} />
+          </MemoryRouter>
+        </AppDialogProvider>,
+      )
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Mode Bob : Agent' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Plan / }))
+    expect(onModeChange).toHaveBeenCalledWith('plan')
   })
 
   it('shows a distinct no-project icon in the project picker', async () => {
@@ -242,6 +271,8 @@ describe('Composer popovers', () => {
     fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
     fireEvent.click(screen.getByRole('button', { name: /Dossier/ }))
     await waitFor(() => expect(screen.getByText('dossier-projet')).toBeVisible())
+    expect(screen.getByText('Dossier')).toBeVisible()
+    expect(screen.queryByText('FICHIER')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retirer' }))
     expect(screen.queryByText('dossier-projet')).not.toBeInTheDocument()
   })
@@ -260,6 +291,27 @@ describe('Composer popovers', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'photo.png' })).toBeVisible())
     expect(screen.getByText('note.txt')).toBeVisible()
     expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/photo.png', '/tmp/note.txt'])
+  })
+
+  it('colle des fichiers Finder comme des pièces jointes (⌘V)', async () => {
+    mocks.readClipboardAttachmentPaths.mockResolvedValue(['/tmp/capture.png', '/tmp/notes.pdf'])
+    await renderComposer()
+
+    const textarea = screen.getByRole('textbox')
+    const pasteEvent = createEvent.paste(textarea)
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: {
+        types: ['Files'],
+        files: [],
+        items: [],
+      },
+    })
+    fireEvent(textarea, pasteEvent)
+
+    await waitFor(() => expect(screen.getByRole('img', { name: 'capture.png' })).toBeVisible())
+    expect(screen.getByText('notes.pdf')).toBeVisible()
+    expect(mocks.readClipboardAttachmentPaths).toHaveBeenCalled()
+    expect(mocks.allowComposerAttachments).toHaveBeenCalledWith(['/tmp/capture.png', '/tmp/notes.pdf'])
   })
 
   it('accepte le drag & drop HTML avec chemins injectés par Tauri', async () => {
@@ -393,6 +445,36 @@ describe('Composer popovers', () => {
     expect(screen.getByRole('button', { name: 'Gérer les plugins' })).toBeVisible()
   })
 
+  it('masque les MCP bob-work du menu Intégrations & MCP', async () => {
+    mocks.getMcpServers.mockResolvedValue([
+      {
+        name: 'bob-work-microsoft',
+        transport: 'stdio',
+        commandOrUrl: 'python3',
+        args: ['microsoft_server.py'],
+        enabled: true,
+        status: 'ready',
+        builtin: true,
+        raw: {},
+      },
+      {
+        name: 'mcp-custom-hub',
+        transport: 'stdio',
+        commandOrUrl: 'python3',
+        args: ['hub.py'],
+        enabled: true,
+        status: 'ready',
+        raw: {},
+      },
+    ])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
+    expect(menu).toHaveTextContent('mcp-custom-hub')
+    expect(menu).not.toHaveTextContent('bob-work-microsoft')
+  })
+
   it('liste les intégrations MCP connectées dans le menu plus', async () => {
     mocks.getIntegrationStatuses.mockResolvedValue([{
       integrationId: 'github',
@@ -428,7 +510,7 @@ describe('Composer popovers', () => {
 
     fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
     const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
-    expect(menu).toHaveTextContent('Intégrations MCP')
+    expect(menu).toHaveTextContent('Intégrations & MCP')
     expect(menu).toHaveTextContent('GitHub')
     expect(menu).toHaveTextContent('mcp-custom-hub')
     const githubRow = screen.getByRole('button', { name: /GitHub/ })
@@ -437,7 +519,34 @@ describe('Composer popovers', () => {
     expect(githubRow.querySelector('.attach-row-action')).toBeTruthy()
 
     fireEvent.click(githubRow)
-    expect(screen.getByRole('textbox')).toHaveValue('@skill:bob-work-github ')
+    expect(screen.getByRole('textbox')).toHaveValue('@integration:github ')
+  })
+
+  it('présente une API REST comme API et insère une mention api', async () => {
+    mocks.getMcpServers.mockResolvedValue([{
+      name: 'tmdb',
+      transport: 'stdio',
+      commandOrUrl: 'python3',
+      args: ['/tmp/rest_api_server.py'],
+      enabled: true,
+      status: 'ready',
+      raw: { env: {
+        BOB_WORK_API_KIND: 'rest',
+        BOB_WORK_API_BASE_URL: 'https://api.themoviedb.org/3',
+        BOB_WORK_API_SECRET: '<redacted>',
+      } },
+    }])
+    await renderComposer()
+
+    fireEvent.click(screen.getByTitle('Joindre un fichier ou un dossier'))
+    const menu = await screen.findByRole('menu', { name: 'Ajouter une pièce jointe' })
+    expect(menu).toHaveTextContent('APIs configurées')
+    const tmdbRow = await screen.findByRole('button', { name: /tmdb/i })
+    expect(tmdbRow).toHaveTextContent('REST · https://api.themoviedb.org/3')
+    expect(tmdbRow).not.toHaveTextContent('MCP')
+
+    fireEvent.click(tmdbRow)
+    expect(screen.getByRole('textbox')).toHaveValue('@api:tmdb ')
   })
 
   it('shows Plugins before Skills in one shared scroll body', async () => {
@@ -580,11 +689,38 @@ describe('Composer popovers', () => {
     fireEvent.click(screen.getByRole('option', { name: /sales/ }))
     expect(screen.getByRole('textbox')).toHaveValue('@db:sales ')
   })
+
+  it('garde @ actif au milieu du prompt et désactive la complétion des mots', async () => {
+    mocks.getDbConnections.mockResolvedValue([{
+      id: 'db-1',
+      name: 'sales',
+      engine: 'postgresql',
+      config: { host: 'localhost', port: 5432 },
+      hasSecret: true,
+      enabled: true,
+      createdAt: '2026-08-28T00:00:00Z',
+      updatedAt: '2026-08-28T00:00:00Z',
+    }])
+    await renderComposer()
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    expect(input).toHaveAttribute('autocomplete', 'off')
+    expect(input).toHaveAttribute('autocorrect', 'off')
+    expect(input).toHaveAttribute('autocapitalize', 'off')
+    expect(input).toHaveAttribute('spellcheck', 'false')
+
+    fireEvent.change(input, { target: { value: 'avant @sa après' } })
+    input.setSelectionRange('avant @sa'.length, 'avant @sa'.length)
+    fireEvent.select(input)
+    expect(await screen.findByText('Ajouter au prompt')).toBeVisible()
+    fireEvent.click(screen.getByRole('option', { name: /sales/ }))
+    expect(input).toHaveValue('avant @db:sales  après')
+  })
 })
 
 describe('Composer slash autocomplete', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useAppStore.setState({ bobStatus: 'ready' })
     mocks.getPlugins.mockResolvedValue([])
     mocks.getSkills.mockResolvedValue([])
     mocks.getIntegrationStatuses.mockResolvedValue([])
@@ -598,7 +734,9 @@ describe('Composer slash autocomplete', () => {
       { name: 'copy', description: 'Copy from conversation history', source: 'fallback' },
       { name: 'init', description: 'Initialize project context', source: 'fallback' },
     ])
-    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) => paths)
+    mocks.allowComposerAttachments.mockImplementation(async (paths: string[]) =>
+      paths.map(path => ({ path, isDirectory: path.endsWith('dossier-projet') })),
+    )
   })
 
   it('shows native Bob commands when the user types /', async () => {
@@ -638,5 +776,18 @@ describe('Composer slash autocomplete', () => {
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(screen.queryByText('Commandes Bob')).not.toBeInTheDocument()
     expect(input).toHaveValue('/co')
+  })
+
+  it('shows an API key hint and disables send when Bob is unauthenticated', async () => {
+    useAppStore.setState({ bobStatus: 'unauthenticated' })
+    const onSend = vi.fn()
+    await renderComposer({ onSend })
+    expect(screen.getByRole('alert')).toHaveTextContent('Aucune clé API valide')
+    expect(screen.getByRole('button', { name: 'Réglages → IBM Bob Shell' })).toBeVisible()
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'Bonjour' } })
+    expect(screen.getByRole('button', { name: 'Envoyer le prompt' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    expect(onSend).not.toHaveBeenCalled()
   })
 })

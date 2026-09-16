@@ -31,6 +31,13 @@ pub enum AppError {
     #[error("Security error: {0}")]
     Security(String),
 
+    /// Sandboxed run hit a hard resource or policy ceiling.
+    #[error("{message}")]
+    SandboxLimitExceeded {
+        kind: String,
+        message: String,
+    },
+
     #[error("IO error: {0}")]
     Io(String),
 

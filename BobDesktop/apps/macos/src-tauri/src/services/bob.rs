@@ -8,7 +8,8 @@ use crate::error::{AppError, AppResult};
 use crate::services::plugin_extensions::PreparedPluginHook;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -158,6 +159,163 @@ pub struct BobRunOptions {
     /// Vault secrets for `@db:` connections, injected as `BOB_DB_*_PASSWORD`.
     #[serde(default, skip)]
     pub db_environment: std::collections::HashMap<String, String>,
+    /// Task-scoped auto-approve groups selected in the composer (Bob IDE parity).
+    #[serde(default)]
+    pub task_approval: TaskApprovalConfig,
+    /// When true, unchecked composer groups are tracked for approval cards
+    /// (Bob IDE ask-on-use). Tools stay registered; `.bob/settings.json` gates
+    /// auto-approval. Scheduled tasks leave this false.
+    #[serde(default)]
+    pub enforce_composer_permissions: bool,
+    /// Composer groups that are not auto-approved for this run (card + revert).
+    /// Not passed to `bob run --disable-tool-groups` (that hid tools and broke cards).
+    #[serde(default)]
+    pub disable_tool_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskApprovalConfig {
+    #[serde(default)]
+    pub auto_approval_enabled: bool,
+    #[serde(default)]
+    pub allowed_permissions: Vec<String>,
+}
+
+/// Task-scoped Bob Shell approval injected into `<workspace>/.bob/settings.json`.
+#[derive(Debug)]
+struct WorkspaceApprovalPatch {
+    settings_path: PathBuf,
+    previous_bytes: Option<Vec<u8>>,
+    /// Bytes we wrote. On drop, restore only if the file still matches — a
+    /// follow-up « Autoriser une fois » run may already have patched again.
+    written_bytes: Vec<u8>,
+}
+
+struct WorkspaceApprovalGuard(Option<WorkspaceApprovalPatch>);
+
+impl Drop for WorkspaceApprovalGuard {
+    fn drop(&mut self) {
+        if let Some(patch) = self.0.take() {
+            let _ = restore_workspace_bob_approval(patch);
+        }
+    }
+}
+
+/// Sync Bob Shell workspace approval policy from the composer permission grants.
+/// Always writes the current task policy so stale `.bob/settings.json` entries
+/// cannot auto-approve actions the user disabled in Bob Work.
+///
+/// Bob IDE parity: `autoApprovalEnabled` stays true so the allow-list works;
+/// unchecked composer groups are simply absent from `allowed_permissions` and
+/// require an explicit card when the tool is called. Headless `bob run` must
+/// not rely on `--disable-tool-groups` for this gate (that removes the tools
+/// and prevents the card from ever appearing).
+///
+/// When `allow_outside_workspace` is true (sandbox mode), set
+/// `outsideWorkspaceAllowed` so `write_file` can target host
+/// `~/.bob/skills/<slug>/` for skill/plugin creation. Bob Shell already treats
+/// `$HOME/.bob/**` as in-bounds when `$HOME` is the private sandbox HOME; this
+/// flag covers absolute host paths. Seatbelt still denies Desktop/Documents/etc.
+pub(crate) fn patch_workspace_bob_approval(
+    workspace: &Path,
+    config: &TaskApprovalConfig,
+    ensure_subagents: bool,
+    allow_outside_workspace: bool,
+) -> AppResult<Option<WorkspaceApprovalPatch>> {
+    let bob_dir = workspace.join(".bob");
+    std::fs::create_dir_all(&bob_dir)?;
+    let settings_path = bob_dir.join("settings.json");
+    let previous_bytes = settings_path
+        .exists()
+        .then(|| std::fs::read(&settings_path))
+        .transpose()?;
+
+    let mut settings: serde_json::Value = previous_bytes
+        .as_ref()
+        .map(|bytes| serde_json::from_slice(bytes))
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Composer checkboxes are the allow-list (Bob IDE). The master toggle is
+    // UI-only for bulk select; an empty list means ask for every group.
+    // MCP stays allowed for Shell so `mcp__…` bridge tools are not blocked
+    // mid-run; ask-on-use cards are reserved for explicit composer groups.
+    let mut allowed_permissions = config.allowed_permissions.clone();
+    if !allowed_permissions.iter().any(|permission| permission == "mcp") {
+        allowed_permissions.push("mcp".to_string());
+    }
+    // When Extensions → Subagents is on, keep `subagent` auto-approved so Bob
+    // Shell actually registers/spawns children (otherwise the live status frame
+    // never appears because spawn_subagent is never called).
+    if ensure_subagents && !allowed_permissions.iter().any(|permission| permission == "subagent") {
+        allowed_permissions.push("subagent".to_string());
+    }
+    let mut approval = serde_json::json!({
+        "autoApprovalEnabled": true,
+        "allowed_permissions": allowed_permissions,
+    });
+    if allow_outside_workspace {
+        approval["outsideWorkspaceAllowed"] = serde_json::json!(true);
+    }
+    settings["approval"] = approval;
+
+    let written_bytes = serde_json::to_vec_pretty(&settings)?;
+    std::fs::write(&settings_path, &written_bytes)?;
+
+    Ok(Some(WorkspaceApprovalPatch {
+        settings_path,
+        previous_bytes,
+        written_bytes,
+    }))
+}
+
+/// Headless Bob Shell cannot read interactive stdin. After a one-off manual
+/// approval, temporarily widen the workspace approval policy so the pending
+/// tool call can proceed.
+pub(crate) fn grant_workspace_bob_approval_for_action(
+    workspace: &Path,
+    action_type: &str,
+    config: &TaskApprovalConfig,
+) -> AppResult<()> {
+    let group = crate::services::permission_governance::approval_group(action_type);
+    let mut allowed_permissions = config.allowed_permissions.clone();
+    if !allowed_permissions.iter().any(|permission| permission == group) {
+        allowed_permissions.push(group.to_string());
+    }
+    let bob_dir = workspace.join(".bob");
+    std::fs::create_dir_all(&bob_dir)?;
+    let settings_path = bob_dir.join("settings.json");
+    let mut settings: serde_json::Value = settings_path
+        .exists()
+        .then(|| std::fs::read(&settings_path))
+        .transpose()?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["approval"] = serde_json::json!({
+        "autoApprovalEnabled": true,
+        "allowed_permissions": allowed_permissions,
+    });
+    std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
+    Ok(())
+}
+
+fn restore_workspace_bob_approval(patch: WorkspaceApprovalPatch) -> AppResult<()> {
+    if patch.settings_path.exists() {
+        if let Ok(current) = std::fs::read(&patch.settings_path) {
+            if current != patch.written_bytes {
+                // A newer session already replaced our approval patch.
+                return Ok(());
+            }
+        }
+    }
+    if let Some(bytes) = patch.previous_bytes {
+        std::fs::write(&patch.settings_path, bytes)?;
+    } else if patch.settings_path.exists() {
+        std::fs::remove_file(&patch.settings_path)?;
+    }
+    Ok(())
 }
 
 impl Default for BobRunOptions {
@@ -177,6 +335,9 @@ impl Default for BobRunOptions {
             trust_workspace: false,
             allow_visible_chrome: false,
             db_environment: std::collections::HashMap::new(),
+            task_approval: TaskApprovalConfig::default(),
+            enforce_composer_permissions: false,
+            disable_tool_groups: vec![],
         }
     }
 }
@@ -223,6 +384,375 @@ pub fn explicitly_requests_visible_chrome(message: &str) -> bool {
     }) || normalized.contains("http://")
         || normalized.contains("https://");
     has_action_word && has_browser_target
+}
+
+/// Explicit map plugin mention — ensures map MCP is present in sandbox HOME.
+pub fn explicitly_requests_map_tools(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    normalized.contains("@plugin:builtin-map-tools")
+        || normalized.contains("@plugin:map-tools")
+        || normalized.contains("$map-tools")
+        || normalized.contains("@skill:map-tools")
+        || normalized.contains("builtin-map-tools")
+}
+
+/// Computer Use stays out of the sandbox (host desktop control). Chrome is
+/// allowed via the host AppleScript bridge remounted into the Linux VM.
+fn sandbox_excluded_mcp_name(name: &str) -> bool {
+    use crate::services::computer_use_mcp::COMPUTER_USE_MCP_NAME;
+    name == COMPUTER_USE_MCP_NAME || name.starts_with("bob-work-computer")
+}
+
+fn directory_size_for_quota(root: &Path) -> u64 {
+    fn walk(path: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&path, total);
+            } else {
+                *total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(root, &mut total);
+    total
+}
+
+fn map_sandbox_os_error(message: &str) -> Option<String> {
+    use crate::security::terminal_sandbox::{sandbox_limit_message, SandboxLimitKind};
+    let lower = message.to_lowercase();
+    if lower.contains("operation not permitted")
+        || lower.contains("eperm")
+        || lower.contains("permission denied")
+    {
+        return Some(sandbox_limit_message(SandboxLimitKind::FileAccess));
+    }
+    if lower.contains("network is unreachable")
+        || lower.contains("connection refused")
+        || lower.contains("no route to host")
+        || lower.contains("network is down")
+    {
+        // Guest private-network denies often surface as generic connect failures.
+        if lower.contains("10.")
+            || lower.contains("192.168.")
+            || lower.contains("172.")
+            || lower.contains("169.254.")
+            || lower.contains("localhost")
+            || lower.contains("127.0.0.1")
+        {
+            return Some(sandbox_limit_message(SandboxLimitKind::PrivateNetwork));
+        }
+    }
+    if lower.contains("cannot allocate memory")
+        || lower.contains("out of memory")
+        || lower.contains("enomem")
+    {
+        return Some(sandbox_limit_message(SandboxLimitKind::Memory));
+    }
+    if lower.contains("cpu time limit") || lower.contains("rlimit_cpu") {
+        return Some(sandbox_limit_message(SandboxLimitKind::Cpu));
+    }
+    if lower.contains("file too large") || lower.contains("rlimit_fsize") {
+        return Some(sandbox_limit_message(SandboxLimitKind::FileSize));
+    }
+    None
+}
+
+fn push_sandbox_mcp_read_path(path: &str, out: &mut Vec<PathBuf>) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.starts_with("${") {
+        return;
+    }
+    let candidate = PathBuf::from(trimmed);
+    if !candidate.is_absolute() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let bob_root = home.join(".bob");
+    if candidate.starts_with(&bob_root) {
+        out.push(candidate);
+    }
+}
+
+fn collect_sandbox_mcp_read_paths(server: &serde_json::Value, out: &mut Vec<PathBuf>) {
+    if let Some(cwd) = server.get("cwd").and_then(|v| v.as_str()) {
+        push_sandbox_mcp_read_path(cwd, out);
+    }
+    if let Some(command) = server.get("command").and_then(|v| v.as_str()) {
+        push_sandbox_mcp_read_path(command, out);
+    }
+    if let Some(args) = server.get("args").and_then(|v| v.as_array()) {
+        for arg in args {
+            if let Some(text) = arg.as_str() {
+                if text.starts_with('/')
+                    || text.ends_with(".py")
+                    || text.ends_with(".js")
+                    || text.ends_with(".mjs")
+                    || text.ends_with(".ts")
+                {
+                    push_sandbox_mcp_read_path(text, out);
+                }
+            }
+        }
+    }
+}
+
+fn push_sandbox_runtime_path(path: &str, out: &mut Vec<PathBuf>) {
+    push_sandbox_mcp_read_path(path, out);
+}
+
+/// Remount host `~/.bob` (skills + shared LaTeX/Pandoc/Office/diagram runtimes)
+/// so plugins that declare sharedCapabilities keep working in sandbox mode.
+fn collect_sandbox_runtime_read_paths(
+    db: &crate::db::Database,
+    manager: &crate::services::runtime_manager::RuntimeManager,
+    attachment_paths: &[String],
+    out: &mut Vec<PathBuf>,
+) {
+    for capability in ["latex", "pandoc"] {
+        if let Ok(handle) =
+            manager.resolve_platform_capability(db, "bob-work.document-tools", capability)
+        {
+            for (_key, value) in &handle.environment {
+                push_sandbox_runtime_path(value, out);
+            }
+            if let Some(executable) = handle.executable.as_deref() {
+                push_sandbox_runtime_path(executable, out);
+            }
+        }
+    }
+    if let Ok(office_env) = manager.office_session_environment(db, attachment_paths) {
+        for (_key, value) in office_env {
+            push_sandbox_runtime_path(&value, out);
+        }
+    }
+    // Whole host ~/.bob — skills + runtimes (diagram/D2, docling, python) so
+    // internal platform capabilities stay usable with sandbox_mode=true.
+    if let Some(home) = dirs::home_dir() {
+        let bob = home.join(".bob");
+        if bob.is_dir() {
+            out.push(bob);
+        }
+    }
+}
+
+struct SandboxMcpPlan {
+    config: serde_json::Value,
+    extra_reads: Vec<PathBuf>,
+}
+
+/// Copy a filtered host `mcp.json` into the isolated sandbox HOME and collect
+/// `~/.bob` paths the Linux VM must remount (scripts under /Users).
+fn plan_host_mcp_servers() -> serde_json::Map<String, serde_json::Value> {
+    let mut servers = serde_json::Map::new();
+    let Some(home) = dirs::home_dir() else {
+        return servers;
+    };
+    for path in [
+        home.join(".bob/settings/mcp.json"),
+        home.join(".bob/settings/mcp_settings.json"),
+    ] {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(map) = json
+            .get("mcpServers")
+            .or_else(|| json.get("servers"))
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+        for (name, server) in map {
+            if sandbox_excluded_mcp_name(name) {
+                continue;
+            }
+            servers.insert(name.clone(), server.clone());
+        }
+    }
+    servers
+}
+
+fn plan_sandbox_mcp(prompt: &str, attachment_paths: &[String], chrome_enabled: bool) -> AppResult<SandboxMcpPlan> {
+    let mut servers = serde_json::Map::new();
+    let mut extra_reads = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for path in [
+            home.join(".bob/settings/mcp.json"),
+            home.join(".bob/settings/mcp_settings.json"),
+        ] {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let Some(map) = json
+                .get("mcpServers")
+                .or_else(|| json.get("servers"))
+                .and_then(|v| v.as_object())
+            else {
+                continue;
+            };
+            for (name, server) in map {
+                if sandbox_excluded_mcp_name(name) {
+                    continue;
+                }
+                collect_sandbox_mcp_read_paths(server, &mut extra_reads);
+                servers.insert(name.clone(), server.clone());
+            }
+        }
+    }
+
+    let lazy = crate::services::mcp_lazy::plan_mcp_for_prompt(
+        prompt,
+        attachment_paths,
+        chrome_enabled,
+        false,
+    );
+    let servers = crate::services::mcp_lazy::apply_mcp_plan(&servers, &lazy);
+    tracing::debug!("Sandbox MCP lazy plan: {} ({:?})", lazy.reason, lazy.mode);
+
+    let config = serde_json::json!({ "mcpServers": servers });
+    Ok(SandboxMcpPlan {
+        config,
+        extra_reads,
+    })
+}
+
+fn write_sandbox_mcp(sandbox_home: &Path, mut plan: SandboxMcpPlan, ensure_map: bool) -> AppResult<()> {
+    if ensure_map {
+        let source = crate::services::map_mcp::MapMcpService::ensure_bundle()?;
+        let maps = sandbox_home.join(".bob").join("resources").join("maps");
+        std::fs::create_dir_all(&maps)?;
+        std::fs::copy(source.join("server.py"), maps.join("server.py"))?;
+        let location = source.join("current-location.json");
+        if location.is_file() {
+            let _ = std::fs::copy(&location, maps.join("current-location.json"));
+        }
+        if let Some(servers) = plan
+            .config
+            .get_mut("mcpServers")
+            .and_then(|v| v.as_object_mut())
+        {
+            servers.insert(
+                crate::services::map_mcp::MAP_MCP_NAME.into(),
+                crate::services::map_mcp::MapMcpService::mcp_config(&maps),
+            );
+        }
+    }
+    let settings = sandbox_home.join(".bob").join("settings");
+    std::fs::create_dir_all(&settings)?;
+    std::fs::write(
+        settings.join("mcp.json"),
+        serde_json::to_string_pretty(&plan.config).map_err(|error| {
+            AppError::Serialization(format!("sandbox mcp.json: {error}"))
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Bob Shell reads `$HOME/.bob/settings/settings.json` for
+/// `approval.outsideWorkspaceAllowed`. Workspace `.bob/settings.json` alone is
+/// not enough (task overrides only cover allowed_permissions / autoApproval).
+/// Enable it in the private sandbox HOME so `write_file` can target host
+/// `~/.bob/skills/<slug>/` (skill/plugin creation). Seatbelt still denies other
+/// host paths (Desktop, Documents, settings, vault, …).
+fn write_sandbox_outside_workspace_approval(sandbox_home: &Path) -> AppResult<()> {
+    let settings_dir = sandbox_home.join(".bob").join("settings");
+    std::fs::create_dir_all(&settings_dir)?;
+    let settings_path = settings_dir.join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.is_file() {
+        serde_json::from_slice(&std::fs::read(&settings_path)?).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    let approval = settings
+        .as_object_mut()
+        .unwrap()
+        .entry("approval")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = approval.as_object_mut() {
+        obj.insert("outsideWorkspaceAllowed".into(), serde_json::json!(true));
+    }
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&settings).map_err(|error| {
+            AppError::Serialization(format!("sandbox settings.json: {error}"))
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Expose host platform skills + shared runtimes at `$HOME/.bob/{skills,runtimes}`
+/// inside the private sandbox HOME. Seatbelt remounts the real host paths, but
+/// agents resolve `$HOME/.bob/...` — without these links the tree looks empty
+/// and plugins fall back to Graphviz.
+fn link_sandbox_host_bob_platform(sandbox_home: &Path) -> AppResult<()> {
+    let Some(real_home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    let host_bob = real_home.join(".bob");
+    if !host_bob.is_dir() {
+        return Ok(());
+    }
+    let sandbox_bob = sandbox_home.join(".bob");
+    std::fs::create_dir_all(&sandbox_bob)?;
+    for name in ["skills", "runtimes"] {
+        let target = host_bob.join(name);
+        if !target.exists() {
+            continue;
+        }
+        let link = sandbox_bob.join(name);
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if std::fs::canonicalize(&link).ok().as_ref()
+                    == std::fs::canonicalize(&target).ok().as_ref()
+                {
+                    continue;
+                }
+                std::fs::remove_file(&link)?;
+            }
+            Ok(_) => {
+                // Do not replace a real directory (settings/resources live here).
+                continue;
+            }
+            Err(_) => {}
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, &link)?;
+        }
+    }
+    Ok(())
+}
+
+/// Locate the shared Diagram Runtime `d2` binary under a materialized root.
+fn shared_diagram_d2_executable(working_root: &Path) -> Option<PathBuf> {
+    let direct = working_root.join("vendor/d2/v0.7.1/bin/d2");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let vendor = working_root.join("vendor/d2");
+    let entries = std::fs::read_dir(vendor).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("bin/d2");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Deferred `bob run` waiting on a preflight approval decision.
@@ -317,6 +847,7 @@ fn snapshot_workspace(root: Option<&Path>) -> WorkspaceSnapshot {
                     matches!(
                         name,
                         ".git"
+                            | ".bob-work"
                             | "node_modules"
                             | "target"
                             | ".next"
@@ -355,10 +886,507 @@ fn snapshot_workspace(root: Option<&Path>) -> WorkspaceSnapshot {
     snapshot
 }
 
+/// Rewrite ephemeral sandbox HOME paths in assistant text / deliverable lists
+/// to durable host paths. Skill/plugin writes go through `$HOME/.bob/skills`
+/// (symlink to the host); without this rewrite the chat keeps dead
+/// `/var/folders/.../bob-isolated-…/.bob/skills/...` links next to a working
+/// host chip — two "outputs" for one `SKILL.md`.
+pub(crate) fn rewrite_sandbox_home_paths(text: &str, sandbox_home: &Path) -> String {
+    let Some(real_home) = dirs::home_dir() else {
+        return text.to_string();
+    };
+    let sandbox = sandbox_home.to_string_lossy();
+    let host = real_home.to_string_lossy();
+    if sandbox.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.replace(sandbox.as_ref(), host.as_ref());
+    // Also catch leftover bob-isolated temps if sandbox_home was already dropped
+    // from the string form (canonical vs non-canonical /private/var vs /var).
+    static ISOLATED_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = ISOLATED_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(?:/private)?/var/folders/[^/\s)'\]]+/[^/\s)'\]]+/T/bob-isolated-[^/\s)'\]]+",
+        )
+        .expect("isolated sandbox path regex")
+    });
+    out = re
+        .replace_all(&out, host.as_ref())
+        .into_owned();
+    out
+}
+
+pub(crate) fn rewrite_sandbox_home_path_list(
+    paths: Vec<String>,
+    sandbox_home: &Path,
+) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|path| rewrite_sandbox_home_paths(&path, sandbox_home))
+        .collect()
+}
+
+fn rewrite_sandbox_file_changes(
+    changes: Vec<FileChange>,
+    sandbox_home: &Path,
+) -> Vec<FileChange> {
+    changes
+        .into_iter()
+        .map(|change| FileChange {
+            path: rewrite_sandbox_home_paths(&change.path, sandbox_home),
+            change_type: change.change_type,
+        })
+        .collect()
+}
+
+/// Bob Work internal artifacts that may appear during a session but are not
+/// user deliverables and are often deleted immediately afterwards.
+fn is_ephemeral_workspace_path(path: &Path) -> bool {
+    let mut inside_bob_work = false;
+    let mut inside_bob_dir = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        if name == ".bob-work" {
+            inside_bob_work = true;
+        }
+        if name == ".bob" {
+            inside_bob_dir = true;
+        }
+    }
+    if inside_bob_work {
+        return true;
+    }
+    if inside_bob_dir && path.file_name() == Some(OsStr::new("settings.json")) {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with("bob-work-recording-")
+                || name.ends_with(".recording.json")
+                || name.ends_with(".microphone.m4a")
+                || name.ends_with(".system_audio.m4a")
+        })
+}
+
+/// A user-facing deliverable must exist on disk, be readable, pass path policy,
+/// and must not be a Bob Work internal artifact.
+pub(crate) fn is_accessible_user_deliverable(path: &Path) -> bool {
+    if is_ephemeral_workspace_path(path) {
+        return false;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    if !canonical.is_file() {
+        return false;
+    }
+    if std::fs::File::open(&canonical).is_err() {
+        return false;
+    }
+    crate::security::path_validation::validate_path(&canonical, &[]).is_ok()
+}
+
+pub(crate) fn filter_accessible_deliverable_paths(paths: Vec<String>) -> Vec<String> {
+    let mut filtered = paths
+        .into_iter()
+        .filter(|path| is_accessible_user_deliverable(Path::new(path)))
+        .collect::<Vec<_>>();
+    filtered.sort();
+    filtered.dedup();
+    filtered
+}
+
+pub(crate) fn filter_published_file_changes(changes: Vec<FileChange>) -> Vec<FileChange> {
+    changes
+        .into_iter()
+        .filter(|change| match change.change_type.as_str() {
+            "created" | "modified" => is_accessible_user_deliverable(Path::new(&change.path)),
+            "deleted" => true,
+            _ => false,
+        })
+        .collect()
+}
+
+fn path_extension_lower(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn is_office_document_path(path: &str) -> bool {
+    matches!(
+        path_extension_lower(path).as_str(),
+        "ppt" | "pptx" | "doc" | "docx" | "xls" | "xlsx" | "xlsm"
+    )
+}
+
+/// When a turn produced an Office document, hide helper `.py` scripts from the
+/// user-facing created-files / sources lists (they are implementation detail).
+pub(crate) fn suppress_office_helper_python(
+    deliverable_paths: &mut Vec<String>,
+    file_changes: &mut Vec<FileChange>,
+) {
+    let has_office = deliverable_paths.iter().any(|path| is_office_document_path(path))
+        || file_changes
+            .iter()
+            .any(|change| is_office_document_path(&change.path));
+    if !has_office {
+        return;
+    }
+    deliverable_paths.retain(|path| path_extension_lower(path) != "py");
+    file_changes.retain(|change| path_extension_lower(&change.path) != "py");
+}
+
+/// Skip empty / trivial HTML shells that would render as blank Live previews.
+pub(crate) fn is_nontrivial_html_deliverable(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.len() < 80 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = compact.to_ascii_lowercase();
+    if lower == "<html></html>"
+        || lower == "<!doctypehtml><html></html>"
+        || lower == "<html><head></head><body></body></html>"
+        || lower == "<!doctypehtml><html><head></head><body></body></html>"
+    {
+        return false;
+    }
+    true
+}
+
+fn is_workspace_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file"
+            | "apply_diff"
+            | "insert_content"
+            | "search_and_replace"
+            | "delete_file"
+            | "remove_file"
+            | "edit_file"
+    )
+}
+
+/// Composer unchecked « Edit »: drop unauthorized created files so they
+/// are not shown as deliverables. Modified existing files cannot be restored
+/// from the fingerprint snapshot.
+pub(crate) fn revert_unauthorized_workspace_writes(
+    changes: Vec<FileChange>,
+    edit_denied: bool,
+) -> (Vec<FileChange>, Vec<String>) {
+    if !edit_denied {
+        return (changes, Vec::new());
+    }
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    for change in changes {
+        if change.change_type == "created" {
+            let path = Path::new(&change.path);
+            let deleted = if path.is_dir() {
+                std::fs::remove_dir_all(path).is_ok()
+            } else {
+                std::fs::remove_file(path).is_ok()
+            };
+            if deleted || !path.exists() {
+                removed.push(change.path);
+                continue;
+            }
+        }
+        kept.push(change);
+    }
+    (kept, removed)
+}
+
+fn display_file_name_list(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string()
+        })
+        .collect()
+}
+
+fn unauthorized_edit_notice(removed: &[String], remaining: &[FileChange]) -> Option<String> {
+    unauthorized_edit_notice_for_locale(
+        crate::services::agent_locale::AppLocale::Fr,
+        removed,
+        remaining,
+    )
+}
+
+fn unauthorized_edit_notice_for_locale(
+    locale: crate::services::agent_locale::AppLocale,
+    removed: &[String],
+    remaining: &[FileChange],
+) -> Option<String> {
+    let modified_paths: Vec<String> = remaining
+        .iter()
+        .filter(|change| change.change_type == "modified")
+        .map(|change| change.path.clone())
+        .collect();
+    crate::services::agent_locale::unauthorized_edit_notice(
+        locale,
+        &display_file_name_list(removed),
+        &display_file_name_list(&modified_paths),
+    )
+}
+
+fn relabel_denied_workspace_write(
+    protocol: &mut ProtocolEvent,
+    edit_denied: bool,
+    locale: crate::services::agent_locale::AppLocale,
+) {
+    if !edit_denied || !protocol.tool_name.as_deref().is_some_and(is_workspace_write_tool) {
+        return;
+    }
+    if protocol.event_type == "tool_started" {
+        protocol.title = Some("Edit — approval required".into());
+        protocol.content = Some(
+            crate::services::agent_locale::edit_approval_required_content(locale).into(),
+        );
+        return;
+    }
+    if !matches!(
+        protocol.event_type.as_str(),
+        "tool_finished" | "tool_error"
+    ) {
+        return;
+    }
+    protocol.title = Some("Edit denied".into());
+    protocol.content = Some(crate::services::agent_locale::edit_denied_content(locale).into());
+}
+
+fn emit_composer_permission_card<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    conversation_id: &str,
+    task_id: Option<&str>,
+    action_type: &str,
+    description: &str,
+    command: Option<&str>,
+    files: Vec<String>,
+    risk_level: &str,
+) {
+    use tauri::{Emitter, Manager};
+    let approval_id = format!("appr_{}", uuid::Uuid::new_v4());
+    let now = chrono::Utc::now().to_rfc3339();
+    let resolved_task_id = task_id.unwrap_or("").to_string();
+    let approval = crate::models::approval::Approval {
+        id: approval_id,
+        task_id: resolved_task_id,
+        action_type: action_type.to_string(),
+        human_description: description.to_string(),
+        command_or_change: command.map(str::to_string),
+        data_accessed: serde_json::json!([]),
+        files_affected: serde_json::json!(files),
+        network_destination: None,
+        risk_level: risk_level.to_string(),
+        decision: "pending".into(),
+        permission_duration: None,
+        decided_by: None,
+        decided_at: None,
+        undo_possible: false,
+        created_at: now,
+    };
+    {
+        let db = app_handle.state::<crate::db::Database>();
+        let conn = db.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO approvals (id, task_id, action_type, human_description, command_or_change, data_accessed, files_affected, network_destination, risk_level, decision, permission_duration, decided_by, decided_at, undo_possible, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                approval.id,
+                approval.task_id,
+                approval.action_type,
+                approval.human_description,
+                approval.command_or_change,
+                approval.data_accessed.to_string(),
+                approval.files_affected.to_string(),
+                approval.network_destination,
+                approval.risk_level,
+                approval.decision,
+                approval.permission_duration,
+                approval.decided_by,
+                approval.decided_at,
+                approval.undo_possible,
+                approval.created_at
+            ],
+        );
+        drop(conn);
+        if let Some(task_id) = task_id {
+            let _ = crate::services::task::TaskService::new().update_state(
+                &db,
+                task_id,
+                "awaiting_approval",
+            );
+        }
+    }
+    let _ = app_handle.emit("approval-required", &approval);
+    crate::services::notify::notify_approval_required(
+        app_handle,
+        description,
+        task_id,
+        Some(conversation_id),
+    );
+}
+
+fn persist_discovered_shell_task_id<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    task_id: Option<&str>,
+    shell_task_id: &str,
+) {
+    use tauri::Manager;
+    let Some(task_id) = task_id.filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let db = app_handle.state::<crate::db::Database>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = db.conn.lock().unwrap().execute(
+        "UPDATE tasks SET shell_task_id=?1, resumable=1, updated_at=?2 WHERE id=?3",
+        rusqlite::params![shell_task_id, now, task_id],
+    );
+}
+
+pub(crate) fn apply_composer_group_grant(options: &mut BobRunOptions, group: &str) {
+    if !options
+        .task_approval
+        .allowed_permissions
+        .iter()
+        .any(|permission| permission == group)
+    {
+        options
+            .task_approval
+            .allowed_permissions
+            .push(group.to_string());
+    }
+    options.task_approval.auto_approval_enabled = true;
+    options.disable_tool_groups = crate::services::permission_governance::disabled_tool_groups(
+        &options.task_approval.allowed_permissions,
+        options.enforce_composer_permissions,
+    );
+    if group == "edit" {
+        options.trust_workspace = true;
+    }
+}
+
+/// Drop Bob Work permission appendices so a resume does not re-inject
+/// contradictory « ne pas utiliser ces outils » guidance after a grant.
+pub(crate) fn strip_composer_permission_appendix(prompt: &str) -> String {
+    let mut trimmed = prompt;
+    for marker in crate::services::agent_locale::permission_appendix_markers() {
+        if let Some(idx) = trimmed.find(marker) {
+            trimmed = &trimmed[..idx];
+        }
+    }
+    trimmed.trim().to_string()
+}
+
+pub(crate) fn permission_resume_prompt(
+    original_prompt: &str,
+    group: &str,
+    duration: &str,
+    has_shell_resume: bool,
+) -> String {
+    permission_resume_prompt_for_locale(
+        crate::services::agent_locale::AppLocale::Fr,
+        original_prompt,
+        group,
+        duration,
+        has_shell_resume,
+    )
+}
+
+pub(crate) fn permission_resume_prompt_for_locale(
+    locale: crate::services::agent_locale::AppLocale,
+    original_prompt: &str,
+    group: &str,
+    duration: &str,
+    has_shell_resume: bool,
+) -> String {
+    let label = crate::services::permission_governance::composer_group_label_fr(group);
+    let grant = crate::services::agent_locale::permission_resume_grant(locale, label, duration);
+    if has_shell_resume {
+        return grant;
+    }
+    let original = strip_composer_permission_appendix(original_prompt);
+    if original.is_empty() {
+        grant
+    } else {
+        format!("{original}\n\n{grant}")
+    }
+}
+
+fn maybe_prompt_disabled_tool_group<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    conversation_id: &str,
+    task_id: Option<&str>,
+    tool_name: &str,
+    parameters: &serde_json::Value,
+    disabled_groups: &[String],
+    prompted_groups: &mut HashSet<String>,
+    locale: crate::services::agent_locale::AppLocale,
+) {
+    let Some(group) = crate::services::permission_governance::tool_permission_group(tool_name) else {
+        return;
+    };
+    if !disabled_groups.iter().any(|item| item == group) {
+        return;
+    }
+    if !prompted_groups.insert(group.to_string()) {
+        return;
+    }
+    let label = crate::services::permission_governance::composer_group_label_fr(group);
+    let target = find_json_string(
+        parameters,
+        &["path", "file_path", "filePath", "command", "query"],
+    );
+    let description =
+        crate::services::agent_locale::bob_wants_tool_description(locale, tool_name, label);
+    emit_composer_permission_card(
+        app_handle,
+        conversation_id,
+        task_id,
+        group,
+        &description,
+        target.as_deref().or(Some(tool_name)),
+        target.clone().into_iter().collect(),
+        if matches!(group, "edit" | "execute") {
+            "high"
+        } else {
+            "medium"
+        },
+    );
+    // Headless `bob run` has stdin=null, so Shell would hang forever waiting for
+    // an interactive approval. Stop the run; « Autoriser une fois / le groupe »
+    // resumes with the grant (same card flow as Bob IDE).
+    if let Some(task_id) = task_id.filter(|id| !id.is_empty()) {
+        use tauri::Manager;
+        let service = app_handle.state::<BobService>();
+        if let Some(session_id) = service.session_id_for_task(task_id) {
+            let _ = service.cancel_session(&session_id);
+        }
+    }
+}
+
 fn workspace_file_changes(root: Option<&Path>, before: &WorkspaceSnapshot) -> Vec<FileChange> {
     let after = snapshot_workspace(root);
     let mut changes = Vec::new();
     for (path, fingerprint) in &after {
+        if is_ephemeral_workspace_path(path) {
+            continue;
+        }
         match before.get(path) {
             None => changes.push(FileChange {
                 path: path.to_string_lossy().into_owned(),
@@ -372,6 +1400,9 @@ fn workspace_file_changes(root: Option<&Path>, before: &WorkspaceSnapshot) -> Ve
         }
     }
     for path in before.keys() {
+        if is_ephemeral_workspace_path(path) {
+            continue;
+        }
         if !after.contains_key(path) {
             changes.push(FileChange {
                 path: path.to_string_lossy().into_owned(),
@@ -403,6 +1434,12 @@ pub struct BobService {
     pub bob_path: Mutex<Option<String>>,
     /// approval_id → launch payload (preflight gate).
     pub pending_launches: Mutex<HashMap<String, PendingBobLaunch>>,
+    /// task_id → composer auto-approve settings for the active run.
+    pub task_approvals: Mutex<HashMap<String, TaskApprovalConfig>>,
+    /// task_id → launch template used to resume after a mid-run permission grant.
+    permission_resume_templates: Mutex<HashMap<String, PendingBobLaunch>>,
+    /// task_id → (group, duration) waiting for the current `bob run` to finish.
+    pending_permission_grants: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl BobService {
@@ -412,7 +1449,65 @@ impl BobService {
             sessions: Mutex::new(HashMap::new()),
             bob_path: Mutex::new(None),
             pending_launches: Mutex::new(HashMap::new()),
+            task_approvals: Mutex::new(HashMap::new()),
+            permission_resume_templates: Mutex::new(HashMap::new()),
+            pending_permission_grants: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_task_approval(&self, task_id: &str, config: TaskApprovalConfig) {
+        self.task_approvals
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string(), config);
+    }
+
+    pub fn task_approval(&self, task_id: &str) -> Option<TaskApprovalConfig> {
+        self.task_approvals.lock().unwrap().get(task_id).cloned()
+    }
+
+    pub fn clear_task_approval(&self, task_id: &str) {
+        self.task_approvals.lock().unwrap().remove(task_id);
+    }
+
+    pub fn set_permission_resume_template(&self, task_id: &str, launch: PendingBobLaunch) {
+        self.permission_resume_templates
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string(), launch);
+    }
+
+    pub fn permission_resume_template(&self, task_id: &str) -> Option<PendingBobLaunch> {
+        self.permission_resume_templates
+            .lock()
+            .unwrap()
+            .get(task_id)
+            .cloned()
+    }
+
+    pub fn queue_permission_grant(&self, task_id: &str, group: String, duration: String) {
+        self.pending_permission_grants
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string(), (group, duration));
+    }
+
+    pub fn take_permission_grant(&self, task_id: &str) -> Option<(String, String)> {
+        self.pending_permission_grants.lock().unwrap().remove(task_id)
+    }
+
+    pub fn session_id_for_task(&self, task_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|session| session.task_id.as_deref() == Some(task_id))
+            .map(|session| session.id.clone())
+    }
+
+    pub fn clear_permission_resume(&self, task_id: &str) {
+        self.permission_resume_templates.lock().unwrap().remove(task_id);
+        self.pending_permission_grants.lock().unwrap().remove(task_id);
     }
 
     pub fn queue_pending_launch(&self, approval_id: String, launch: PendingBobLaunch) {
@@ -659,6 +1754,24 @@ impl BobService {
             .filter(|path| path.is_dir())
             .map(|path| path.to_string_lossy().to_string())
             .collect();
+        // Python CLIs installed with `pip install --user` live here on macOS.
+        // Finder-launched apps do not inherit this directory from the user's
+        // shell, which made external tools such as Docling look unavailable.
+        let python_user_root = home.join("Library/Python");
+        if let Ok(entries) = std::fs::read_dir(&python_user_root) {
+            let mut bins = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("bin"))
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            bins.sort();
+            for bin in bins.into_iter().rev() {
+                let text = bin.to_string_lossy().to_string();
+                if !parts.iter().any(|existing| existing == &text) {
+                    parts.insert(0, text);
+                }
+            }
+        }
         for segment in current.split(':').filter(|segment| !segment.is_empty()) {
             if !parts.iter().any(|existing| existing == segment) {
                 parts.push(segment.to_string());
@@ -838,7 +1951,11 @@ impl BobService {
                     "edit".into(),
                     "execute".into(),
                     "mcp".into(),
+                    "skill".into(),
+                    "todo".into(),
+                    "subtask".into(),
                     "subagent".into(),
+                    "mode".into(),
                 ],
                 builtin: true,
                 source: "bob-shell".into(),
@@ -1082,6 +2199,7 @@ impl BobService {
         project_path: Option<String>,
         mut options: BobRunOptions,
     ) -> AppResult<()> {
+        use tauri::Manager;
         let bob_path = self
             .bob_path
             .lock()
@@ -1093,23 +2211,109 @@ impl BobService {
             let workspace = project_path.as_deref().ok_or_else(|| {
                 AppError::Security("Un workspace dédié est requis pour la sandbox.".into())
             })?;
-            let sandbox = crate::security::terminal_sandbox::TerminalSandbox::new(
+            // Keep user MCP (connectors, plugins, Chrome) by materializing
+            // mcp.json into the private sandbox HOME. Computer Use stays
+            // excluded — it needs full host desktop control.
+            let ensure_map = options.mcp_enabled && explicitly_requests_map_tools(&prompt);
+            let mcp_plan = if options.mcp_enabled {
+                Some(plan_sandbox_mcp(
+                    &prompt,
+                    &options.attachment_paths,
+                    options.allow_visible_chrome,
+                )?)
+            } else {
+                None
+            };
+            let mut extra_reads = mcp_plan
+                .as_ref()
+                .map(|plan| plan.extra_reads.clone())
+                .unwrap_or_default();
+            // Shared skills + runtimes live under ~/.bob — remount RO so
+            // diagram/cloud-architect/LaTeX stay usable with sandbox_mode=true.
+            let db = app_handle.state::<crate::db::Database>();
+            let manager =
+                app_handle.state::<crate::services::runtime_manager::RuntimeManager>();
+            collect_sandbox_runtime_read_paths(
+                &db,
+                &manager,
+                &options.attachment_paths,
+                &mut extra_reads,
+            );
+            let bridge_sockets: Vec<PathBuf> = {
+                #[cfg(target_os = "macos")]
+                {
+                    vec![crate::macos_applescript_bridge::socket_path()]
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Vec::new()
+                }
+            };
+            let sandbox = crate::security::terminal_sandbox::TerminalSandbox::with_mounts(
                 Path::new(workspace),
                 Path::new(&bob_path),
+                &extra_reads,
+                &bridge_sockets,
             )?;
-            options.trust_workspace = false;
-            options.allow_visible_chrome = false;
-            options.mcp_enabled = false;
-            options.subagents_enabled = false;
+            // Always expose host skills + runtimes at $HOME/.bob so contracts
+            // using `$HOME/.bob/skills/...` and `command -v d2` work in sandbox.
+            link_sandbox_host_bob_platform(sandbox.home())?;
+            write_sandbox_outside_workspace_approval(sandbox.home())?;
+            if let Some(plan) = mcp_plan {
+                write_sandbox_mcp(sandbox.home(), plan, ensure_map)?;
+            }
+            options.trust_workspace = true;
+            // Soft workspace check must not cancel write_file under the
+            // seatbelt-writable host remount ~/.bob/skills (skill/plugin create).
+            // Subagents + Chrome follow user settings; plugin hooks stay off
+            // (host-side elevation). Isolated HOME has no shared task history.
             options.plugin_hooks.clear();
-            options.integration_ids.clear();
-            options.db_environment.clear();
-            // Isolated HOME has no shared task history or global credentials.
             options.resume_task_id = None;
+            if !options.mcp_enabled {
+                options.integration_ids.clear();
+                options.db_environment.clear();
+            }
             Some(sandbox)
         } else {
             None
         };
+
+        // Intelligent MCP lazy load (sandbox + direct disk): filter host MCP to
+        // the servers this prompt likely needs, and mirror into workspace
+        // `.bob/mcp.json` so Bob Shell picks them up without loading all 16+.
+        let lazy_mcp = crate::services::mcp_lazy::plan_mcp_for_prompt(
+            &prompt,
+            &options.attachment_paths,
+            options.allow_visible_chrome,
+            !options.sandbox_mode,
+        );
+        if options.mcp_enabled && lazy_mcp.mode == crate::services::mcp_lazy::McpLoadMode::None {
+            options.mcp_enabled = false;
+        }
+        let workspace_mcp_overlay = if options.mcp_enabled
+            && matches!(
+                lazy_mcp.mode,
+                crate::services::mcp_lazy::McpLoadMode::Filtered
+                    | crate::services::mcp_lazy::McpLoadMode::Full
+            ) {
+            project_path.as_deref().and_then(|workspace| {
+                let host = plan_host_mcp_servers();
+                let filtered =
+                    crate::services::mcp_lazy::apply_mcp_plan(&host, &lazy_mcp);
+                crate::services::mcp_lazy::WorkspaceMcpOverlay::apply(
+                    Path::new(workspace),
+                    &filtered,
+                )
+                .map_err(|error| {
+                    tracing::warn!("Workspace MCP overlay skipped: {error}");
+                    error
+                })
+                .ok()
+            })
+        } else {
+            None
+        };
+        tracing::debug!("Session MCP lazy: {}", lazy_mcp.reason);
 
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
@@ -1136,6 +2340,7 @@ impl BobService {
 
         let sid = session_id.clone();
         let cid = conversation_id.clone();
+        let resume_mode = mode.clone();
         let bob_mode = Self::map_to_bob_mode_static(&mode);
         let task_id = options.task_id.clone();
         let run_id = options.run_id.clone();
@@ -1143,11 +2348,60 @@ impl BobService {
         let api_key = self.api_key();
         let integration_environment =
             self.integration_process_environment(&options.integration_ids);
+        if !integration_environment.is_empty() {
+            let integration_mcp = crate::services::integration_mcp::IntegrationMcpService::new();
+            let mut refreshed_providers = std::collections::HashSet::new();
+            for integration_id in &options.integration_ids {
+                let Some(provider) =
+                    crate::services::integration_oauth::IntegrationOAuthService::provider_for(
+                        integration_id,
+                    )
+                else {
+                    continue;
+                };
+                if !self.has_integration_credential(integration_id)
+                    || !refreshed_providers.insert(provider)
+                {
+                    continue;
+                }
+                if let Err(error) = integration_mcp.ensure_provider_current(&bob_path, provider) {
+                    tracing::warn!(
+                        "Unable to refresh selected {provider} MCP connector before session: {error:?}"
+                    );
+                }
+            }
+        }
 
         // ── Spawn background task ─────────────────────────────
         tokio::spawn(async move {
             use tauri::{Emitter, Manager};
+            // Keep the filtered workspace mcp.json alive for the whole run.
+            let _workspace_mcp_overlay = workspace_mcp_overlay;
 
+            let edit_denied = options.disable_tool_groups.iter().any(|group| group == "edit");
+            let ui_locale = {
+                let db = app_handle.state::<crate::db::Database>();
+                match crate::services::settings::SettingsService::new().get(&db) {
+                    Ok(settings) => {
+                        crate::services::agent_locale::resolve_app_locale(&settings.language)
+                    }
+                    Err(_) => crate::services::agent_locale::AppLocale::En,
+                }
+            };
+            if let Some(tid) = task_id.as_deref() {
+                let service = app_handle.state::<BobService>();
+                service.set_permission_resume_template(
+                    tid,
+                    PendingBobLaunch {
+                        session_id: sid.clone(),
+                        conversation_id: cid.clone(),
+                        mode: resume_mode.clone(),
+                        prompt: prompt.clone(),
+                        project_path: workspace_path.clone(),
+                        options: options.clone(),
+                    },
+                );
+            }
             let initial_workspace = snapshot_workspace(workspace_path.as_deref().map(Path::new));
 
             if let Err(error) = run_plugin_hooks(
@@ -1183,6 +2437,22 @@ impl BobService {
                 return;
             }
 
+            let _approval_guard = WorkspaceApprovalGuard(
+                workspace_path
+                    .as_deref()
+                    .map(Path::new)
+                    .and_then(|workspace| {
+                        patch_workspace_bob_approval(
+                            workspace,
+                            &options.task_approval,
+                            options.subagents_enabled,
+                            options.sandbox_mode,
+                        )
+                        .ok()
+                    })
+                    .flatten(),
+            );
+
             // Build command
             let mut cmd = if let Some(sandbox) = &sandbox {
                 sandbox.command(&bob_path)
@@ -1217,14 +2487,92 @@ impl BobService {
             );
             // Plugin API keys saved via Intégrations → APIs live in mcp.json env maps.
             // Inject them so placeholders like ${FINNHUB_API_KEY} on plugin MCP resolve.
-            if !options.sandbox_mode {
-                for (variable, value) in
-                    crate::services::workspace::WorkspaceService::new().mcp_env_for_bob_process()
-                {
-                    if std::env::var_os(&variable).is_none() {
-                        cmd.env(variable, value);
+            // Also inject in sandbox: mcp.json is materialized into the private HOME.
+            for (variable, value) in
+                crate::services::workspace::WorkspaceService::new().mcp_env_for_bob_process()
+            {
+                if std::env::var_os(&variable).is_none() {
+                    cmd.env(variable, value);
+                }
+            }
+            // Always win over a stale global mcp.json: Chrome / Computer Use MCP
+            // children must talk to THIS app's bridge (Bob Work vs Bob Work-test).
+            #[cfg(target_os = "macos")]
+            {
+                for (key, value) in crate::macos_applescript_bridge::identity_env_pairs() {
+                    cmd.env(key, value);
+                }
+            }
+            // Resolve the bundled engines once through the shared registry; all
+            // child tools inherit these binaries instead of installing private copies.
+            // Sandbox remounts `~/.bob/runtimes` so sharedCapabilities stay usable.
+            {
+                let db = app_handle.state::<crate::db::Database>();
+                let manager =
+                    app_handle.state::<crate::services::runtime_manager::RuntimeManager>();
+                let mut bins = Vec::new();
+                if let Some(sandbox) = &sandbox {
+                    bins.push(sandbox.home().join("bin").to_string_lossy().into_owned());
+                }
+                for capability in ["latex", "pandoc", "diagram"] {
+                    match manager.resolve_platform_capability(
+                        &db,
+                        "bob-work.document-tools",
+                        capability,
+                    ) {
+                        Ok(handle) => {
+                            for (key, value) in &handle.environment {
+                                cmd.env(key, value);
+                            }
+                            if capability == "diagram" {
+                                if let Some(root) = handle.working_root.as_deref() {
+                                    cmd.env("BOB_WORK_DIAGRAM", root);
+                                    if let Some(d2) = shared_diagram_d2_executable(Path::new(root))
+                                    {
+                                        if let Some(parent) = d2.parent() {
+                                            bins.push(parent.to_string_lossy().into_owned());
+                                        }
+                                        cmd.env("BOB_WORK_D2", d2);
+                                    }
+                                }
+                            } else if let Some(executable) = handle.executable {
+                                if let Some(parent) = Path::new(&executable).parent() {
+                                    bins.push(parent.to_string_lossy().into_owned());
+                                }
+                                cmd.env(
+                                    if capability == "latex" {
+                                        "BOB_WORK_LATEX"
+                                    } else {
+                                        "BOB_WORK_PANDOC"
+                                    },
+                                    executable,
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!("Document runtime {capability}: {error}"),
                     }
                 }
+                match manager.office_session_environment(&db, &options.attachment_paths) {
+                    Ok(office_env) => {
+                        for (key, value) in office_env {
+                            if key == "BOB_WORK_SHARED_PYTHON" {
+                                cmd.env(&key, &value);
+                                if let Some(parent) = Path::new(&value).parent() {
+                                    bins.insert(
+                                        if sandbox.is_some() { 1 } else { 0 },
+                                        parent.to_string_lossy().into_owned(),
+                                    );
+                                }
+                            } else {
+                                cmd.env(&key, &value);
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!("Office session environment: {error}"),
+                }
+                bins.push(BobService::enriched_path().to_string());
+                cmd.env("PATH", bins.join(":"));
+                cmd.env("TECTONIC_UNTRUSTED_MODE", "1");
             }
             cmd.arg("run");
             cmd.arg("--format");
@@ -1233,6 +2581,9 @@ impl BobService {
             if options.trust_workspace {
                 cmd.arg("--trust");
             }
+            // Composer permissions use `.bob/settings.json` + approval cards
+            // (Bob IDE). Do not pass `--disable-tool-groups` here: that removes
+            // tools so the model soft-refuses and the card never appears.
 
             if let Some(path) = project_path {
                 cmd.arg("--workspace");
@@ -1326,10 +2677,22 @@ impl BobService {
             let mut full_output = String::new();
             let mut shell_task_id: Option<String> = None;
             let mut active_tools = HashMap::<String, ActiveTool>::new();
+            let mut prompted_permission_groups = HashSet::<String>::new();
             let mut protocol_error: Option<String> = None;
             let mut applied_session_cost = 0.0;
             let mut last_text_snapshot = String::new();
             let mut separate_next_text = false;
+            let sandbox_home_watch = sandbox.as_ref().map(|s| s.home().to_path_buf());
+            let sandbox_deadline = sandbox.as_ref().map(|_| {
+                tokio::time::Instant::now()
+                    + crate::security::terminal_sandbox::SANDBOX_WALL_CLOCK
+            });
+            let mut sandbox_home_ticker = sandbox_home_watch.as_ref().map(|_| {
+                tokio::time::interval(Duration::from_secs(15))
+            });
+            if let Some(ticker) = sandbox_home_ticker.as_mut() {
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            }
 
             // Read stdout and stderr concurrently, emit tokens
             loop {
@@ -1347,11 +2710,15 @@ impl BobService {
                             task_id.as_deref(),
                             run_id.as_deref(),
                         ).await;
+                        drop(_approval_guard);
                         let service = app_handle.state::<BobService>();
                         service.sessions.lock().unwrap().remove(&sid);
+                        // Keep the resume template: « Autoriser une fois » cancels
+                        // this blocked run; resume starts only after this guard
+                        // has released workspace settings (queued grant).
                         let _ = app_handle.emit("bob-session-done", BobSessionDoneEvent {
-                            session_id: sid,
-                            conversation_id: cid,
+                            session_id: sid.clone(),
+                            conversation_id: cid.clone(),
                             success: false,
                             full_output,
                             error: Some("Session interrompue.".into()),
@@ -1360,13 +2727,94 @@ impl BobService {
                             shell_task_id: shell_task_id.clone(),
                             workspace_path: workspace_path.clone(),
                             deliverable_paths: vec![],
-                            file_changes: workspace_file_changes(
-                                workspace_path.as_deref().map(Path::new),
-                                &initial_workspace,
-                            ),
+                            file_changes: {
+                                let changes = filter_published_file_changes(workspace_file_changes(
+                                    workspace_path.as_deref().map(Path::new),
+                                    &initial_workspace,
+                                ));
+                                revert_unauthorized_workspace_writes(changes, edit_denied).0
+                            },
                             cancelled: true,
                         });
+                        if let Some(tid) = task_id.clone() {
+                            if let Some((group, duration)) = service.take_permission_grant(&tid) {
+                                let db = app_handle.state::<crate::db::Database>();
+                                if let Some(shell) = shell_task_id.as_deref() {
+                                    if let Some(mut launch) = service.permission_resume_template(&tid)
+                                    {
+                                        launch.options.resume_task_id = Some(shell.to_string());
+                                        service.set_permission_resume_template(&tid, launch);
+                                    }
+                                }
+                                let _ = service.start_composer_permission_resume(
+                                    app_handle.clone(),
+                                    &db,
+                                    &tid,
+                                    &group,
+                                    &duration,
+                                );
+                                let _ = app_handle.emit("task-updated", &tid);
+                            }
+                        }
                         return;
+                    }
+
+                    // Sandbox wall-clock quota
+                    _ = async {
+                        if let Some(deadline) = sandbox_deadline {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        let message = crate::security::terminal_sandbox::sandbox_limit_message(
+                            crate::security::terminal_sandbox::SandboxLimitKind::WallClock,
+                        );
+                        info!("Session {} hit sandbox wall-clock limit", sid);
+                        terminate_bob_process_group(&mut child).await;
+                        protocol_error = Some(message.clone());
+                        let _ = app_handle.emit("bob-token", BobTokenEvent {
+                            session_id: sid.clone(),
+                            conversation_id: cid.clone(),
+                            chunk: format!("{message}\n"),
+                            is_final: false,
+                            event_type: "error".to_string(),
+                            task_id: task_id.clone(),
+                        });
+                        break;
+                    }
+
+                    // Sandbox private HOME disk quota
+                    _ = async {
+                        if let Some(ticker) = sandbox_home_ticker.as_mut() {
+                            ticker.tick().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        let exceeded = sandbox_home_watch
+                            .as_ref()
+                            .is_some_and(|home| {
+                                directory_size_for_quota(home)
+                                    > crate::security::terminal_sandbox::SANDBOX_HOME_BYTES
+                            });
+                        if exceeded {
+                            let message = crate::security::terminal_sandbox::sandbox_limit_message(
+                                crate::security::terminal_sandbox::SandboxLimitKind::HomeStorage,
+                            );
+                            info!("Session {} hit sandbox HOME storage limit", sid);
+                            terminate_bob_process_group(&mut child).await;
+                            protocol_error = Some(message.clone());
+                            let _ = app_handle.emit("bob-token", BobTokenEvent {
+                                session_id: sid.clone(),
+                                conversation_id: cid.clone(),
+                                chunk: format!("{message}\n"),
+                                is_final: false,
+                                event_type: "error".to_string(),
+                                task_id: task_id.clone(),
+                            });
+                            break;
+                        }
                     }
 
                     // stdout line
@@ -1381,6 +2829,13 @@ impl BobService {
                                     crate::security::secret_redaction::redact_json(&mut parsed);
                                     if shell_task_id.is_none() {
                                         shell_task_id = find_json_string(&parsed, &["rootTaskId", "root_task_id", "taskId", "task_id"]);
+                                        if let Some(id) = shell_task_id.as_deref() {
+                                            persist_discovered_shell_task_id(
+                                                &app_handle,
+                                                task_id.as_deref(),
+                                                id,
+                                            );
+                                        }
                                     }
 
                                     if let Some(mut protocol) = interpret_protocol_event(&parsed) {
@@ -1421,6 +2876,31 @@ impl BobService {
                                                         "failed"
                                                     },
                                                 ));
+                                            }
+                                        }
+                                        relabel_denied_workspace_write(
+                                            &mut protocol,
+                                            edit_denied,
+                                            ui_locale,
+                                        );
+                                        if protocol.event_type == "tool_started" {
+                                            if let Some(tool_name) = protocol.tool_name.as_deref() {
+                                                let parameters = protocol
+                                                    .payload
+                                                    .get("parameters")
+                                                    .or_else(|| protocol.payload.get("input"))
+                                                    .cloned()
+                                                    .unwrap_or(serde_json::Value::Null);
+                                                maybe_prompt_disabled_tool_group(
+                                                    &app_handle,
+                                                    &cid,
+                                                    task_id.as_deref(),
+                                                    tool_name,
+                                                    &parameters,
+                                                    &options.disable_tool_groups,
+                                                    &mut prompted_permission_groups,
+                                                    ui_locale,
+                                                );
                                             }
                                         }
 
@@ -1512,13 +2992,24 @@ impl BobService {
                                                         usage.tokens,
                                                         usage.window,
                                                     );
+                                                let _ = app_handle.emit("bob-context-usage", serde_json::json!({
+                                                    "conversationId": &cid,
+                                                    "tokens": usage.tokens,
+                                                    "window": usage.window,
+                                                }));
                                             }
                                         }
 
                                         for source in collect_sources(&parsed) {
                                             record_task_source(&app_handle, task_id.as_deref(), run_id.as_deref(), &source);
                                         }
-                                        if matches!(protocol.event_type.as_str(), "tool_finished" | "tool_error") {
+                                        if matches!(protocol.event_type.as_str(), "tool_finished" | "tool_error")
+                                            && !(edit_denied
+                                                && protocol
+                                                    .tool_name
+                                                    .as_deref()
+                                                    .is_some_and(is_workspace_write_tool))
+                                        {
                                             for path in collect_existing_paths(&parsed) {
                                                 record_task_file(&app_handle, task_id.as_deref(), run_id.as_deref(), &path);
                                             }
@@ -1551,13 +3042,27 @@ impl BobService {
                                                     .or_else(|| tool.get("input"))
                                                     .cloned()
                                                     .unwrap_or(serde_json::Value::Null);
+                                                let denied_write = edit_denied && is_workspace_write_tool(name);
                                                 let activity = BobActivityEvent {
                                                     session_id: sid.clone(),
                                                     conversation_id: cid.clone(),
                                                     task_id: task_id.clone(),
                                                     event_type: "tool_started".to_string(),
-                                                    title: Some(tool_activity_title(name, &parameters, "started")),
-                                                    content: (!parameters.is_null()).then(|| compact_json(&parameters)),
+                                                    title: Some(if denied_write {
+                                                        "Edit — approval required".into()
+                                                    } else {
+                                                        tool_activity_title(name, &parameters, "started")
+                                                    }),
+                                                    content: if denied_write {
+                                                        Some(
+                                                            crate::services::agent_locale::edit_approval_required_content(
+                                                                ui_locale,
+                                                            )
+                                                            .into(),
+                                                        )
+                                                    } else {
+                                                        (!parameters.is_null()).then(|| compact_json(&parameters))
+                                                    },
                                                     tool_name: Some(name.to_string()),
                                                     payload: tool.clone(),
                                                 };
@@ -1567,6 +3072,16 @@ impl BobService {
                                                     task_id.as_deref(),
                                                     run_id.as_deref(),
                                                     &activity,
+                                                );
+                                                maybe_prompt_disabled_tool_group(
+                                                    &app_handle,
+                                                    &cid,
+                                                    task_id.as_deref(),
+                                                    name,
+                                                    &parameters,
+                                                    &options.disable_tool_groups,
+                                                    &mut prompted_permission_groups,
+                                                    ui_locale,
                                                 );
                                             }
                                         }
@@ -1579,7 +3094,7 @@ impl BobService {
                                                     conversation_id: cid.clone(),
                                                     task_id: task_id.clone(),
                                                     event_type: "analysis".to_string(),
-                                                    title: Some("Analyse en cours".into()),
+                                                    title: Some("Analysis in progress".into()),
                                                     content: Some(delta.to_string()),
                                                     tool_name: None,
                                                     payload: step.clone(),
@@ -1595,12 +3110,47 @@ impl BobService {
                                             let description = step.get("human_description").and_then(|v| v.as_str()).unwrap_or("Permission requise");
                                             let risk_level = step.get("risk_level").and_then(|v| v.as_str()).unwrap_or("medium");
                                             let cmd = step.get("command_or_change").and_then(|v| v.as_str());
+                                            let resolved_task_id = task_id.clone().unwrap_or_else(|| sid.clone());
+
+                                            let permission_group = crate::services::permission_governance::approval_group(action_type);
+                                            if crate::services::permission_governance::is_composer_permission_group(permission_group)
+                                                && !prompted_permission_groups.insert(permission_group.to_string())
+                                            {
+                                                continue;
+                                            }
+
+                                            let auto_approved = task_id.as_deref().and_then(|current_task_id| {
+                                                let bob_service = app_handle.state::<BobService>();
+                                                let config = bob_service.task_approval(current_task_id)?;
+                                                let group = crate::services::permission_governance::resolve_composer_permission_group(action_type);
+                                                // Types outside the task-permission checklist are always
+                                                // auto-approved (even when the master toggle is off).
+                                                if group.is_none()
+                                                    && !crate::services::permission_governance::is_always_interactive_permission(action_type)
+                                                {
+                                                    return Some(config);
+                                                }
+                                                if !config.auto_approval_enabled {
+                                                    return None;
+                                                }
+                                                crate::services::permission_governance::should_auto_approve_task(
+                                                    action_type,
+                                                    &config.allowed_permissions,
+                                                )
+                                                .then_some(config)
+                                            });
 
                                             let approval_id = format!("appr_{}", uuid::Uuid::new_v4());
+                                            let now = chrono::Utc::now().to_rfc3339();
+                                            let decision = if auto_approved.is_some() {
+                                                "approved"
+                                            } else {
+                                                "pending"
+                                            };
 
                                             let approval = crate::models::approval::Approval {
                                                 id: approval_id.clone(),
-                                                task_id: task_id.clone().unwrap_or_else(|| sid.clone()),
+                                                task_id: resolved_task_id.clone(),
                                                 action_type: action_type.to_string(),
                                                 human_description: description.to_string(),
                                                 command_or_change: cmd.map(|s| s.to_string()),
@@ -1608,15 +3158,18 @@ impl BobService {
                                                 files_affected: serde_json::json!([]),
                                                 network_destination: None,
                                                 risk_level: risk_level.to_string(),
-                                                decision: "pending".to_string(),
-                                                permission_duration: None,
-                                                decided_by: None,
-                                                decided_at: None,
+                                                decision: decision.to_string(),
+                                                permission_duration: auto_approved
+                                                    .as_ref()
+                                                    .map(|_| "task".to_string()),
+                                                decided_by: auto_approved
+                                                    .as_ref()
+                                                    .map(|_| "task-auto-approve".to_string()),
+                                                decided_at: auto_approved.as_ref().map(|_| now.clone()),
                                                 undo_possible: false,
-                                                created_at: chrono::Utc::now().to_rfc3339(),
+                                                created_at: now,
                                             };
 
-                                            // Save to DB
                                             {
                                                 let db = app_handle.state::<crate::db::Database>();
                                                 let conn = db.conn.lock().unwrap();
@@ -1632,18 +3185,68 @@ impl BobService {
                                                      ],
                                                 );
                                                 drop(conn);
-                                                if let Some(task_id) = task_id.as_deref() {
-                                                    let _ = crate::services::task::TaskService::new().update_state(&db, task_id, "awaiting_approval");
+                                                if auto_approved.is_none() {
+                                                    if let Some(task_id) = task_id.as_deref() {
+                                                        let _ = crate::services::task::TaskService::new().update_state(&db, task_id, "awaiting_approval");
+                                                    }
                                                 }
                                             }
 
-                                            let _ = app_handle.emit("approval-required", &approval);
-                                            crate::services::notify::notify_approval_required(
-                                                &app_handle,
-                                                &description,
-                                                task_id.as_deref(),
-                                                Some(cid.as_str()),
-                                            );
+                                            if auto_approved.is_some() {
+                                                let db = app_handle.state::<crate::db::Database>();
+                                                let resource = cmd
+                                                    .map(|s| s.to_string())
+                                                    .unwrap_or_else(|| description.to_string());
+                                                let _ = crate::services::workspace::WorkspaceService::new()
+                                                    .create_permission_grant(
+                                                        &db,
+                                                        crate::models::workspace::CreatePermissionGrantInput {
+                                                            action_type: action_type.to_string(),
+                                                            resource,
+                                                            scope: "task".to_string(),
+                                                            scope_id: Some(resolved_task_id.clone()),
+                                                            decision: "allow".into(),
+                                                            expires_at: None,
+                                                        },
+                                                    );
+                                                if !resolved_task_id.is_empty() {
+                                                    let _ = crate::services::task::TaskService::new()
+                                                        .update_state(&db, &resolved_task_id, "running");
+                                                    if action_type != "computer.use" {
+                                                        let session_id = {
+                                                            let conn = db.conn.lock().unwrap();
+                                                            conn.query_row(
+                                                                "SELECT bob_process_id FROM tasks WHERE id=?1",
+                                                                rusqlite::params![&resolved_task_id],
+                                                                |row| row.get::<_, Option<String>>(0),
+                                                            )
+                                                            .ok()
+                                                            .flatten()
+                                                        };
+                                                        if let Some(session_id) = session_id {
+                                                            let bob_service =
+                                                                app_handle.state::<BobService>();
+                                                            let _ = bob_service.send_input(&session_id, "y");
+                                                        }
+                                                    }
+                                                }
+                                                let _ = app_handle.emit(
+                                                    "approval-resolved",
+                                                    serde_json::json!({
+                                                        "id": approval_id,
+                                                        "decision": "approved",
+                                                        "autoApproved": true,
+                                                    }),
+                                                );
+                                            } else {
+                                                let _ = app_handle.emit("approval-required", &approval);
+                                                crate::services::notify::notify_approval_required(
+                                                    &app_handle,
+                                                    description,
+                                                    task_id.as_deref(),
+                                                    Some(cid.as_str()),
+                                                );
+                                            }
                                         }
                                     } else if parsed.get("type").and_then(|v| v.as_str()) == Some("message") && parsed.get("role").and_then(|v| v.as_str()) == Some("assistant") {
                                         // Handle full message response
@@ -1684,13 +3287,21 @@ impl BobService {
                         if let Ok(Some(raw)) = line {
                             let clean = Self::redact_secrets(&strip_ansi(&raw));
                             debug!("Bob stderr: {}", clean);
-                            if clean.to_lowercase().contains("error") || clean.to_lowercase().contains("budget") || clean.to_lowercase().contains("api key") {
-                                protocol_error.get_or_insert_with(|| clean.clone());
+                            let sandbox_mapped = options.sandbox_mode
+                                .then(|| map_sandbox_os_error(&clean))
+                                .flatten();
+                            let report = sandbox_mapped.unwrap_or_else(|| clean.clone());
+                            if report.to_lowercase().contains("error")
+                                || report.to_lowercase().contains("budget")
+                                || report.to_lowercase().contains("api key")
+                                || report.contains("limitations de la sandbox")
+                            {
+                                protocol_error.get_or_insert_with(|| report.clone());
                                 // If it looks like a fatal error, send it to the UI
                                 let _ = app_handle.emit("bob-token", BobTokenEvent {
                                     session_id: sid.clone(),
                                     conversation_id: cid.clone(),
-                                    chunk: format!("Erreur Bob : {}\n", clean),
+                                    chunk: format!("Erreur Bob : {}\n", report),
                                     is_final: false,
                                     event_type: "error".to_string(),
                                     task_id: task_id.clone(),
@@ -1723,13 +3334,30 @@ impl BobService {
             }
 
             info!("Bob session {} done, success={}", sid, success);
+            drop(_approval_guard);
+            let (mut file_changes, removed_unauthorized) = revert_unauthorized_workspace_writes(
+                filter_published_file_changes(workspace_file_changes(
+                    workspace_path.as_deref().map(Path::new),
+                    &initial_workspace,
+                )),
+                edit_denied,
+            );
+            if let Some(notice) =
+                unauthorized_edit_notice_for_locale(ui_locale, &removed_unauthorized, &file_changes)
+            {
+                full_output.push_str(&notice);
+                let _ = app_handle.emit("bob-token", BobTokenEvent {
+                    session_id: sid.clone(),
+                    conversation_id: cid.clone(),
+                    chunk: Self::redact_secrets(&notice),
+                    is_final: false,
+                    event_type: "error".to_string(),
+                    task_id: task_id.clone(),
+                });
+            }
             let mut deliverable_paths = collect_deliverable_file_paths_in_workspace(
                 &full_output,
                 workspace_path.as_deref().map(Path::new),
-            );
-            let file_changes = workspace_file_changes(
-                workspace_path.as_deref().map(Path::new),
-                &initial_workspace,
             );
             // A model does not always repeat every generated filename in its
             // final prose. The workspace diff is the durable source of truth.
@@ -1747,7 +3375,12 @@ impl BobService {
                 if path.is_file()
                     && matches!(
                         extension.as_str(),
-                        "csv"
+                        "tex"
+                            | "bib"
+                            | "epub"
+                            | "odt"
+                            | "rtf"
+                            | "csv"
                             | "d2"
                             | "doc"
                             | "docx"
@@ -1765,7 +3398,6 @@ impl BobService {
                             | "png"
                             | "ppt"
                             | "pptx"
-                            | "py"
                             | "svg"
                             | "txt"
                             | "webp"
@@ -1775,12 +3407,24 @@ impl BobService {
                             | "yml"
                             | "zip"
                     )
+                    && !(matches!(extension.as_str(), "html" | "htm")
+                        && !is_nontrivial_html_deliverable(path))
                 {
                     deliverable_paths.push(change.path.clone());
                 }
             }
-            deliverable_paths.sort();
-            deliverable_paths.dedup();
+            if let Some(sandbox) = sandbox.as_ref() {
+                // Durable host paths for skill/plugin bundles written via the
+                // private sandbox HOME symlink — otherwise the chat shows a
+                // dead bob-isolated link plus a second host chip.
+                full_output = rewrite_sandbox_home_paths(&full_output, sandbox.home());
+                deliverable_paths =
+                    rewrite_sandbox_home_path_list(deliverable_paths, sandbox.home());
+                file_changes = rewrite_sandbox_file_changes(file_changes, sandbox.home());
+            }
+            deliverable_paths = filter_accessible_deliverable_paths(deliverable_paths);
+            file_changes = filter_published_file_changes(file_changes);
+            suppress_office_helper_python(&mut deliverable_paths, &mut file_changes);
 
             let _ = app_handle.emit(
                 "bob-session-done",
@@ -1806,6 +3450,28 @@ impl BobService {
 
             let service = app_handle.state::<BobService>();
             service.sessions.lock().unwrap().remove(&sid);
+            if let Some(tid) = task_id.clone() {
+                if let Some((group, duration)) = service.take_permission_grant(&tid) {
+                    let db = app_handle.state::<crate::db::Database>();
+                    if let Some(shell) = shell_task_id.as_deref() {
+                        if let Some(mut launch) = service.permission_resume_template(&tid) {
+                            launch.options.resume_task_id = Some(shell.to_string());
+                            service.set_permission_resume_template(&tid, launch);
+                        }
+                    }
+                    let _ = service.start_composer_permission_resume(
+                        app_handle.clone(),
+                        &db,
+                        &tid,
+                        &group,
+                        &duration,
+                    );
+                    let _ = app_handle.emit("task-updated", &tid);
+                } else if service.session_id_for_task(&tid).is_none() {
+                    service.clear_task_approval(&tid);
+                    service.clear_permission_resume(&tid);
+                }
+            }
         });
 
         Ok(())
@@ -1874,6 +3540,24 @@ impl BobService {
     }
 
     pub async fn generate_conversation_title(&self, first_prompt: &str) -> AppResult<String> {
+        let request = title_generation_prompt(first_prompt);
+        // Prefer a direct inference HTTP call (no Bob Shell / MCP / tools).
+        match crate::services::bob_inference::chat_completion_text(
+            "Tu génères uniquement un titre de conversation. 3 à 7 mots, même langue que la demande, 60 caractères max, aucun guillemet, aucun préfixe, aucune explication, aucun point final.",
+            &request,
+        )
+        .await
+        {
+            Ok(raw) => {
+                if let Some(title) = normalize_generated_title(&raw) {
+                    return Ok(title);
+                }
+            }
+            Err(error) => {
+                tracing::debug!("Direct title inference unavailable, falling back to bob run: {error}");
+            }
+        }
+
         let bob_path = self
             .bob_path
             .lock()
@@ -1881,7 +3565,6 @@ impl BobService {
             .clone()
             .ok_or_else(|| AppError::BobNotFound("Bob non détecté".into()))?;
         let api_key = self.api_key();
-        let request = title_generation_prompt(first_prompt);
 
         let mut cmd = TokioCommand::new(bob_path);
         Self::apply_runtime_path_tokio(&mut cmd);
@@ -1954,6 +3637,68 @@ impl BobService {
             .unwrap()
             .get(session_id)
             .and_then(|session| session.task_id.clone())
+    }
+
+    pub fn start_composer_permission_resume<R: tauri::Runtime>(
+        &self,
+        app_handle: tauri::AppHandle<R>,
+        db: &crate::db::Database,
+        task_id: &str,
+        group: &str,
+        duration: &str,
+    ) -> AppResult<()> {
+        let Some(mut launch) = self.permission_resume_template(task_id) else {
+            return Ok(());
+        };
+        apply_composer_group_grant(&mut launch.options, group);
+        self.set_task_approval(task_id, launch.options.task_approval.clone());
+        if launch
+            .options
+            .resume_task_id
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            if let Ok(Some(task)) = crate::services::task::TaskService::new().get_by_id(db, task_id)
+            {
+                launch.options.resume_task_id = task.shell_task_id.filter(|id| !id.is_empty());
+            }
+        }
+        let has_shell_resume = !launch
+            .options
+            .resume_task_id
+            .as_deref()
+            .unwrap_or("")
+            .is_empty();
+        let ui_locale = match crate::services::settings::SettingsService::new().get(db) {
+            Ok(settings) => {
+                crate::services::agent_locale::resolve_app_locale(&settings.language)
+            }
+            Err(_) => crate::services::agent_locale::AppLocale::En,
+        };
+        launch.prompt = permission_resume_prompt_for_locale(
+            ui_locale,
+            &launch.prompt,
+            group,
+            duration,
+            has_shell_resume,
+        );
+        launch.session_id = format!("sess_{}", uuid::Uuid::new_v4());
+        launch.options.task_id = Some(task_id.to_string());
+        if let Ok(run) =
+            crate::services::task::TaskService::new().start_run(db, task_id, &launch.session_id)
+        {
+            launch.options.run_id = Some(run.id);
+        }
+        self.start_streaming_session(
+            app_handle,
+            launch.session_id,
+            launch.conversation_id,
+            launch.mode,
+            launch.prompt,
+            launch.project_path,
+            launch.options,
+        )
     }
 
     /// Cancel a running session
@@ -2077,6 +3822,85 @@ mod conversation_title_tests {
     }
 }
 
+#[cfg(test)]
+mod sandbox_platform_link_tests {
+    use super::{
+        link_sandbox_host_bob_platform, shared_diagram_d2_executable,
+        write_sandbox_outside_workspace_approval,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn writes_outside_workspace_approval_into_sandbox_home_settings() {
+        let sandbox = tempfile::tempdir().unwrap();
+        write_sandbox_outside_workspace_approval(sandbox.path()).unwrap();
+        let path = sandbox
+            .path()
+            .join(".bob/settings/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["approval"]["outsideWorkspaceAllowed"], true);
+
+        // Merge preserves existing keys.
+        std::fs::write(&path, r#"{"licenseConsent":true,"approval":{"allowed_permissions":["read"]}}"#)
+            .unwrap();
+        write_sandbox_outside_workspace_approval(sandbox.path()).unwrap();
+        let merged: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(merged["licenseConsent"], true);
+        assert_eq!(merged["approval"]["outsideWorkspaceAllowed"], true);
+        assert_eq!(
+            merged["approval"]["allowed_permissions"],
+            serde_json::json!(["read"])
+        );
+    }
+
+    #[test]
+    fn links_host_skills_and_runtimes_into_sandbox_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let host_skills = home.join(".bob/skills");
+        if !host_skills.is_dir() {
+            return;
+        }
+        let sandbox = tempfile::tempdir().unwrap();
+        link_sandbox_host_bob_platform(sandbox.path()).unwrap();
+        let linked = sandbox.path().join(".bob/skills");
+        assert!(
+            linked
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "skills must be a symlink under sandbox HOME"
+        );
+        let plugin = linked.join("cloud-architect/scripts/render_professional_svg.py");
+        if plugin.is_file() {
+            assert!(std::fs::read(&plugin).is_ok());
+        }
+        let runtimes = sandbox.path().join(".bob/runtimes");
+        if home.join(".bob/runtimes").is_dir() {
+            assert!(
+                runtimes
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            );
+        }
+    }
+
+    #[test]
+    fn finds_shared_diagram_d2_binary() {
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(".bob/runtimes/shared/diagram/2.0.0");
+        if !root.is_dir() {
+            return;
+        }
+        let d2 = shared_diagram_d2_executable(&root).expect("d2 under diagram runtime");
+        assert!(d2.is_file(), "{}", d2.display());
+    }
+}
+
 fn publish_live_session_cost<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     payload: &serde_json::Value,
@@ -2192,6 +4016,9 @@ async fn run_plugin_hooks<R: tauri::Runtime>(
                         if let Some(root) = handle.working_root {
                             runtime_environment.push(("BOB_DIAGRAM_RUNTIME_ROOT".into(), root));
                         }
+                    }
+                    if matches!(capability.as_str(), "docx" | "pptx" | "xlsx") {
+                        runtime_environment.extend(handle.environment);
                     }
                 }
                 Err(error) => {
@@ -2325,7 +4152,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
                 Some("reasoning-delta") => Some(ProtocolEvent {
                     text_delta: None,
                     event_type: "analysis".into(),
-                    title: Some("Analyse en cours".into()),
+                    title: Some("Analysis in progress".into()),
                     content: delta
                         .get("reasoning")
                         .and_then(|v| v.as_str())
@@ -2360,9 +4187,9 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
                     .and_then(|value| value.as_str())
                     .is_some_and(is_followup_question_tool)
                 {
-                    "Choix utilisateur requis".into()
+                    "User choice required".into()
                 } else {
-                    "Outil démarré".into()
+                    "Tool started".into()
                 },
             ),
             content: object.get("input").map(compact_json),
@@ -2375,7 +4202,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "tool-output-delta" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "tool_progress".into(),
-            title: Some("Progression de l’outil".into()),
+            title: Some("Tool progress".into()),
             content: object.get("delta").map(compact_json),
             tool_name: None,
             payload,
@@ -2383,7 +4210,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "tool-finished" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "tool_finished".into(),
-            title: Some("Outil terminé".into()),
+            title: Some("Tool finished".into()),
             content: object.get("output").map(compact_json),
             tool_name: None,
             payload,
@@ -2391,7 +4218,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "tool-error" | "error" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "error".into(),
-            title: Some("Erreur".into()),
+            title: Some("Error".into()),
             content: object.get("message").map(compact_json),
             tool_name: object
                 .get("tool_name")
@@ -2402,7 +4229,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "usage" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "usage".into(),
-            title: Some("Consommation".into()),
+            title: Some("Usage".into()),
             content: object.get("usage").map(compact_json),
             tool_name: None,
             payload,
@@ -2410,7 +4237,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "message-start" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "message_started".into(),
-            title: Some("Réponse en cours".into()),
+            title: Some("Response in progress".into()),
             content: None,
             tool_name: None,
             payload,
@@ -2418,7 +4245,7 @@ fn interpret_protocol_event(value: &serde_json::Value) -> Option<ProtocolEvent> 
         "message-finish" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "message_finished".into(),
-            title: Some("Réponse terminée".into()),
+            title: Some("Response finished".into()),
             content: object.get("usage").map(compact_json),
             tool_name: None,
             payload,
@@ -2457,7 +4284,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                 Some(ProtocolEvent {
                     text_delta: None,
                     event_type: "analysis".into(),
-                    title: Some("Analyse en cours".into()),
+                    title: Some("Analysis in progress".into()),
                     content: (!content.is_empty()).then_some(content),
                     tool_name: None,
                     payload,
@@ -2492,7 +4319,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                     "tool_started".into()
                 },
                 title: Some(if is_followup_question_tool(&name) {
-                    "Choix utilisateur requis".into()
+                    "User choice required".into()
                 } else {
                     tool_activity_title(&name, &parameters, "started")
                 }),
@@ -2518,9 +4345,9 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                 .to_string();
             let title = if tool_name.is_empty() {
                 if failed {
-                    "Outil en échec".into()
+                    "Tool failed".into()
                 } else {
-                    "Outil terminé".into()
+                    "Tool finished".into()
                 }
             } else {
                 tool_activity_title(
@@ -2570,7 +4397,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                 Some(ProtocolEvent {
                     text_delta: None,
                     event_type: "error".into(),
-                    title: Some("Erreur Bob Shell".into()),
+                    title: Some("Bob Shell error".into()),
                     content: Some(detail),
                     tool_name: None,
                     payload,
@@ -2579,7 +4406,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
                 Some(ProtocolEvent {
                     text_delta: None,
                     event_type: "run_finished".into(),
-                    title: Some("Tâche terminée".into()),
+                    title: Some("Task finished".into()),
                     content: object.get("stats").map(compact_json),
                     tool_name: None,
                     payload,
@@ -2589,7 +4416,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
         "cost" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "usage".into(),
-            title: Some("Consommation".into()),
+            title: Some("Usage".into()),
             content: object.get("costs").map(compact_json),
             tool_name: None,
             payload,
@@ -2597,7 +4424,7 @@ fn interpret_shell_2_event(value: &serde_json::Value) -> Option<ProtocolEvent> {
         "error" => Some(ProtocolEvent {
             text_delta: None,
             event_type: "error".into(),
-            title: Some("Erreur Bob Shell".into()),
+            title: Some("Bob Shell error".into()),
             content: object.get("message").map(compact_json),
             tool_name: None,
             payload,
@@ -2620,14 +4447,14 @@ fn graph_subagent_title(event: &str, payload: &serde_json::Value) -> String {
         if name.is_empty() {
             prefix.to_string()
         } else {
-            format!("{prefix} : {name}")
+            format!("{prefix}: {name}")
         }
     };
     match event.replace('_', "-").as_str() {
-        "graph-started" => named("Orchestration démarrée"),
-        "graph-finished" => named("Orchestration terminée"),
-        "subagent-started" => named("Sous-agent démarré"),
-        "subagent-finished" => named("Sous-agent terminé"),
+        "graph-started" => named("Orchestration started"),
+        "graph-finished" => named("Orchestration finished"),
+        "subagent-started" => named("Subagent started"),
+        "subagent-finished" => named("Subagent finished"),
         _ => event.replace('-', " "),
     }
 }
@@ -2647,9 +4474,9 @@ fn tool_activity_title(name: &str, parameters: &serde_json::Value, phase: &str) 
             url.trim()
         };
         return match phase {
-            "finished" => format!("Source web consultée : {label}"),
-            "failed" => format!("Lecture web impossible : {label}"),
-            _ => format!("Lecture web : {label}"),
+            "finished" => format!("Web source read: {label}"),
+            "failed" => format!("Could not read web: {label}"),
+            _ => format!("Reading web: {label}"),
         };
     }
     if matches!(
@@ -2659,14 +4486,14 @@ fn tool_activity_title(name: &str, parameters: &serde_json::Value, phase: &str) 
         let url =
             find_json_string(parameters, &["url", "requested_url", "href"]).unwrap_or_default();
         let label = if url.trim().is_empty() {
-            "onglet actif"
+            "active tab"
         } else {
             url.trim()
         };
         return match phase {
-            "finished" => format!("Aperçu Chrome : {label}"),
-            "failed" => format!("Aperçu Chrome impossible : {label}"),
-            _ => format!("Aperçu Chrome : {label}"),
+            "finished" => format!("Chrome preview: {label}"),
+            "failed" => format!("Chrome preview failed: {label}"),
+            _ => format!("Chrome preview: {label}"),
         };
     }
 
@@ -2697,50 +4524,44 @@ fn tool_activity_title(name: &str, parameters: &serde_json::Value, phase: &str) 
 
     let (started, finished, failed) = match name {
         "read_file" | "read_xlsx" => (
-            format!("Lecture de {}", non_empty_target(target, "fichier")),
-            format!("Fichier lu : {}", non_empty_target(target, "fichier")),
-            format!(
-                "Lecture impossible : {}",
-                non_empty_target(target, "fichier")
-            ),
+            format!("Reading {}", non_empty_target(target, "file")),
+            format!("Read {}", non_empty_target(target, "file")),
+            format!("Could not read {}", non_empty_target(target, "file")),
         ),
         "glob" | "grep" | "list_files" | "find_symbol" | "find_referencing_symbols" => (
-            format!("Recherche de {}", non_empty_target(target, "code")),
-            "Recherche terminée".into(),
-            "Recherche en échec".into(),
+            format!("Searching {}", non_empty_target(target, "code")),
+            "Search complete".into(),
+            "Search failed".into(),
         ),
         "write_file" | "apply_diff" | "insert_content" | "search_and_replace" => (
-            format!("Modification de {}", non_empty_target(target, "fichier")),
-            format!("Fichier modifié : {}", non_empty_target(target, "fichier")),
-            format!(
-                "Modification impossible : {}",
-                non_empty_target(target, "fichier")
-            ),
+            format!("Editing {}", non_empty_target(target, "file")),
+            format!("Edited {}", non_empty_target(target, "file")),
+            format!("Could not edit {}", non_empty_target(target, "file")),
         ),
         "execute_command" if command_is_test => (
-            "Exécution des tests".into(),
-            "Tests terminés".into(),
-            "Tests en échec".into(),
+            "Running tests".into(),
+            "Tests complete".into(),
+            "Tests failed".into(),
         ),
         "execute_command" => (
-            format!("Commande : {}", non_empty_target(target, "shell")),
-            "Commande terminée".into(),
-            "Commande en échec".into(),
+            format!("Command: {}", non_empty_target(target, "shell")),
+            "Command complete".into(),
+            "Command failed".into(),
         ),
         "update_todo_list" => (
-            "Mise à jour du plan".into(),
-            "Plan mis à jour".into(),
-            "Mise à jour du plan impossible".into(),
+            "Updating plan".into(),
+            "Plan updated".into(),
+            "Could not update plan".into(),
         ),
         "spawn_subagent" => (
-            "Délégation à un sous-agent".into(),
-            "Sous-agent terminé".into(),
-            "Sous-agent en échec".into(),
+            "Delegating to subagent".into(),
+            "Subagent finished".into(),
+            "Subagent failed".into(),
         ),
         _ => (
-            format!("Outil démarré : {}", name),
-            format!("Outil terminé : {}", name),
-            format!("Outil en échec : {}", name),
+            format!("Tool started: {}", name),
+            format!("Tool finished: {}", name),
+            format!("Tool failed: {}", name),
         ),
     };
     match phase {
@@ -2880,7 +4701,7 @@ pub(crate) fn collect_deliverable_file_paths_in_workspace(
     workspace_root: Option<&Path>,
 ) -> Vec<String> {
     const DELIVERABLE_EXTENSIONS: &str =
-        "pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers";
+        "tex|bib|epub|odt|rtf|pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers";
     // macOS application workspaces live below `Library/Application Support`.
     // Accept spaces and stop at the first recognised deliverable extension.
     let Ok(pattern) = regex::Regex::new(&format!(
@@ -2951,15 +4772,36 @@ pub(crate) fn collect_deliverable_file_paths_in_workspace(
             }
         }
     }
-    output.sort();
-    output.dedup();
-    output
+    filter_accessible_deliverable_paths(output)
 }
 
 #[cfg(test)]
 mod deliverable_path_tests {
-    use super::{collect_deliverable_file_paths, collect_deliverable_file_paths_in_workspace};
+    use super::{
+        collect_deliverable_file_paths, collect_deliverable_file_paths_in_workspace,
+        rewrite_sandbox_home_paths,
+    };
     use std::io::Write;
+
+    #[test]
+    fn rewrites_bob_isolated_skill_paths_to_host_home() {
+        let sandbox = std::env::temp_dir().join(format!("bob-isolated-{}", uuid::Uuid::new_v4()));
+        let text = format!(
+            "Créé : [`SKILL.md`]({}/.bob/skills/demo/SKILL.md) et aussi /private{}/.bob/skills/demo/SKILL.md",
+            sandbox.display(),
+            sandbox.display()
+        );
+        let rewritten = rewrite_sandbox_home_paths(&text, &sandbox);
+        let home = dirs::home_dir().unwrap();
+        assert!(
+            rewritten.contains(&format!("{}/.bob/skills/demo/SKILL.md", home.display())),
+            "rewritten={rewritten}"
+        );
+        assert!(
+            !rewritten.contains("bob-isolated-") && !rewritten.contains(sandbox.to_str().unwrap()),
+            "rewritten={rewritten}"
+        );
+    }
 
     #[test]
     fn extracts_existing_desktop_pptx_paths() {
@@ -3142,11 +4984,24 @@ fn record_task_activity<R: tauri::Runtime>(
     run_id: Option<&str>,
     activity: &BobActivityEvent,
 ) {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
+    let db = app_handle.state::<crate::db::Database>();
+    let plan_updated = crate::services::conversation::ConversationService::new()
+        .save_plan_activity(
+            &db,
+            &activity.conversation_id,
+            &activity.event_type,
+            activity.title.as_deref(),
+            activity.content.as_deref(),
+            activity.tool_name.as_deref(),
+            &activity.payload,
+        );
+    if matches!(plan_updated, Ok(true)) {
+        let _ = app_handle.emit("conversation-plan-updated", &activity.conversation_id);
+    }
     let Some(task_id) = task_id else {
         return;
     };
-    let db = app_handle.state::<crate::db::Database>();
     let _ = crate::services::task::TaskService::new().add_event(
         &db,
         task_id,
@@ -3360,7 +5215,7 @@ mod tests {
     }
 
     #[test]
-    fn shell2_subagent_events_use_french_titles() {
+    fn shell2_subagent_events_use_english_titles() {
         let started = interpret_shell_2_event(&json!({
             "type": "subagent-started",
             "name": "auth-review",
@@ -3369,7 +5224,7 @@ mod tests {
         assert_eq!(started.event_type, "subagent_started");
         assert_eq!(
             started.title.as_deref(),
-            Some("Sous-agent démarré : auth-review")
+            Some("Subagent started: auth-review")
         );
 
         let finished = interpret_shell_2_event(&json!({
@@ -3380,7 +5235,7 @@ mod tests {
         }))
         .expect("spawn result");
         assert_eq!(finished.event_type, "tool_finished");
-        assert_eq!(finished.title.as_deref(), Some("Sous-agent terminé"));
+        assert_eq!(finished.title.as_deref(), Some("Subagent finished"));
         assert_eq!(finished.tool_name.as_deref(), Some("spawn_subagent"));
     }
 
@@ -3398,7 +5253,7 @@ mod tests {
         }))
         .expect("follow-up event");
         assert_eq!(event.event_type, "user_input_required");
-        assert_eq!(event.title.as_deref(), Some("Choix utilisateur requis"));
+        assert_eq!(event.title.as_deref(), Some("User choice required"));
         assert_eq!(event.tool_name.as_deref(), Some("ask_followup_question"));
     }
 
@@ -3409,15 +5264,15 @@ mod tests {
             &json!({ "url": "https://example.com" }),
             "started",
         );
-        assert_eq!(started, "Lecture web : https://example.com");
+        assert_eq!(started, "Reading web: https://example.com");
         let finished = tool_activity_title("browser_snapshot", &json!({}), "finished");
-        assert_eq!(finished, "Source web consultée : source");
+        assert_eq!(finished, "Web source read: source");
         let chrome = tool_activity_title(
             "chrome_open_url",
             &json!({ "url": "https://example.com" }),
             "started",
         );
-        assert_eq!(chrome, "Aperçu Chrome : https://example.com");
+        assert_eq!(chrome, "Chrome preview: https://example.com");
     }
 
     #[test]
@@ -3434,6 +5289,30 @@ mod tests {
         assert!(explicitly_requests_visible_chrome(
             "Va sur la page WeatherAPI dans le navigateur"
         ));
+        assert!(explicitly_requests_visible_chrome(
+            "utilise @plugin:builtin-chrome-control pour naviguer vers https://www.ibm.com et extraire le titre principal de la page d'accueil."
+        ));
+    }
+
+    #[test]
+    fn map_tools_request_detects_plugin_mentions() {
+        assert!(explicitly_requests_map_tools(
+            "@plugin:builtin-map-tools calcule un itinéraire à pied"
+        ));
+        assert!(explicitly_requests_map_tools("utilise $map-tools pour le Louvre"));
+        assert!(!explicitly_requests_map_tools(
+            "quelle est la distance à vol d'oiseau sans plugin"
+        ));
+    }
+
+    #[test]
+    fn sandbox_mcp_excludes_computer_use_only() {
+        assert!(!sandbox_excluded_mcp_name("bob-work-chrome-control"));
+        assert!(sandbox_excluded_mcp_name("bob-work-computer-use"));
+        assert!(sandbox_excluded_mcp_name("bob-work-computer-extra"));
+        assert!(!sandbox_excluded_mcp_name("bob-work-map-tools"));
+        assert!(!sandbox_excluded_mcp_name("bw-finnhub"));
+        assert!(!sandbox_excluded_mcp_name("user-custom"));
     }
 
     #[test]
@@ -3493,6 +5372,99 @@ mod tests {
     }
 
     #[test]
+    fn inaccessible_paths_are_not_published_as_deliverables() {
+        let root = std::env::temp_dir().join(format!("bob-accessible-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let readable = root.join("report.md");
+        std::fs::write(&readable, "# ok").unwrap();
+        let ghost = root.join("missing.md");
+        let changes = filter_published_file_changes(vec![
+            FileChange {
+                path: readable.to_string_lossy().into_owned(),
+                change_type: "created".into(),
+            },
+            FileChange {
+                path: ghost.to_string_lossy().into_owned(),
+                change_type: "created".into(),
+            },
+        ]);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].path.ends_with("report.md"));
+        let deliverables = filter_accessible_deliverable_paths(vec![
+            readable.to_string_lossy().into_owned(),
+            ghost.to_string_lossy().into_owned(),
+        ]);
+        assert_eq!(deliverables.len(), 1);
+        assert!(deliverables[0].ends_with("report.md"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn office_turns_hide_helper_python_scripts() {
+        let mut deliverables = vec![
+            "/tmp/pitch.pptx".into(),
+            "/tmp/create_pitch.py".into(),
+        ];
+        let mut changes = vec![
+            FileChange {
+                path: "/tmp/pitch.pptx".into(),
+                change_type: "created".into(),
+            },
+            FileChange {
+                path: "/tmp/create_pitch.py".into(),
+                change_type: "created".into(),
+            },
+        ];
+        suppress_office_helper_python(&mut deliverables, &mut changes);
+        assert_eq!(deliverables, vec!["/tmp/pitch.pptx".to_string()]);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].path.ends_with("pitch.pptx"));
+    }
+
+    #[test]
+    fn empty_html_shells_are_not_nontrivial_deliverables() {
+        let root = std::env::temp_dir().join(format!("bob-html-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let empty = root.join("empty.html");
+        std::fs::write(&empty, "<html></html>\n").unwrap();
+        let rich = root.join("dashboard.html");
+        std::fs::write(
+            &rich,
+            "<!doctype html><html><body><h1>Sales</h1><canvas id=\"c\"></canvas><script>console.log(1)</script></body></html>",
+        )
+        .unwrap();
+        assert!(!is_nontrivial_html_deliverable(&empty));
+        assert!(is_nontrivial_html_deliverable(&rich));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_diff_ignores_ephemeral_internal_paths() {
+        let root = std::env::temp_dir().join(format!("bob-file-ephemeral-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".bob-work").join("attachments").join("run-1"))
+            .unwrap();
+        std::fs::create_dir_all(root.join(".bob")).unwrap();
+        std::fs::write(root.join(".bob/settings.json"), r#"{"approval":{}}"#).unwrap();
+        std::fs::write(
+            root.join("bob-work-recording-test.m4a"),
+            b"fake-audio",
+        )
+        .unwrap();
+        let before = snapshot_workspace(Some(&root));
+        std::fs::write(root.join("deliverable.md"), "# hello").unwrap();
+        let changes = workspace_file_changes(Some(&root), &before);
+        assert!(changes.iter().any(|change| change.path.ends_with("deliverable.md")));
+        assert!(!changes.iter().any(|change| change.path.contains(".bob/settings.json")));
+        assert!(!changes
+            .iter()
+            .any(|change| change.path.contains(".bob-work/attachments")));
+        assert!(!changes
+            .iter()
+            .any(|change| change.path.contains("bob-work-recording-test.m4a")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn workspace_diff_distinguishes_created_modified_and_deleted_files() {
         let root = std::env::temp_dir().join(format!("bob-file-diff-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -3521,5 +5493,301 @@ mod tests {
             change_type: "deleted".into()
         }));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unauthorized_created_files_are_deleted_when_edit_is_denied() {
+        let root = std::env::temp_dir().join(format!("bob-edit-deny-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let created = root.join("test.txt");
+        let modified = root.join("existing.txt");
+        std::fs::write(&created, "Hello World").unwrap();
+        std::fs::write(&modified, "keep").unwrap();
+        let (kept, removed) = revert_unauthorized_workspace_writes(
+            vec![
+                FileChange {
+                    path: created.to_string_lossy().into_owned(),
+                    change_type: "created".into(),
+                },
+                FileChange {
+                    path: modified.to_string_lossy().into_owned(),
+                    change_type: "modified".into(),
+                },
+            ],
+            true,
+        );
+        assert!(!created.exists());
+        assert!(modified.exists());
+        assert_eq!(removed, vec![created.to_string_lossy().into_owned()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].change_type, "modified");
+        let notice = unauthorized_edit_notice(&removed, &kept).expect("notice");
+        assert!(notice.contains("test.txt"));
+        assert!(notice.contains("existing.txt"));
+        assert!(notice.contains("Edit"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_permission_does_not_delete_files_when_allowed() {
+        let root = std::env::temp_dir().join(format!("bob-edit-allow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let created = root.join("test.txt");
+        std::fs::write(&created, "Hello World").unwrap();
+        let changes = vec![FileChange {
+            path: created.to_string_lossy().into_owned(),
+            change_type: "created".into(),
+        }];
+        let (kept, removed) = revert_unauthorized_workspace_writes(changes, false);
+        assert!(created.exists());
+        assert!(removed.is_empty());
+        assert_eq!(kept.len(), 1);
+        assert!(unauthorized_edit_notice(&removed, &kept).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_is_not_reported_as_created_file() {
+        let root =
+            std::env::temp_dir().join(format!("bob-approval-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let before = snapshot_workspace(Some(&root));
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["read".into()],
+            },
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("approval patch");
+        restore_workspace_bob_approval(patch).unwrap();
+        let changes = workspace_file_changes(Some(&root), &before);
+        assert!(changes.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_syncs_manual_only_grants() {
+        let root =
+            std::env::temp_dir().join(format!("bob-approval-manual-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: false,
+                allowed_permissions: vec!["read".into()],
+            },
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        let settings_path = root.join(".bob/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        // Checkboxes are the Shell allow-list even when the master toggle is off.
+        // MCP is always injected so bridge tools (`mcp__…`) are not blocked.
+        assert_eq!(written["approval"]["autoApprovalEnabled"], true);
+        assert_eq!(
+            written["approval"]["allowed_permissions"],
+            json!(["read", "mcp"])
+        );
+        assert!(written["approval"]["outsideWorkspaceAllowed"].is_null());
+
+        restore_workspace_bob_approval(patch).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_ensures_subagent_when_enabled() {
+        let root =
+            std::env::temp_dir().join(format!("bob-approval-subagent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["read".into()],
+            },
+            true,
+            false,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        let settings_path = root.join(".bob/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            written["approval"]["allowed_permissions"],
+            json!(["read", "mcp", "subagent"])
+        );
+
+        restore_workspace_bob_approval(patch).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_writes_and_restores_bob_settings() {
+        let root = std::env::temp_dir().join(format!("bob-approval-patch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["read".into(), "edit".into()],
+            },
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        let settings_path = root.join(".bob/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(written["approval"]["autoApprovalEnabled"], true);
+        assert_eq!(
+            written["approval"]["allowed_permissions"],
+            json!(["read", "edit", "mcp"])
+        );
+
+        restore_workspace_bob_approval(patch).unwrap();
+        assert!(!settings_path.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_preserves_existing_settings() {
+        let root =
+            std::env::temp_dir().join(format!("bob-approval-restore-{}", uuid::Uuid::new_v4()));
+        let bob_dir = root.join(".bob");
+        std::fs::create_dir_all(&bob_dir).unwrap();
+        let settings_path = bob_dir.join("settings.json");
+        std::fs::write(&settings_path, r#"{"licenseConsent":true}"#).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["execute".into()],
+            },
+            false,
+            false,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        restore_workspace_bob_approval(patch).unwrap();
+        let restored = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(restored.contains("licenseConsent"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_approval_patch_allows_outside_workspace_in_sandbox() {
+        let root = std::env::temp_dir().join(format!(
+            "bob-approval-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let patch = patch_workspace_bob_approval(
+            &root,
+            &TaskApprovalConfig {
+                auto_approval_enabled: true,
+                allowed_permissions: vec!["edit".into()],
+            },
+            false,
+            true,
+        )
+        .unwrap()
+        .expect("approval patch");
+
+        let settings_path = root.join(".bob/settings.json");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(written["approval"]["outsideWorkspaceAllowed"], true);
+
+        restore_workspace_bob_approval(patch).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn permission_resume_keeps_original_prompt_without_shell_id() {
+        let prompt = permission_resume_prompt_for_locale(
+            crate::services::agent_locale::AppLocale::Fr,
+            "Crée test.txt",
+            "edit",
+            "once",
+            false,
+        );
+        assert!(prompt.contains("Crée test.txt"));
+        assert!(prompt.contains("Edit"));
+        assert!(prompt.contains("une fois"));
+        assert!(prompt.contains("appelle l'outil"));
+    }
+
+    #[test]
+    fn permission_resume_strips_stale_permission_appendix() {
+        let original = "Crée test.txt\n\nPermissions Bob Work : les groupes suivants ne sont pas auto-approuvés : Edit. Quand tu en as besoin, appelle immédiatement l’outil.";
+        let prompt = permission_resume_prompt_for_locale(
+            crate::services::agent_locale::AppLocale::Fr,
+            original,
+            "edit",
+            "once",
+            false,
+        );
+        assert!(prompt.contains("Crée test.txt"));
+        assert!(!prompt.contains("ne sont pas auto-approuvés"));
+        assert!(prompt.contains("autorisé le groupe « Edit »"));
+    }
+
+    #[test]
+    fn permission_resume_uses_short_continue_prompt_with_shell_id() {
+        let prompt = permission_resume_prompt_for_locale(
+            crate::services::agent_locale::AppLocale::Fr,
+            "Crée test.txt",
+            "edit",
+            "once",
+            true,
+        );
+        assert!(!prompt.contains("Crée test.txt"));
+        assert!(prompt.contains("Reprends et effectue"));
+    }
+
+    #[test]
+    fn english_permission_resume_and_edit_notice() {
+        let prompt = permission_resume_prompt_for_locale(
+            crate::services::agent_locale::AppLocale::En,
+            "Create test.txt",
+            "edit",
+            "once",
+            false,
+        );
+        assert!(prompt.contains("Create test.txt"));
+        assert!(prompt.contains("authorized the « Edit » group (once)"));
+        assert!(!prompt.contains("autorisé"));
+        let notice = unauthorized_edit_notice_for_locale(
+            crate::services::agent_locale::AppLocale::En,
+            &["/tmp/a.txt".into()],
+            &[FileChange {
+                path: "/tmp/b.txt".into(),
+                change_type: "modified".into(),
+            }],
+        )
+        .expect("notice");
+        assert!(notice.contains("permission is off"));
+        assert!(notice.contains("Turn on Edit"));
+        assert!(!notice.contains("désactivée"));
     }
 }

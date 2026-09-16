@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bob Work-test",
+  "mainBinaryName": "bob-work-test",
+  "identifier": "com.bobwork.desktop.test",
+  "app": {
+    "windows": [
+      {
+        "title": "Bob Work-test",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 980,
+        "minHeight": 680,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
+      }
+    ],
+    "trayIcon": {
+      "id": "main-test",
+      "iconPath": "icons/test/32x32.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false
+    }
+  },
+  "bundle": {
+    "copyright": "© 2026 Bob Work (test)",
+    "longDescription": "Side-by-side clean-install / TCC-isolated build of Bob Work. Separate bundle id, executable, icons, and app data from the release app.",
+    "shortDescription": "Bob Work clean-install test build",
+    "icon": [
+      "icons/test/32x32.png",
+      "icons/test/128x128.png",
+      "icons/test/128x128@2x.png",
+      "icons/test/icon.icns",
+      "icons/test/icon.ico"
+    ],
+    "macOS": {
+      "bundleName": "Bob Work-test",
+      "infoPlist": "Info.test.plist"
+    }
+  }
+}

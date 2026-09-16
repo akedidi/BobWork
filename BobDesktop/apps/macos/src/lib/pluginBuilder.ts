@@ -115,7 +115,7 @@ export function pluginBuilderPreview(draft: PluginBuilderDraft): {
 
 /** Seed for a free-form chat: Bob interviews, then generates. */
 export const PLUGIN_CONVERSATION_PROMPT = [
-  'Je veux créer un plugin agentique Bob Work, dans cette conversation (sans formulaire, sans wizard).',
+  '@skill:plugin-creator Je veux créer un plugin agentique Bob Work, dans cette conversation (sans formulaire, sans wizard).',
   'Prends l’initiative : si le métier a besoin de convertir, rendre, packager, extraire ou diagrammer, choisis toi-même un outil open source éprouvé (Mermaid, D2, PlantUML, pandoc, ffmpeg, jq, Graphviz, ImageMagick…), télécharge une release GitHub épinglée dans `vendor/<outil>/<version>/bin/` (schéma Bob Work), écris le wrapper dans `scripts/`, déclare `entrypoints` + `command.execute`.',
   'Ne me demande pas d’installer Homebrew ni de cocher une case dans le wizard. Pose-moi seulement les questions utiles si le bénéfice utilisateur est encore flou (objectif, déclencheur, OAuth).',
   'Quand c’est assez clair, génère le bundle local, déploie-le, et confirme qu’il apparaît dans Plugins.',
@@ -130,7 +130,7 @@ export function buildPluginGenerationPrompt(draft: PluginBuilderDraft): string {
   const preview = pluginBuilderPreview(draft)
   const audience = draft.audience.trim()
   return [
-    'Génère maintenant un plugin agentique Bob Work à partir de ce cahier des charges validé.',
+    '@skill:plugin-creator Génère maintenant un plugin agentique Bob Work à partir de ce cahier des charges validé.',
     'Ne relance pas l’entretien : les choix sont déjà faits. Écris le bundle, déploie-le, puis confirme qu’il apparaît dans Plugins.',
     '',
     `Nom : ${preview.name}`,

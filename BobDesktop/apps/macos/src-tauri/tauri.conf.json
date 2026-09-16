@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Bob Work",
-  "version": "0.1.4",
+  "mainBinaryName": "bob-work",
+  "version": "0.1.10",
   "identifier": "com.bobwork.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -30,11 +31,23 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://tile.openstreetmap.org; img-src 'self' asset: http://asset.localhost data: blob: https: https://tile.openstreetmap.org; frame-src 'self' asset: http://asset.localhost http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://[::1]:* https://[::1]:* https://bob.ibm.com https://www.ibm.com https://github.com https://docs.github.com https://learn.microsoft.com https://support.microsoft.com https://developer.apple.com https://support.apple.com; media-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'",
+      "csp": "default-src 'self'; connect-src 'self' asset: http://asset.localhost ipc: http://ipc.localhost https://tile.openstreetmap.org; img-src 'self' asset: http://asset.localhost data: blob: https: https://tile.openstreetmap.org; frame-src 'self' asset: http://asset.localhost http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://[::1]:* https://[::1]:* https://bob.ibm.com https://www.ibm.com https://github.com https://docs.github.com https://learn.microsoft.com https://support.microsoft.com https://developer.apple.com https://support.apple.com; media-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:",
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$APPCACHE/**"],
+          "allow": [
+            "$APPCACHE/**",
+            "$APPDATA/**",
+            "$APPLOCALDATA/**",
+            "$RESOURCE/**",
+            "$TEMP/**",
+            "$DESKTOP/**",
+            "$DOCUMENT/**",
+            "$DOWNLOAD/**",
+            "$HOME/.bob/**",
+            "$HOME/Library/Application Support/com.bobwork.desktop/**",
+            "$HOME/Library/Application Support/com.bobwork.desktop.test/**"
+          ],
           "deny": [],
           "requireLiteralLeadingDot": true
         }
@@ -49,7 +62,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -58,10 +74,11 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
-    "copyright": "© 2026 Bob Work",
+    "copyright": "\u00a9 2026 Bob Work",
     "longDescription": "Bob Work makes IBM Bob's AI capabilities accessible to everyone through an intuitive macOS interface.",
     "shortDescription": "IBM Bob for everyone",
     "macOS": {
+      "bundleName": "Bob Work",
       "infoPlist": "Info.plist",
       "entitlements": "entitlements.plist",
       "signingIdentity": "-",
@@ -69,17 +86,28 @@
       "frameworks": [],
       "minimumSystemVersion": "12.0",
       "dmg": {
-        "windowSize": { "width": 660, "height": 400 },
-        "appPosition": { "x": 180, "y": 170 },
-        "applicationFolderPosition": { "x": 480, "y": 170 }
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
       }
     },
     "resources": []
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU4QzgxMEEzNDU0QjhFRjIKUldUeWprdEZveERJV0ZmbkUwUnEwNjI4Y0JpRFJsdmU5MWNJTXNubVVGREp5NnlrMFY2amZxUzUK",
+      "endpoints": [
+        "https://github.com/akedidi/BobWork/releases/latest/download/latest.json"
+      ]
     },
     "shell": {
       "open": true

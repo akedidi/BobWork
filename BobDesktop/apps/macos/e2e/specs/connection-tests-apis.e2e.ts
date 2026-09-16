@@ -12,8 +12,8 @@ import {
   selectValue,
 } from '../helpers'
 
-/** Real TMDB v3 key used only to validate API-key connection status in e2e. */
-const TMDB_API_KEY = process.env.TMDB_API_KEY || 'f3d757824f08ea2cff45eb8f47ca3a1e'
+/** Set TMDB_API_KEY explicitly to run the live authenticated TMDB scenario. */
+const TMDB_API_KEY = process.env.TMDB_API_KEY ?? ''
 const TMDB_NAME = 'tmdb'
 const TMDB_URL = 'https://api.themoviedb.org/3/configuration'
 const TMDB_BAD_NAME = 'tmdb-bad-key'
@@ -21,6 +21,7 @@ const PUBLIC_API_NAME = 'public-e2e-api'
 const PUBLIC_API_URL = 'https://httpbin.org/status/200'
 const MCP_ECHO = 'mcp-e2e-echo-conn'
 const MCP_ECHO_SCRIPT = resolve(import.meta.dirname, '..', 'fixtures', 'mcp-echo-server.py')
+const liveTmdbTest = TMDB_API_KEY ? it : it.skip
 
 describe('Bob Work — tests de connexion (APIs, MCP, intégrations)', () => {
   before(async () => {
@@ -59,7 +60,7 @@ describe('Bob Work — tests de connexion (APIs, MCP, intégrations)', () => {
     expect(servers.find(item => item.name === PUBLIC_API_NAME)?.lastTest).toBeTruthy()
   })
 
-  it('configure TMDB via le formulaire API + clé et affiche le statut de connexion', async () => {
+  liveTmdbTest('configure TMDB via le formulaire API + clé et affiche le statut de connexion', async () => {
     await clickSidebar('Intégrations et MCP')
     await $('button=APIs').click()
     const keyedPanel = $('//section[contains(@class, "connector-panel")][.//h3[contains(., "API protégée par clé")]]')

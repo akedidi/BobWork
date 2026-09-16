@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "bob-work"
-version = "0.1.4"
+version = "0.1.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -501,6 +501,7 @@ dependencies = [
  "keyring",
  "libc",
  "objc2",
+ "objc2-app-kit",
  "objc2-av-foundation",
  "objc2-foundation",
  "objc2-speech",

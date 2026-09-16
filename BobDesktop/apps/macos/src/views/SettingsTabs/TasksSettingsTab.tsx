@@ -25,17 +25,17 @@ export default function TasksSettingsTab(props: any) {
 
   return (
     <>
-      <Heading title="Tâches et planifié" description="Limites d’exécution et conservation de l’historique." />
+      <Heading title={t('settings.tasksHeading')} description={t('settings.tasksDesc')} />
           <Card>
             <SettingsFields settings={settings} error={settingsError} loadingLabel={loadingLabel}>
               {s => <>
-                <NumberRow title="Coût maximal par tâche (0 = limite Bob)" value={s.maxCost} min={0} step={0.1} onChange={value => change('maxCost', value)} />
-                <NumberRow title="Conserver l’historique (jours)" value={s.taskRetentionDays} min={1} onChange={value => change('taskRetentionDays', value)} />
+                <NumberRow title={t('settings.maxTaskCost')} value={s.maxCost} min={0} step={0.1} onChange={value => change('maxCost', value)} />
+                <NumberRow title={t('settings.taskRetentionDays')} value={s.taskRetentionDays} min={1} onChange={value => change('taskRetentionDays', value)} />
               </>}
             </SettingsFields>
           </Card>
           <p className="settings-note">{t('settings.notificationsTasksNote')}</p>
-          <div className="settings-warning">Les tâches continuent écran verrouillé si le Mac reste éveillé et Bob Work actif. Elles ne peuvent pas s’exécuter pendant l’extinction ou le sommeil profond ; « Exécuter au réveil » rattrape alors l’occurrence.</div>
+          <div className="settings-warning">{t('settings.tasksWakeWarning')}</div>
     </>
   )
 }

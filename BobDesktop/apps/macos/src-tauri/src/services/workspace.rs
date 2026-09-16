@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const MEETING_MINUTES_SKILL: &str = include_str!("../../resources/skills/meeting-minutes/SKILL.md");
+const SKILL_CREATOR_SKILL: &str = include_str!("../../resources/skills/skill-creator/SKILL.md");
+const PLUGIN_CREATOR_SKILL: &str = include_str!("../../resources/skills/plugin-creator/SKILL.md");
+const AGENT_REVIEW_SKILL: &str = include_str!("../../resources/skills/agent-review/SKILL.md");
+const COMPUTER_USE_SKILL: &str = include_str!("../../resources/skills/computer-use/SKILL.md");
+const ORCA_CLI_SKILL: &str = include_str!("../../resources/skills/orca-cli/SKILL.md");
+const ORCHESTRATION_SKILL: &str = include_str!("../../resources/skills/orchestration/SKILL.md");
+const CAPABILITY_ROUTER_SKILL: &str =
+    include_str!("../../resources/skills/capability-router/SKILL.md");
+const IMAGE_ANNOTATE_SKILL: &str =
+    include_str!("../../resources/skills/image-annotate/SKILL.md");
 
 pub struct WorkspaceService;
 
@@ -38,7 +48,15 @@ impl WorkspaceService {
         let conn = db.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT entity_type, entity_id, project_id, title,
-             snippet(search_index, 4, '<mark>', '</mark>', ' … ', 18), bm25(search_index)
+             snippet(search_index, 4, '<mark>', '</mark>', ' … ', 18), bm25(search_index),
+             CASE WHEN entity_type = 'message' THEN (
+                 SELECT messages.created_at
+                 FROM messages
+                 WHERE messages.conversation_id = search_index.entity_id
+                   AND messages.content = search_index.body
+                 ORDER BY messages.created_at DESC
+                 LIMIT 1
+             ) END
              FROM search_index WHERE search_index MATCH ?1 ORDER BY bm25(search_index) LIMIT ?2",
         )?;
         let mut seen = HashSet::new();
@@ -51,6 +69,7 @@ impl WorkspaceService {
                     title: row.get(3)?,
                     snippet: row.get::<_, String>(4).unwrap_or_default(),
                     score: row.get::<_, f64>(5).unwrap_or(0.0),
+                    message_created_at: row.get(6)?,
                 })
             })?
             .filter_map(Result::ok)
@@ -82,50 +101,25 @@ impl WorkspaceService {
                 if !entry.path().is_dir() {
                     continue;
                 }
-                let path = entry.path().join("SKILL.md");
-                let Ok(content) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
+                let skill_dir = entry.path();
                 let slug = entry.file_name().to_string_lossy().to_string();
                 if !seen.insert(slug.clone()) {
                     continue;
                 }
-                let (frontmatter, body) = parse_frontmatter(&content);
-                let description = frontmatter
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let name = frontmatter
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&slug)
-                    .to_string();
-                let enabled = !frontmatter
-                    .get("disable-model-invocation")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let icon = frontmatter
-                    .get("icon")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let skill_dir = entry.path();
-                let (created_at, updated_at) = skill_timestamps(&path);
-                skills.push(Skill {
-                    slug,
-                    name,
-                    description,
-                    content: body,
-                    source_path: path.to_string_lossy().to_string(),
-                    scope: scope.clone(),
-                    enabled,
-                    icon,
-                    builtin: skill_dir_is_builtin(&skill_dir),
-                    created_at,
-                    updated_at,
-                });
+                // Plugin bundles also live under ~/.bob/skills/<slug>/ with a
+                // SKILL.md + `.bob-work-plugin.json`. They belong in Plugins,
+                // not the Skills catalog — listing both confuses "I asked for a
+                // plugin" vs "why is this a skill?".
+                if skill_dir.join(".bob-work-plugin.json").is_file()
+                    || skill_dir.join(".bob-work-plugin-id").is_file()
+                {
+                    continue;
+                }
+                let Some(mut skill) = read_skill_entry(&skill_dir, &slug, &scope, None, "") else {
+                    continue;
+                };
+                skill.child_skills = list_nested_skills(&skill_dir, &slug, &scope, skill.builtin);
+                skills.push(skill);
             }
         }
         sort_skills_for_display(&mut skills);
@@ -194,9 +188,10 @@ impl WorkspaceService {
         std::fs::rename(&temporary, &path)?;
         let _ = std::fs::remove_file(backup);
         let (created_at, updated_at) = skill_timestamps(&path);
+        let slug = input.slug.clone();
         Ok(Skill {
-            slug: input.slug.clone(),
-            name: input.slug,
+            slug: slug.clone(),
+            name: slug.clone(),
             description: input.description,
             content: input.content,
             source_path: path.to_string_lossy().to_string(),
@@ -207,10 +202,30 @@ impl WorkspaceService {
             },
             enabled: true,
             icon,
-            builtin: skill_dir_is_builtin(&skill_dir),
+            builtin: skill_is_builtin(&skill_dir, &slug),
             created_at,
             updated_at,
+            parent_slug: None,
+            relative_path: String::new(),
+            child_skills: list_nested_skills(&skill_dir, &slug, if input.workspace.is_some() { "workspace-bob" } else { "global-bob" }, skill_is_builtin(&skill_dir, &slug)),
         })
+    }
+
+    /// Mark first-party Orca agent skills as built-in when present under
+    /// `~/.agents/skills`. Bob Work ships with these workflows and they must
+    /// not appear as deletable personal skills.
+    pub fn ensure_first_party_agent_skills(&self) -> AppResult<()> {
+        let Some(home) = dirs::home_dir() else {
+            return Ok(());
+        };
+        let root = home.join(".agents/skills");
+        for slug in FIRST_PARTY_AGENT_SKILL_SLUGS {
+            let skill_dir = root.join(slug);
+            if skill_dir.join("SKILL.md").is_file() {
+                std::fs::write(skill_dir.join(".bob-work-builtin"), "1")?;
+            }
+        }
+        Ok(())
     }
 
     pub fn set_skill_enabled(
@@ -220,7 +235,7 @@ impl WorkspaceService {
         workspace: Option<&str>,
         enabled: bool,
     ) -> AppResult<()> {
-        validate_slug(slug)?;
+        validate_skill_ref(slug)?;
         let root = match scope {
             "global-bob" => dirs::home_dir()
                 .ok_or_else(|| AppError::Io("Dossier utilisateur introuvable".into()))?
@@ -251,7 +266,7 @@ impl WorkspaceService {
                 )))
             }
         };
-        Self::set_skill_enabled_at_path(&root.join(slug).join("SKILL.md"), enabled)
+        Self::set_skill_enabled_at_path(&skill_markdown_path(&root, slug), enabled)
     }
 
     fn set_skill_enabled_at_path(path: &std::path::Path, enabled: bool) -> AppResult<()> {
@@ -300,7 +315,7 @@ impl WorkspaceService {
             "outlook-mail" => (
                 "bob-work-outlook-mail",
                 "Use the Bob Work Microsoft connector (MCP bob-work-microsoft) for Outlook mail.",
-                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (especially `graph_search_mail`). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Prefer read/search/draft first. Ask explicit approval before sending, moving, deleting or permanently changing mail. Return stable Graph identifiers and web links when available.",
+                "Prefer the Bob Work MCP server `bob-work-microsoft` tools (`graph_get_profile` for the connected account and email address, `graph_search_mail` for messages). Do not call Microsoft Graph via ad-hoc curl and do not print tokens. Prefer read/search/draft first. Ask explicit approval before sending, moving, deleting or permanently changing mail. Return stable Graph identifiers and web links when available.",
             ),
             "outlook-calendar" => (
                 "bob-work-outlook-calendar",
@@ -337,37 +352,109 @@ impl WorkspaceService {
         })
     }
 
-    /// Deploy first-party, instruction-only skills that are available in every
-    /// Bob Work installation without requiring a connector or a plugin.
-    pub fn install_builtin_skill(&self, skill_id: &str) -> AppResult<Skill> {
-        let (slug, description, content) = match skill_id {
-            "meeting-minutes" => (
-                "bob-work-meeting-minutes",
-                "Crée un compte rendu professionnel à partir de notes, d’une conversation ou d’un enregistrement audio joint.",
-                parse_frontmatter(MEETING_MINUTES_SKILL).1,
-            ),
-            _ => return Err(AppError::ValidationFailed("Ce skill intégré n’existe pas.".into())),
-        };
+    fn install_bundled_builtin_skill(
+        &self,
+        slug: &str,
+        raw_markdown: &str,
+        icon: &str,
+        display_name: Option<&str>,
+    ) -> AppResult<Skill> {
+        let (frontmatter, body) = parse_frontmatter(raw_markdown);
+        let description = frontmatter
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let skill = self.save_skill(SaveSkillInput {
             slug: slug.into(),
-            description: description.into(),
-            content: content.clone(),
-            icon: Some("meeting".into()),
+            description: description.clone(),
+            content: body.clone(),
+            icon: Some(icon.into()),
             workspace: None,
         })?;
         let skill_dir = PathBuf::from(&skill.source_path)
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&skill.source_path));
-        // Keep the curated, user-facing metadata alongside the source body.
-        std::fs::write(skill_dir.join("SKILL.md"), MEETING_MINUTES_SKILL)?;
+        std::fs::write(skill_dir.join("SKILL.md"), raw_markdown)?;
         std::fs::write(skill_dir.join(".bob-work-builtin"), "1")?;
         Ok(Skill {
             builtin: true,
-            name: "Compte rendu professionnel".into(),
-            content,
+            name: display_name
+                .map(str::to_string)
+                .or_else(|| {
+                    frontmatter
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| slug.to_string()),
+            description,
+            content: body,
             ..skill
         })
+    }
+
+    /// Deploy first-party, instruction-only skills that are available in every
+    /// Bob Work installation without requiring a connector or a plugin.
+    pub fn install_builtin_skill(&self, skill_id: &str) -> AppResult<Skill> {
+        match skill_id {
+            "meeting-minutes" => self.install_bundled_builtin_skill(
+                "bob-work-meeting-minutes",
+                MEETING_MINUTES_SKILL,
+                "meeting",
+                Some("Compte rendu professionnel"),
+            ),
+            "skill-creator" => self.install_bundled_builtin_skill(
+                "skill-creator",
+                SKILL_CREATOR_SKILL,
+                "plugin",
+                Some("Skill Creator"),
+            ),
+            "plugin-creator" => self.install_bundled_builtin_skill(
+                "plugin-creator",
+                PLUGIN_CREATOR_SKILL,
+                "plugin",
+                Some("Plugin Creator"),
+            ),
+            "agent-review" => self.install_bundled_builtin_skill(
+                "agent-review",
+                AGENT_REVIEW_SKILL,
+                "codegraph",
+                Some("Agent Review"),
+            ),
+            "computer-use" => self.install_bundled_builtin_skill(
+                "computer-use",
+                COMPUTER_USE_SKILL,
+                "computer",
+                Some("Computer Use"),
+            ),
+            "orca-cli" => self.install_bundled_builtin_skill(
+                "orca-cli",
+                ORCA_CLI_SKILL,
+                "plugin",
+                Some("Orca CLI"),
+            ),
+            "orchestration" => self.install_bundled_builtin_skill(
+                "orchestration",
+                ORCHESTRATION_SKILL,
+                "plugin",
+                Some("Orchestration"),
+            ),
+            "capability-router" => self.install_bundled_builtin_skill(
+                "capability-router",
+                CAPABILITY_ROUTER_SKILL,
+                "plugin",
+                Some("Capability router"),
+            ),
+            "image-annotate" => self.install_bundled_builtin_skill(
+                "image-annotate",
+                IMAGE_ANNOTATE_SKILL,
+                "designer",
+                Some("Image annotate"),
+            ),
+            _ => Err(AppError::ValidationFailed("Ce skill intégré n’existe pas.".into())),
+        }
     }
 
     pub fn delete_skill(&self, slug: &str, workspace: Option<&str>) -> AppResult<()> {
@@ -471,6 +558,16 @@ impl WorkspaceService {
                 };
                 for (key, value) in env {
                     if !valid_env_key(key) {
+                        continue;
+                    }
+                    if crate::app_identity::is_runtime_identity_env_key(key) {
+                        // Last writer of global mcp.json would otherwise point
+                        // Bob Work-test at Bob Work's AppleScript bridge (and vice versa).
+                        continue;
+                    }
+                    if key.starts_with("BOB_WORK_API_") {
+                        // Internal REST-adapter metadata and credentials belong
+                        // only to that MCP child process, never the Bob process.
                         continue;
                     }
                     let Some(text) = value.as_str() else {
@@ -716,6 +813,8 @@ impl WorkspaceService {
                 "add-json",
                 &input.name,
                 &Value::Object(config).to_string(),
+                "--scope",
+                "global",
             ])
             .output()
             .map_err(|e| AppError::BobExecutionFailed(e.to_string()))?;
@@ -726,7 +825,7 @@ impl WorkspaceService {
         }
         if !input.enabled {
             let _ = std::process::Command::new(bob_path)
-                .args(["mcp", "disable", &input.name])
+                .args(["mcp", "disable", &input.name, "--scope", "global"])
                 .output();
         }
         if let Some(original_name) = input.original_name.as_deref() {
@@ -742,7 +841,7 @@ impl WorkspaceService {
         self.ensure_mcp_server_mutable(name)?;
         let action = if enabled { "enable" } else { "disable" };
         let output = std::process::Command::new(bob_path)
-            .args(["mcp", action, name])
+            .args(["mcp", action, name, "--scope", "global"])
             .output()
             .map_err(|e| AppError::BobExecutionFailed(e.to_string()))?;
         if output.status.success() {
@@ -758,7 +857,7 @@ impl WorkspaceService {
         validate_slug(name)?;
         self.ensure_mcp_server_mutable(name)?;
         let output = std::process::Command::new(bob_path)
-            .args(["mcp", "remove", name])
+            .args(["mcp", "remove", name, "--scope", "global"])
             .output()
             .map_err(|e| AppError::BobExecutionFailed(e.to_string()))?;
         if output.status.success() {
@@ -1006,6 +1105,7 @@ fn mcp_server_is_builtin_by_name(home: &Path, name: &str) -> bool {
 #[cfg(test)]
 mod mcp_tests {
     use super::WorkspaceService;
+    use crate::models::workspace::SaveMcpServerInput;
 
     fn isolated_home() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("bob-work-mcp-test-{}", uuid::Uuid::new_v4()))
@@ -1142,6 +1242,47 @@ mod mcp_tests {
         assert!(edited.contains("format=json"));
         assert!(!edited.contains("redacted"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn saves_user_connectors_in_global_scope() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_home();
+        std::fs::create_dir_all(&root).unwrap();
+        let arguments_path = root.join("arguments.txt");
+        let bob_path = root.join("fake-bob");
+        std::fs::write(
+            &bob_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                arguments_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bob_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        WorkspaceService::new()
+            .save_mcp_server(
+                bob_path.to_str().unwrap(),
+                SaveMcpServerInput {
+                    original_name: None,
+                    name: "tmdb-test".into(),
+                    transport: "http".into(),
+                    command_or_url: "https://api.themoviedb.org/3/configuration".into(),
+                    args: vec![],
+                    enabled: true,
+                    env: None,
+                    env_remove: vec![],
+                    headers: None,
+                },
+            )
+            .unwrap();
+
+        let arguments = std::fs::read_to_string(arguments_path).unwrap();
+        assert!(arguments.ends_with("--scope\nglobal\n"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1202,6 +1343,9 @@ mod skill_tests {
             icon: String::new(),
             created_at: "2026-08-02T10:00:00Z".into(),
             updated_at: "2026-08-10T10:00:00Z".into(),
+            parent_slug: None,
+            relative_path: String::new(),
+            child_skills: vec![],
         };
         let older = super::Skill {
             slug: "old-user".into(),
@@ -1215,6 +1359,9 @@ mod skill_tests {
             icon: String::new(),
             created_at: "2026-08-01T10:00:00Z".into(),
             updated_at: "2026-08-01T10:00:00Z".into(),
+            parent_slug: None,
+            relative_path: String::new(),
+            child_skills: vec![],
         };
         let builtin = super::Skill {
             slug: "bob-work-computer-use".into(),
@@ -1228,6 +1375,9 @@ mod skill_tests {
             icon: String::new(),
             created_at: "2026-08-11T12:00:00Z".into(),
             updated_at: "2026-08-11T12:00:00Z".into(),
+            parent_slug: None,
+            relative_path: String::new(),
+            child_skills: vec![],
         };
         let mut skills = vec![builtin.clone(), older.clone(), newer.clone()];
         super::sort_skills_for_display(&mut skills);
@@ -1241,14 +1391,92 @@ mod skill_tests {
     }
 
     #[test]
-    fn treats_every_skill_except_cto_invest_as_builtin() {
+    fn discovers_nested_skills_under_pack_skills_directory() {
+        let root =
+            std::env::temp_dir().join(format!("bob-work-nested-{}", uuid::Uuid::new_v4()));
+        let pack = root.join("research-pack");
+        let nested = pack.join("skills").join("web-scan");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            pack.join("SKILL.md"),
+            "---\nname: Research Pack\ndescription: Parent pack\n---\n\nRoute to nested skills.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: Web Scan\ndescription: Nested scanner\n---\n\nScan the web.\n",
+        )
+        .unwrap();
+
+        let parent = super::read_skill_entry(&pack, "research-pack", "global-bob", None, "")
+            .expect("parent skill");
+        let children = super::list_nested_skills(&pack, "research-pack", "global-bob", false);
+        assert!(parent.parent_slug.is_none());
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].slug, "research-pack/web-scan");
+        assert_eq!(children[0].name, "Web Scan");
+        assert_eq!(children[0].parent_slug.as_deref(), Some("research-pack"));
+        assert_eq!(children[0].relative_path, "skills/web-scan/SKILL.md");
+        assert!(children[0].content.contains("Scan the web"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_skills_skips_plugin_manifest_bundles() {
+        let workspace =
+            std::env::temp_dir().join(format!("bob-work-ws-skills-{}", uuid::Uuid::new_v4()));
+        let skills_root = workspace.join(".bob/skills");
+        let plain = skills_root.join("plain-skill");
+        let plugin = skills_root.join("plugin-bundle");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plain.join("SKILL.md"),
+            "---\nname: Plain Skill\ndescription: Instructions only\n---\n\nDo the thing.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("SKILL.md"),
+            "---\nname: Plugin Bundle\ndescription: Looks like a skill\n---\n\nRun the tool.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join(".bob-work-plugin.json"),
+            r#"{"slug":"plugin-bundle","bobWorkImportConsent":true}"#,
+        )
+        .unwrap();
+
+        let listed = WorkspaceService::new().list_skills(Some(workspace.to_str().unwrap()));
+        let workspace_slugs: Vec<_> = listed
+            .iter()
+            .filter(|skill| skill.scope == "workspace-bob")
+            .map(|skill| skill.slug.as_str())
+            .collect();
+        assert!(
+            workspace_slugs.contains(&"plain-skill"),
+            "expected plain skill, got {workspace_slugs:?}"
+        );
+        assert!(
+            !workspace_slugs.contains(&"plugin-bundle"),
+            "plugin bundles must not appear in Skills catalog: {workspace_slugs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn distinguishes_personal_skills_from_builtins_using_bundle_markers() {
         let path = isolated_skill();
         let skill_dir = path.parent().unwrap();
+        assert!(!super::skill_dir_is_builtin(skill_dir));
+
+        std::fs::write(skill_dir.join(".bob-work-builtin"), "1").unwrap();
         assert!(super::skill_dir_is_builtin(skill_dir));
 
         let cto_dir = skill_dir.parent().unwrap().join("bob-work-cto-invest");
         std::fs::create_dir_all(&cto_dir).unwrap();
-        std::fs::write(cto_dir.join(".bob-work-builtin"), "1").unwrap();
+        std::fs::write(cto_dir.join(".bob-work-plugin-id"), "bob-work-cto-invest").unwrap();
         assert!(!super::skill_dir_is_builtin(&cto_dir));
         std::fs::remove_dir_all(skill_dir.parent().unwrap()).unwrap();
     }
@@ -1264,37 +1492,33 @@ mod skill_tests {
             metadata.get("icon").and_then(Value::as_str),
             Some("meeting")
         );
-        assert!(body.contains("va directement au contexte"));
-        assert!(body.contains("## Synthèse"));
-        assert!(body.contains("## Décisions"));
-        assert!(body.contains("## Actions"));
-        assert!(body.contains("N’ajoute pas de section « Participants »"));
-        assert!(!body.contains("**Participants :**"));
+        assert!(body.contains("same language as the user's prompt"));
+        assert!(body.contains("Never mix languages"));
+        assert!(body.contains("Executive summary"));
+        assert!(body.contains("Synthèse"));
+        assert!(body.contains("| Action | Owner | Due |"));
+        assert!(body.contains("Do not add a « Participants » section"));
         assert!(!body.contains("[personne ou À définir]"));
     }
 
     #[test]
-    fn detects_native_plugin_skills_by_slug() {
-        for slug in [
-            "bob-work-computer-use",
-            "bob-work-chrome-control",
-            "bob-work-microsoft-word",
-            "bob-work-docling",
-            "excel-helper",
-            "bob-work-ibm-pursuit",
-            "cloud-architect-agent",
-            "docling",
-            "bob-rh-recruiting",
-            "hr-recruiting",
-            "redacteur-juridique",
-        ] {
-            let root = std::env::temp_dir().join(format!("bob-work-slug-{slug}"));
+    fn detects_native_plugin_skill_from_builtin_plugin_id() {
+        let root = std::env::temp_dir().join("bob-work-builtin-marker-test");
+        let skill_dir = root.join("bob-work-docling");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join(".bob-work-plugin-id"), "builtin-docling").unwrap();
+        assert!(super::skill_dir_is_builtin(&skill_dir));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn first_party_agent_skills_are_builtin_by_slug() {
+        for slug in super::FIRST_PARTY_AGENT_SKILL_SLUGS {
+            let root = std::env::temp_dir().join(format!("bob-agent-skill-{slug}"));
             let skill_dir = root.join(slug);
             std::fs::create_dir_all(&skill_dir).unwrap();
-            assert!(
-                super::skill_dir_is_builtin(&skill_dir),
-                "{slug} should be marked builtin"
-            );
+            std::fs::write(skill_dir.join("SKILL.md"), "# test").unwrap();
+            assert!(super::skill_is_builtin(&skill_dir, slug));
             std::fs::remove_dir_all(&root).unwrap();
         }
     }
@@ -1341,8 +1565,152 @@ fn sort_skills_for_display(skills: &mut [Skill]) {
     });
 }
 
+const FIRST_PARTY_AGENT_SKILL_SLUGS: &[&str] = &[
+    "orca-cli",
+    "computer-use",
+    "find-skills",
+    "orchestration",
+];
+
+fn skill_is_builtin(skill_dir: &Path, slug: &str) -> bool {
+    skill_dir_is_builtin(skill_dir) || FIRST_PARTY_AGENT_SKILL_SLUGS.contains(&slug)
+}
+
 fn skill_dir_is_builtin(skill_dir: &Path) -> bool {
-    skill_dir.file_name().and_then(|value| value.to_str()) != Some("bob-work-cto-invest")
+    if skill_dir.join(".bob-work-builtin").is_file() {
+        return true;
+    }
+    if std::fs::read_to_string(skill_dir.join(".bob-work-plugin-id"))
+        .is_ok_and(|value| value.trim().starts_with("builtin-"))
+    {
+        return true;
+    }
+    std::fs::read_to_string(skill_dir.join(".bob-work-plugin.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|manifest| manifest.get("builtin").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn skill_markdown_path(root: &Path, slug: &str) -> PathBuf {
+    if let Some((parent, child)) = slug.split_once('/') {
+        root.join(parent).join("skills").join(child).join("SKILL.md")
+    } else {
+        root.join(slug).join("SKILL.md")
+    }
+}
+
+fn read_skill_entry(
+    skill_dir: &Path,
+    slug: &str,
+    scope: &str,
+    parent_slug: Option<&str>,
+    relative_path: &str,
+) -> Option<Skill> {
+    let path = skill_dir.join("SKILL.md");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let (frontmatter, body) = parse_frontmatter(&content);
+    let description = frontmatter
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let folder_name = skill_dir
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| slug.to_string());
+    let name = frontmatter
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&folder_name)
+        .to_string();
+    let enabled = !frontmatter
+        .get("disable-model-invocation")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let icon = frontmatter
+        .get("icon")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let (created_at, updated_at) = skill_timestamps(&path);
+    let top_level_slug = parent_slug.unwrap_or(slug);
+    let top_level_dir = parent_slug
+        .map(|_| skill_dir.parent().and_then(|p| p.parent()).unwrap_or(skill_dir))
+        .unwrap_or(skill_dir);
+    let builtin = skill_is_builtin(top_level_dir, top_level_slug);
+    Some(Skill {
+        slug: slug.to_string(),
+        name,
+        description,
+        content: body,
+        source_path: path.to_string_lossy().to_string(),
+        scope: scope.to_string(),
+        enabled,
+        icon,
+        builtin,
+        created_at,
+        updated_at,
+        parent_slug: parent_slug.map(str::to_string),
+        relative_path: relative_path.to_string(),
+        child_skills: Vec::new(),
+    })
+}
+
+/// Nested skill packs store specialized skills under `skills/<slug>/SKILL.md`.
+fn list_nested_skills(
+    parent_dir: &Path,
+    parent_slug: &str,
+    scope: &str,
+    parent_builtin: bool,
+) -> Vec<Skill> {
+    let nested_root = parent_dir.join("skills");
+    let Ok(entries) = std::fs::read_dir(&nested_root) else {
+        return Vec::new();
+    };
+    let mut children = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let child_folder = entry.file_name().to_string_lossy().to_string();
+            if validate_slug(&child_folder).is_err() {
+                return None;
+            }
+            let child_slug = format!("{parent_slug}/{child_folder}");
+            let relative_path = format!("skills/{child_folder}/SKILL.md");
+            let mut child = read_skill_entry(
+                &entry.path(),
+                &child_slug,
+                scope,
+                Some(parent_slug),
+                &relative_path,
+            )?;
+            child.builtin = parent_builtin || child.builtin;
+            Some(child)
+        })
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+    children
+}
+
+fn validate_skill_ref(slug: &str) -> AppResult<()> {
+    if let Some((parent, child)) = slug.split_once('/') {
+        if slug.matches('/').count() != 1 {
+            return Err(AppError::ValidationFailed(
+                "Un skill imbriqué doit utiliser le format parent/enfant.".into(),
+            ));
+        }
+        validate_slug(parent)?;
+        validate_slug(child)
+    } else {
+        validate_slug(slug)
+    }
 }
 
 fn validate_slug(slug: &str) -> AppResult<()> {
@@ -1431,8 +1799,26 @@ fn redact_mcp_raw(mut value: Value) -> Value {
                     .as_object()
                     .map(|values| {
                         values
-                            .keys()
-                            .map(|name| (name.clone(), Value::String("<redacted>".into())))
+                            .iter()
+                            .map(|(name, value)| {
+                                let public_api_metadata = matches!(
+                                    name.as_str(),
+                                    "BOB_WORK_API_KIND"
+                                        | "BOB_WORK_API_CREDENTIAL_ONLY"
+                                        | "BOB_WORK_API_ID"
+                                        | "BOB_WORK_API_BASE_URL"
+                                        | "BOB_WORK_API_AUTH_MODE"
+                                        | "BOB_WORK_API_AUTH_NAME"
+                                );
+                                (
+                                    name.clone(),
+                                    if key == "env" && public_api_metadata {
+                                        value.clone()
+                                    } else {
+                                        Value::String("<redacted>".into())
+                                    },
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_else(|| {

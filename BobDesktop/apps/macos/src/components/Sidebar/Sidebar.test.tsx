@@ -17,7 +17,10 @@ const mocks = vi.hoisted(() => ({
   createConversation: vi.fn(),
   updateConversation: vi.fn(),
   updateTaskPinned: vi.fn(),
+  searchWorkspace: vi.fn(),
   getUsageStatus: vi.fn().mockResolvedValue(null),
+  getBobAuthSnapshot: vi.fn().mockResolvedValue({ found: true, authenticated: true, authenticationMethod: 'api_key_session' }),
+  getAppInfo: vi.fn().mockResolvedValue({ appName: 'Bob Work', appVersion: '0.1.9' }),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }))
 
@@ -30,7 +33,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 vi.mock('../../lib/ipc', () => ({
   detectBob: vi.fn().mockResolvedValue({ found: true, authenticated: true }),
-  getBobAuthSnapshot: vi.fn().mockResolvedValue({ found: true, authenticated: true, authenticationMethod: 'api_key_session' }),
+  getBobAuthSnapshot: mocks.getBobAuthSnapshot,
   getProjects: mocks.getProjects,
   getConversation: mocks.getConversation,
   getConversations: mocks.getConversations,
@@ -38,11 +41,45 @@ vi.mock('../../lib/ipc', () => ({
   createConversation: mocks.createConversation,
   updateConversation: mocks.updateConversation,
   updateTaskPinned: mocks.updateTaskPinned,
-  searchWorkspace: vi.fn().mockResolvedValue([]),
+  searchWorkspace: mocks.searchWorkspace,
   getUsageStatus: mocks.getUsageStatus,
+  getAppInfo: mocks.getAppInfo,
 }))
 
 describe('Sidebar', () => {
+  beforeEach(() => {
+    mocks.getBobAuthSnapshot.mockResolvedValue({ found: true, authenticated: true, authenticationMethod: 'api_key_session' })
+  })
+
+  it('affiche Réglages avec un hint installation quand Bob Shell est absent', async () => {
+    mocks.getBobAuthSnapshot.mockResolvedValue({
+      found: false,
+      path: null,
+      version: null,
+      authenticated: false,
+      authenticationMethod: 'required',
+    })
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('button', { name: 'Réglages' })).toBeVisible()
+    expect(await screen.findByText('Bob Shell requis — IBM Bob Shell')).toBeVisible()
+    expect(screen.queryByText('Configurer Bob')).not.toBeInTheDocument()
+  })
+
+  it('affiche le nom de la release au-dessus de Nouveau chat', async () => {
+    mocks.getAppInfo.mockResolvedValueOnce({ appName: 'Bob Work-test', appVersion: '0.1.9' })
+    render(
+      <MemoryRouter>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Bob Work-test')).toBeVisible()
+    expect(screen.getByText('Nouveau chat')).toBeVisible()
+  })
+
   it('expose Artefacts et remplace le corps de la barre par Priorité', async () => {
     render(
       <MemoryRouter>
@@ -82,6 +119,28 @@ describe('Sidebar', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rechercher' })).not.toBeInTheDocument())
     expect(trigger).toHaveFocus()
+  })
+
+  it('affiche la date du message dans les résultats de recherche', async () => {
+    mocks.searchWorkspace.mockResolvedValueOnce([{
+      entityType: 'message',
+      entityId: 'conversation-1',
+      title: 'Conversation locale',
+      snippet: 'Une réponse avec architecture',
+      score: -1,
+      messageCreatedAt: '2026-08-11T14:30:00Z',
+    }])
+    render(<MemoryRouter><Sidebar /></MemoryRouter>)
+
+    fireEvent.click(screen.getByTitle('Rechercher'))
+    fireEvent.change(await screen.findByPlaceholderText('Rechercher dans les chats'), {
+      target: { value: 'architecture' },
+    })
+
+    await screen.findByText('Une réponse avec architecture')
+    const timestamp = document.querySelector('time[datetime="2026-08-11T14:30:00Z"]')
+    expect(timestamp).toBeVisible()
+    expect(timestamp?.textContent).not.toBe('')
   })
 
   it('garde le panneau Priorité ouvert après le clic d’ouverture', async () => {
@@ -187,8 +246,9 @@ describe('Sidebar', () => {
     })
     mocks.updateConversation.mockResolvedValue(undefined)
     mocks.updateTaskPinned.mockResolvedValue(undefined)
+    mocks.searchWorkspace.mockResolvedValue([])
     mocks.getUsageStatus.mockResolvedValue(null)
-    useAppStore.setState({ activeProjectId: null, projects, conversations, tasks: [], bobStatus: 'ready', notifications: [], notificationsOpen: false, unreadConversationIds: [] })
+    useAppStore.setState({ activeProjectId: null, projects, conversations, tasks: [], bobStatus: 'ready', notifications: [], notificationsOpen: false, unreadConversationIds: [], unreadCompletedTasks: [] })
   })
 
   it('actualise les projets quand un projet est créé depuis le mobile', async () => {
@@ -313,6 +373,37 @@ describe('Sidebar', () => {
 
     expect(screen.queryByLabelText('Résultat non consulté')).not.toBeInTheDocument()
     expect(useAppStore.getState().unreadConversationIds).not.toContain('conversation-1')
+  })
+
+  it('efface toutes les pastilles quand les notifications sont ouvertes', async () => {
+    useAppStore.setState({
+      notifications: [{
+        id: 'notification-1',
+        title: 'Tâche terminée',
+        body: 'Le résultat est prêt.',
+        kind: 'chat_completed',
+        createdAt: '2026-09-09T14:00:00Z',
+        conversationId: 'conversation-1',
+        taskId: 'task-1',
+        read: false,
+      }],
+    })
+    render(<MemoryRouter><Sidebar /></MemoryRouter>)
+
+    act(() => {
+      const store = useAppStore.getState()
+      store.markCompletedTaskUnread('task-1', 'conversation-1')
+      store.markCompletedTaskUnread('task-2', 'conversation-1')
+    })
+    expect(await screen.findByLabelText('Résultat non consulté')).toBeVisible()
+    expect(screen.queryByText('2', { selector: '.sidebar-completed-task-badge' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }))
+
+    expect(useAppStore.getState().unreadConversationIds).toEqual([])
+    expect(useAppStore.getState().unreadCompletedTasks).toEqual([])
+    expect(useAppStore.getState().notifications.every(item => item.read)).toBe(true)
+    expect(screen.queryByLabelText('Résultat non consulté')).not.toBeInTheDocument()
   })
 
   it('uses a calendar icon to align scheduled conversations', async () => {

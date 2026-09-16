@@ -4,11 +4,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_identity;
 mod commands;
 mod db;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_applescript_bridge;
+mod macos_clipboard;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
 #[cfg(target_os = "macos")]
@@ -19,12 +21,16 @@ mod services;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tauri_permissions_tests;
 
 use tauri::Manager;
 use tracing::info;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::security::terminal_sandbox::raise_process_nofile_limit();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -75,6 +81,7 @@ pub fn run() {
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
+            crate::app_identity::init_app_display_name(app_handle.package_info().name.clone());
 
             #[cfg(target_os = "macos")]
             {
@@ -91,7 +98,9 @@ pub fn run() {
                 .always_on_top(true)
                 .visible_on_all_workspaces(true)
                 .skip_taskbar(true)
-                .content_protected(true)
+                // Showing the visual Bob pointer must never make Bob Work key
+                // while Computer Use is operating another application.
+                .focusable(false)
                 .visible(false)
                 .build()?;
                 pointer.set_ignore_cursor_events(true)?;
@@ -115,18 +124,9 @@ pub fn run() {
             let db = db::Database::new(&db_path).expect("Failed to initialize database");
             db.run_migrations().expect("Failed to run migrations");
 
+            // Runtime registry seeding (zip hashes, Python probes, materialize) is
+            // deferred to bob-startup-refresh so the window can appear immediately.
             let runtime_manager = services::runtime_manager::RuntimeManager::new(&data_dir);
-            runtime_manager
-                .seed_registry(&db)
-                .expect("Failed to initialize Runtime Architecture V2 registry");
-
-            let backup_dir = data_dir.join("backups");
-            if let Err(error) = db
-                .create_backup(&backup_dir, true)
-                .and_then(|_| db::Database::prune_backups(&backup_dir, 7))
-            {
-                tracing::warn!("Unable to create automatic database backup: {error}");
-            }
 
             app_handle.manage(db);
             app_handle.manage(runtime_manager.clone());
@@ -170,170 +170,13 @@ pub fn run() {
             let conversation_service = services::conversation::ConversationService::new();
             app_handle.manage(conversation_service);
 
-            // Initialize plugin service
+            // Initialize plugin service. Built-in deploy and skill copies can
+            // take seconds; the window must not wait on them.
             let plugin_service = services::plugin::PluginService::new();
-            if let Err(error) = plugin_service.ensure_builtin_plugins(&app_handle.state::<db::Database>()) {
-                tracing::warn!("Unable to refresh built-in document plugins: {:?}", error);
-            }
-            if let Err(error) = services::workspace::WorkspaceService::new()
-                .install_builtin_skill("meeting-minutes")
-            {
-                tracing::warn!("Unable to install built-in meeting-minutes skill: {:?}", error);
-            }
-            // Resolve Bob once during startup so built-in MCPs are registered
-            // before the first prompt. A fresh BobService has no cached path.
-            let bob_service = app_handle.state::<services::bob::BobService>();
-            if bob_service.get_binary_path().is_none() {
-                let _ = bob_service.detect();
-            }
-            if let Some(bob_path) = bob_service.get_binary_path() {
-                if let Err(error) = services::codegraph_mcp::CodeGraphMcpService.sync(&bob_path) {
-                    tracing::warn!("Unable to sync built-in CodeGraph MCP tools: {:?}", error);
-                }
-                if let Err(error) = services::map_mcp::MapMcpService.sync(&bob_path) {
-                    tracing::warn!("Unable to sync built-in map MCP tools: {:?}", error);
-                }
-                let ssh_service = services::ssh::SshService::new(&data_dir);
-                if !ssh_service.list().is_empty() {
-                    if let Err(error) = ssh_service.sync_mcp(&bob_path) {
-                        tracing::warn!("Unable to sync built-in SSH MCP tools: {:?}", error);
-                    }
-                }
-                if let Err(error) = plugin_service.sync_installed_office_mcps(
-                    &app_handle.state::<db::Database>(),
-                    &bob_path,
-                ) {
-                    tracing::warn!("Unable to sync built-in Office MCP tools: {:?}", error);
-                }
-                if let Ok(settings) =
-                    services::settings::SettingsService::new().get(&app_handle.state::<db::Database>())
-                {
-                    if let Err(error) = services::map_mcp::MapMcpService.sync_location(
-                        settings.location_enabled,
-                        settings.current_latitude,
-                        settings.current_longitude,
-                        settings.current_location_updated_at.as_deref(),
-                    ) {
-                        tracing::warn!("Unable to sync current location for map tools: {:?}", error);
-                    }
-                    if settings.chrome_control_enabled {
-                        if let Err(error) =
-                            services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
-                        {
-                            tracing::warn!("Unable to sync built-in Chrome MCP tools: {:?}", error);
-                        }
-                    }
-                    if settings.computer_use_enabled
-                        || services::computer_use_mcp::ComputerUseMcpService::new().is_configured()
-                    {
-                        // Always refresh server.py so background-control tools stay current.
-                        if let Err(error) =
-                            services::computer_use_mcp::ComputerUseMcpService::ensure_bundle()
-                        {
-                            tracing::warn!(
-                                "Unable to refresh Computer Use MCP script: {:?}",
-                                error
-                            );
-                        }
-                    }
-                    if settings.computer_use_enabled {
-                        if let Err(error) = services::computer_use_mcp::ComputerUseMcpService::new()
-                            .sync(&bob_path, true)
-                        {
-                            tracing::warn!(
-                                "Unable to sync built-in Computer Use MCP tools: {:?}",
-                                error
-                            );
-                        }
-                    }
-                }
-                if let Err(error) = services::integration_mcp::IntegrationMcpService::new()
-                    .sync_all_connected(&bob_path, &app_handle.state::<services::bob::BobService>())
-                {
-                    tracing::warn!("Unable to sync integration MCP connectors: {:?}", error);
-                }
-                // Refresh already-installed connector skills (e.g. GitHub MCP-first, no gh CLI).
-                let workspace = services::workspace::WorkspaceService::new();
-                let existing: std::collections::HashSet<String> = workspace
-                    .list_skills(None)
-                    .into_iter()
-                    .map(|skill| skill.slug)
-                    .collect();
-                for (integration_id, slug) in [
-                    ("github", "bob-work-github"),
-                    ("slack", "bob-work-slack"),
-                    ("monday", "bob-work-monday"),
-                    ("outlook-mail", "bob-work-outlook-mail"),
-                    ("outlook-calendar", "bob-work-outlook-calendar"),
-                    ("teams", "bob-work-teams"),
-                    ("onedrive", "bob-work-onedrive"),
-                ] {
-                    if existing.contains(slug) {
-                        if let Err(error) = workspace.install_builtin_integration(integration_id) {
-                            tracing::debug!(
-                                "Unable to refresh builtin skill {slug}: {:?}",
-                                error
-                            );
-                        }
-                    }
-                }
-            }
-            if let Some(bob_path) = app_handle.state::<services::bob::BobService>().get_binary_path() {
-                if let Err(error) = plugin_service.sync_installed_office_mcps(
-                    &app_handle.state::<db::Database>(),
-                    &bob_path,
-                ) {
-                    tracing::warn!("Unable to sync built-in Office MCP tools: {:?}", error);
-                }
-                if let Ok(settings) =
-                    services::settings::SettingsService::new().get(&app_handle.state::<db::Database>())
-                {
-                    if settings.chrome_control_enabled {
-                        if let Err(error) =
-                            services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
-                        {
-                            tracing::warn!("Unable to sync built-in Chrome MCP tools: {:?}", error);
-                        }
-                    }
-                }
-                if let Err(error) = services::integration_mcp::IntegrationMcpService::new()
-                    .sync_all_connected(&bob_path, &app_handle.state::<services::bob::BobService>())
-                {
-                    tracing::warn!("Unable to sync integration MCP connectors: {:?}", error);
-                }
-            }
-            if let Err(error) = plugin_service.sync_agentic_bundles(&app_handle.state::<db::Database>()) {
-                tracing::warn!("Unable to import Bob-created plugin bundles: {:?}", error);
-            }
-            match plugin_service.get_all(&app_handle.state::<db::Database>()) {
-                Ok(plugins) => {
-                    for plugin in plugins {
-                        if let Err(error) = runtime_manager.register_plugin_requirements(
-                            &app_handle.state::<db::Database>(),
-                            &plugin.id,
-                            &plugin.manifest,
-                        ) {
-                            tracing::warn!(
-                                "Unable to register runtime requirements for {}: {:?}",
-                                plugin.id,
-                                error
-                            );
-                        }
-                    }
-                }
-                Err(error) => tracing::warn!("Unable to enumerate plugins for runtime registry: {:?}", error),
-            }
             app_handle.manage(plugin_service);
 
-            // Initialize task service
+            // Initialize task service (orphan recovery runs in background refresh).
             let task_service = services::task::TaskService::new();
-            match task_service.recover_orphaned_runs(&app_handle.state::<db::Database>()) {
-                Ok(count) if count > 0 => tracing::warn!(
-                    "Recovered {count} orphaned Bob task(s) left active by a previous app exit"
-                ),
-                Err(error) => tracing::warn!("Unable to recover orphaned Bob tasks: {error:?}"),
-                _ => {}
-            }
             app_handle.manage(task_service);
 
             // Initialize artifact service
@@ -343,6 +186,15 @@ pub fn run() {
 
             // Mobile remote control stays local until explicitly enabled in Settings.
             app_handle.manage(services::remote_control::RemoteControlService::new(&data_dir));
+
+            let background_app = app_handle.clone();
+            let background_data_dir = data_dir.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("bob-startup-refresh".into())
+                .spawn(move || refresh_startup_integrations(background_app, background_data_dir))
+            {
+                tracing::warn!("Unable to start background integration refresh: {error}");
+            }
 
             // ── Background Scheduler Daemon ────────────────────────────
             {
@@ -416,14 +268,18 @@ pub fn run() {
                             }).is_some_and(|task| task.state == "cancelled");
 
                         // Capture deliverables Bob wrote (including diagrams in its workspace) → task IO + gallery.
-                        let deliverable_paths = if done.deliverable_paths.is_empty() {
-                            services::bob::collect_deliverable_file_paths_in_workspace(
-                                &content,
-                                done.workspace_path.as_deref().map(std::path::Path::new),
-                            )
-                        } else {
-                            done.deliverable_paths.clone()
-                        };
+                        let deliverable_paths = services::bob::filter_accessible_deliverable_paths(
+                            if done.deliverable_paths.is_empty() {
+                                services::bob::collect_deliverable_file_paths_in_workspace(
+                                    &content,
+                                    done.workspace_path.as_deref().map(std::path::Path::new),
+                                )
+                            } else {
+                                done.deliverable_paths.clone()
+                            },
+                        );
+                        let file_changes =
+                            services::bob::filter_published_file_changes(done.file_changes.clone());
                         let mut source_items = Vec::new();
                         let mut associated_artifact_ids = Vec::new();
                         for path in &deliverable_paths {
@@ -476,7 +332,7 @@ pub fn run() {
                         }
 
                         if (!content.trim().is_empty() && !task_cancelled)
-                            || !done.file_changes.is_empty()
+                            || !file_changes.is_empty()
                         {
                             let sources = if source_items.is_empty() {
                                 None
@@ -499,7 +355,7 @@ pub fn run() {
                                         // sources, steps and statuses), not private chain of thought.
                                         // Store the complete structured trace; presentation-level
                                         // filtering and start/result coalescing happen in the client.
-                                        let value = serde_json::Value::Array(detail.events.iter().map(|event| {
+                                        let mut activities = detail.events.iter().map(|event| {
                                             serde_json::json!({
                                                 "name": event.tool_name.as_deref()
                                                     .or(event.title.as_deref())
@@ -512,7 +368,40 @@ pub fn run() {
                                                 "payload": event.payload,
                                                 "createdAt": event.created_at,
                                             })
-                                        }).collect());
+                                        }).collect::<Vec<_>>();
+                                        // Some Bob Shell versions exit successfully without a
+                                        // final plan update or `run_finished` protocol event.
+                                        // Persist the authoritative session outcome so reloading
+                                        // the conversation cannot turn completed steps into paused
+                                        // ones merely because their last snapshot said `running`.
+                                        if done.success
+                                            && !task_cancelled
+                                            && !detail.events.iter().any(|event| {
+                                                event.event_type == "user_input_required"
+                                            })
+                                            && !detail.events.iter().any(|event| {
+                                                event.event_type == "run_finished"
+                                                    || event.event_type == "session_completed"
+                                            })
+                                        {
+                                            let _ = conv_service.save_plan_activity(
+                                                &db,
+                                                &done.conversation_id,
+                                                "session_completed",
+                                                Some("Tâche terminée"),
+                                                None,
+                                                None,
+                                                &serde_json::json!({ "status": "success" }),
+                                            );
+                                            activities.push(serde_json::json!({
+                                                "name": "Tâche terminée",
+                                                "eventType": "session_completed",
+                                                "title": "Tâche terminée",
+                                                "payload": { "status": "success" },
+                                                "createdAt": chrono::Utc::now().to_rfc3339(),
+                                            }));
+                                        }
+                                        let value = serde_json::Value::Array(activities);
                                         let _ = conv_service.set_message_tools_used(
                                             &db,
                                             &message.id,
@@ -520,8 +409,8 @@ pub fn run() {
                                         );
                                     }
                                 }
-                                if !done.file_changes.is_empty() {
-                                    if let Ok(value) = serde_json::to_value(&done.file_changes) {
+                                if !file_changes.is_empty() {
+                                    if let Ok(value) = serde_json::to_value(&file_changes) {
                                         let _ = conv_service.set_message_file_changes(
                                             &db,
                                             &message.id,
@@ -708,6 +597,7 @@ pub fn run() {
             commands::mode::uninstall_bob_mode,
             commands::mode::import_bob_mode_yaml,
             commands::bob::install_bob_shell,
+            commands::bob::uninstall_bob_shell,
             commands::bob::set_session_secret,
             commands::bob::has_session_secret,
             commands::bob::clear_session_secret,
@@ -723,6 +613,7 @@ pub fn run() {
             commands::project::archive_project,
             // Conversation commands
             commands::conversation::get_conversations,
+            commands::conversation::get_archived_conversations,
             commands::conversation::get_conversation,
             commands::conversation::create_conversation,
             commands::conversation::update_conversation,
@@ -732,6 +623,7 @@ pub fn run() {
             commands::conversation::truncate_messages_from,
             commands::conversation::rewind_conversation_from_message,
             commands::conversation::import_conversations,
+            commands::conversation::import_conversations_from_backup,
             commands::conversation::export_conversations,
             // Task commands
             commands::task::get_tasks,
@@ -744,10 +636,6 @@ pub fn run() {
             // Plugin commands
             commands::plugin::get_plugins,
             commands::plugin::get_plugin,
-            commands::plugin::get_plugin_versions,
-            commands::plugin::compare_plugin_version,
-            commands::plugin::install_plugin_update,
-            commands::plugin::rollback_plugin_version,
             commands::plugin::create_plugin,
             commands::plugin::update_plugin,
             commands::plugin::delete_plugin,
@@ -770,9 +658,12 @@ pub fn run() {
             commands::preview::prepare_file_preview,
             commands::preview::read_html_preview,
             commands::preview::prepare_fitted_html_preview,
+            commands::preview::open_external_html_preview,
             commands::preview::get_live_preview_revision,
             commands::preview::export_live_canvas_zip,
             commands::preview::allow_composer_attachments,
+            commands::preview::read_clipboard_attachment_paths,
+            commands::preview::write_clipboard_attachment_image,
             commands::preview::open_preview_resource,
             commands::preview::reveal_in_file_manager,
             // Approval commands
@@ -814,6 +705,7 @@ pub fn run() {
             commands::runtime::install_external_runtime,
             commands::runtime::remove_external_runtime,
             commands::runtime::cancel_runtime_process,
+            commands::runtime::cancel_runtime_operation,
             commands::rendering::route_diagram_spec,
             commands::rendering::route_visualization_spec,
             commands::rendering::get_renderer_capabilities,
@@ -836,6 +728,7 @@ pub fn run() {
             commands::integration::set_oauth_client_config,
             commands::integration::start_integration_oauth,
             commands::integration::connect_integration_token,
+            commands::integration::connect_integration_ssh,
             commands::integration::disconnect_integration,
             #[cfg(feature = "e2e")]
             commands::integration::e2e_connect_integration,
@@ -844,6 +737,7 @@ pub fn run() {
             commands::workspace::get_mcp_servers,
             commands::workspace::test_mcp_server,
             commands::workspace::save_mcp_server,
+            commands::workspace::save_api_connection,
             commands::workspace::set_mcp_server_enabled,
             commands::workspace::delete_mcp_server,
             commands::db_connection::get_db_connections,
@@ -863,10 +757,12 @@ pub fn run() {
             commands::system::create_database_backup,
             commands::system::list_database_backups,
             commands::system::restore_database_backup,
+            commands::system::export_database_backup,
             commands::system::purge_app_cache,
             commands::system::open_macos_privacy_pane,
             commands::system::get_voice_dictation_availability,
             commands::system::microphone_authorization_state,
+            commands::system::speech_recognition_authorization_state,
             commands::system::request_microphone_permission,
             commands::system::request_voice_dictation_permission,
             commands::native_audio_recording::start_native_audio_recording,
@@ -880,6 +776,7 @@ pub fn run() {
             commands::system::request_chrome_automation_permission,
             commands::system::get_chrome_control_status,
             commands::system::get_computer_use_status,
+            commands::system::get_orca_cli_status,
             commands::system::export_diagnostics,
             commands::updater::check_for_updates,
             commands::updater::install_available_update,
@@ -896,9 +793,210 @@ pub fn run() {
             commands::schedule::run_schedule_now,
             // Artifact generation commands
             commands::artifact_gen::generate_artifact,
+            commands::document::convert_document,
             commands::artifact_gen::get_artifacts_list,
             commands::designer::create_designer_preview,
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Bob Work");
+}
+
+fn refresh_startup_integrations(app_handle: tauri::AppHandle, data_dir: std::path::PathBuf) {
+    let started = std::time::Instant::now();
+    let db = app_handle.state::<db::Database>();
+
+    match app_handle
+        .state::<services::runtime_manager::RuntimeManager>()
+        .seed_registry(&db)
+    {
+        Ok(()) => info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "Runtime registry seeded"
+        ),
+        Err(error) => tracing::warn!("Unable to seed Runtime Architecture V2 registry: {error:?}"),
+    }
+
+    let task_service = app_handle.state::<services::task::TaskService>();
+    match task_service.recover_orphaned_runs(&db) {
+        Ok(count) if count > 0 => tracing::warn!(
+            "Recovered {count} orphaned Bob task(s) left active by a previous app exit"
+        ),
+        Err(error) => tracing::warn!("Unable to recover orphaned Bob tasks: {error:?}"),
+        _ => {}
+    }
+
+    let plugin_service = services::plugin::PluginService::new();
+    if let Err(error) = plugin_service.ensure_builtin_plugins(&db) {
+        tracing::warn!("Unable to refresh built-in document plugins: {:?}", error);
+    }
+    for skill_id in [
+        "meeting-minutes",
+        "skill-creator",
+        "plugin-creator",
+        "agent-review",
+        "computer-use",
+        "orca-cli",
+        "orchestration",
+        "capability-router",
+        "image-annotate",
+    ] {
+        if let Err(error) =
+            services::workspace::WorkspaceService::new().install_builtin_skill(skill_id)
+        {
+            tracing::warn!("Unable to install built-in skill {skill_id}: {:?}", error);
+        }
+    }
+    if let Err(error) =
+        services::workspace::WorkspaceService::new().ensure_first_party_agent_skills()
+    {
+        tracing::warn!("Unable to mark first-party Orca agent skills as built-in: {error:?}");
+    }
+    let backup_dir = data_dir.join("backups");
+    let should_backup = match db::Database::list_backups(&backup_dir) {
+        Ok(backups) => {
+            let latest = backups
+                .into_iter()
+                .find(|backup| backup.name.starts_with("bob-work-automatic-"));
+            match latest {
+                Some(backup) => match std::fs::metadata(&backup.path).and_then(|meta| meta.modified())
+                {
+                    Ok(modified) => std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .map(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
+                        .unwrap_or(true),
+                    Err(_) => true,
+                },
+                None => true,
+            }
+        }
+        Err(_) => true,
+    };
+    if should_backup {
+        if let Err(error) = db.create_backup(&backup_dir, true) {
+            tracing::warn!("Unable to create automatic database backup: {error}");
+        }
+    } else {
+        tracing::debug!("Skipping automatic database backup (fresh backup already present)");
+    }
+    // Keep a single automatic backup (replace, do not stack). Manual backups are untouched.
+    if let Err(error) = db::Database::prune_backups(&backup_dir, 1) {
+        tracing::warn!("Unable to prune automatic database backups: {error}");
+    }
+
+    let bob_service = app_handle.state::<services::bob::BobService>();
+    if bob_service.get_binary_path().is_none() {
+        let _ = bob_service.detect();
+    }
+
+    if let Some(bob_path) = bob_service.get_binary_path() {
+        if let Err(error) = services::codegraph_mcp::CodeGraphMcpService.sync(&bob_path) {
+            tracing::warn!("Unable to sync built-in CodeGraph MCP tools: {error:?}");
+        }
+        if let Err(error) = services::map_mcp::MapMcpService.sync(&bob_path) {
+            tracing::warn!("Unable to sync built-in map MCP tools: {error:?}");
+        }
+        let ssh_service = services::ssh::SshService::new(&data_dir);
+        if !ssh_service.list().is_empty() {
+            if let Err(error) = ssh_service.sync_mcp(&bob_path) {
+                tracing::warn!("Unable to sync built-in SSH MCP tools: {error:?}");
+            }
+        }
+        if let Err(error) = plugin_service.sync_installed_office_mcps(
+            &db,
+            &bob_path,
+            &app_handle.state::<services::runtime_manager::RuntimeManager>(),
+        ) {
+            tracing::warn!("Unable to sync built-in Office MCP tools: {error:?}");
+        }
+        if let Ok(settings) = services::settings::SettingsService::new().get(&db) {
+            if let Err(error) = services::map_mcp::MapMcpService.sync_location(
+                settings.location_enabled,
+                settings.current_latitude,
+                settings.current_longitude,
+                settings.current_location_updated_at.as_deref(),
+            ) {
+                tracing::warn!("Unable to sync current location for map tools: {error:?}");
+            }
+            if settings.chrome_control_enabled {
+                if let Err(error) =
+                    services::chrome_mcp::ChromeMcpService::new().sync(&bob_path, true)
+                {
+                    tracing::warn!("Unable to sync built-in Chrome MCP tools: {error:?}");
+                }
+            }
+            if settings.computer_use_enabled
+                || services::computer_use_mcp::ComputerUseMcpService::new().is_configured()
+            {
+                if let Err(error) =
+                    services::computer_use_mcp::ComputerUseMcpService::ensure_bundle()
+                {
+                    tracing::warn!("Unable to refresh Computer Use MCP script: {error:?}");
+                }
+            }
+            if settings.computer_use_enabled {
+                if let Err(error) =
+                    services::computer_use_mcp::ComputerUseMcpService::new().sync(&bob_path, true)
+                {
+                    tracing::warn!("Unable to sync built-in Computer Use MCP tools: {error:?}");
+                }
+            }
+        }
+        if let Err(error) = services::integration_mcp::IntegrationMcpService::new()
+            .sync_all_connected(&bob_path, &app_handle.state::<services::bob::BobService>())
+        {
+            tracing::warn!("Unable to sync integration MCP connectors: {error:?}");
+        }
+
+        let workspace = services::workspace::WorkspaceService::new();
+        let existing: std::collections::HashSet<String> = workspace
+            .list_skills(None)
+            .into_iter()
+            .map(|skill| skill.slug)
+            .collect();
+        for (integration_id, slug) in [
+            ("github", "bob-work-github"),
+            ("slack", "bob-work-slack"),
+            ("monday", "bob-work-monday"),
+            ("outlook-mail", "bob-work-outlook-mail"),
+            ("outlook-calendar", "bob-work-outlook-calendar"),
+            ("teams", "bob-work-teams"),
+            ("onedrive", "bob-work-onedrive"),
+        ] {
+            if existing.contains(slug) {
+                if let Err(error) = workspace.install_builtin_integration(integration_id) {
+                    tracing::debug!("Unable to refresh builtin skill {slug}: {error:?}");
+                }
+            }
+        }
+    }
+
+    if let Err(error) = plugin_service.sync_agentic_bundles(&db) {
+        tracing::warn!("Unable to import Bob-created plugin bundles: {error:?}");
+    }
+    let runtime_manager = app_handle.state::<services::runtime_manager::RuntimeManager>();
+    match plugin_service.get_all(&db) {
+        Ok(plugins) => {
+            for plugin in &plugins {
+                if let Err(error) = runtime_manager.register_plugin_requirements(
+                    &db,
+                    &plugin.id,
+                    &plugin.manifest,
+                ) {
+                    tracing::warn!(
+                        "Unable to register runtime requirements for {}: {error:?}",
+                        plugin.id
+                    );
+                }
+            }
+            // Notify the UI that background plugin ensure finished so Composer
+            // can refresh without blocking startup on get_plugins.
+            use tauri::Emitter;
+            let _ = app_handle.emit("plugins-refreshed", plugins.len());
+        }
+        Err(error) => tracing::warn!("Unable to enumerate plugins for runtime registry: {error:?}"),
+    }
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "Background startup refresh completed"
+    );
 }

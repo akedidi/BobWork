@@ -8,8 +8,8 @@ import { listen } from '@tauri-apps/api/event'
 import {
   getArtifacts,
   deleteArtifact,
-  generateArtifact,
   getConversations,
+  getArchivedConversations,
 } from '../lib/ipc'
 import { LoadErrorBanner } from '../components/LoadErrorBanner'
 import WorkspacePanel, { type PreviewRequest } from '../components/WorkspacePanel/WorkspacePanel'
@@ -39,103 +39,18 @@ function fmtDate(iso: string) {
   })
 }
 
-// ── Generate modal ────────────────────────────────────────────
-
-function GenerateModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const t = useT()
-  const [type, setType] = useState('pptx')
-  const [title, setTitle] = useState('')
-  const [content, setContent] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  const handleGenerate = async () => {
-    if (!title.trim() || !content.trim()) return
-    setLoading(true)
-    setError('')
-    try {
-      await generateArtifact({ artifactType: type, title: title.trim(), content })
-      onDone()
-    } catch (e) {
-      setError(errorMessage(e, t('artifacts.generateFailed')))
-    } finally {
-      setLoading(false)
-    }
+export function conversationIdFromOrigin(origin?: string) {
+  if (!origin || origin === 'bob-shell') return undefined
+  if (origin.startsWith('bob-shell:')) {
+    const conversationId = origin.slice('bob-shell:'.length).trim()
+    return conversationId || undefined
   }
+  return origin
+}
 
-  return (
-    <ModalOverlay onClose={onClose} closeOnBackdrop={!loading}>
-      <ModalPanel style={{
-        background: 'var(--bg-base)', borderRadius: 'var(--radius-lg)',
-        border: '1px solid var(--border)', padding: 28, width: 520, maxWidth: '90vw',
-      }}>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20 }}>{t('artifacts.generateTitle')}</div>
-
-        <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          {t('artifacts.type')}
-        </label>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-          {['pptx','docx','xlsx','pdf','markdown'].map(artifactType => (
-            <button key={artifactType} onClick={() => setType(artifactType)} style={{
-              padding: '5px 14px', borderRadius: 99, fontSize: 12, fontWeight: 500, cursor: 'pointer',
-              border: '1px solid var(--border)',
-              background: type === artifactType ? 'var(--accent)' : 'var(--bg-surface)',
-              color: type === artifactType ? '#fff' : 'var(--text-secondary)',
-            }}>
-              {TYPE_ICON[artifactType]} {artifactType === 'pptx' ? t('artifacts.presentation') : artifactType === 'docx' ? t('artifacts.document') : artifactType === 'xlsx' ? t('artifacts.spreadsheet') : artifactType === 'pdf' ? 'PDF' : 'Markdown'}
-            </button>
-          ))}
-        </div>
-
-        <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          {t('artifacts.titleField')}
-        </label>
-        <input
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          placeholder={t('artifacts.titlePlaceholder')}
-          style={{
-            width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border)', background: 'var(--bg-surface)',
-            fontSize: 13, color: 'var(--text-primary)', marginBottom: 14, boxSizing: 'border-box',
-          }}
-        />
-
-        <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-          {t('artifacts.contentMarkdown')}
-        </label>
-        <textarea
-          value={content}
-          onChange={e => setContent(e.target.value)}
-          rows={7}
-          placeholder="## Introduction&#10;- Point 1&#10;- Point 2"
-          style={{
-            width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border)', background: 'var(--bg-surface)',
-            fontSize: 12, fontFamily: 'monospace', color: 'var(--text-primary)',
-            resize: 'vertical', marginBottom: 14, boxSizing: 'border-box',
-          }}
-        />
-
-        {error && (
-          <div style={{ fontSize: 12, color: 'var(--error, #ef4444)', marginBottom: 12 }}>
-            {error}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-          <button onClick={onClose} className="btn-secondary" disabled={loading}>{t('common.cancel')}</button>
-          <button
-            onClick={handleGenerate}
-            disabled={loading || !title.trim() || !content.trim()}
-            className="btn-primary"
-          >
-            {loading ? t('artifacts.generating') : t('artifacts.generate').replace(/^\+\s*/, '')}
-          </button>
-        </div>
-      </ModalPanel>
-    </ModalOverlay>
-  )
+function fileBaseName(path: string) {
+  const normalized = path.replace(/\\/g, '/')
+  return normalized.slice(normalized.lastIndexOf('/') + 1)
 }
 
 // ── Main view ─────────────────────────────────────────────────
@@ -158,7 +73,7 @@ export default function ArtifactGallery() {
   const [filter, setFilter] = useState('all')
   const [sortKey, setSortKey] = useState<SortKey>('date')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
-  const [showModal, setShowModal] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const [deleting, setDeleting] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Artifact | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
@@ -168,13 +83,14 @@ export default function ArtifactGallery() {
   const loadArtifacts = async () => {
     setLoadError(null)
     try {
-      const [list, conversations] = await Promise.all([
+      const [list, conversations, archivedConversations] = await Promise.all([
         getArtifacts(),
         getConversations().catch(() => []),
+        getArchivedConversations().catch(() => []),
       ])
       setArtifacts(list)
       const titles: Record<string, string> = {}
-      for (const conv of conversations) {
+      for (const conv of [...conversations, ...archivedConversations]) {
         titles[conv.id] = conv.title
       }
       setConversationTitles(titles)
@@ -248,8 +164,30 @@ export default function ArtifactGallery() {
   }
 
   const types = ['all', ...Array.from(new Set(artifacts.map(a => a.artifactType)))]
+  const resolveConversationTitle = (artifact: Artifact) => {
+    const conversationId = conversationIdFromOrigin(artifact.origin)
+    if (!conversationId) return undefined
+    return conversationTitles[conversationId] ?? t('artifacts.unknownConversation')
+  }
   const visible = useMemo(() => {
-    const filtered = filter === 'all' ? [...artifacts] : artifacts.filter(a => a.artifactType === filter)
+    const needle = searchQuery.trim().toLowerCase()
+    const filtered = artifacts.filter(artifact => {
+      if (filter !== 'all' && artifact.artifactType !== filter) return false
+      if (!needle) return true
+      const conversationTitle = (() => {
+        const conversationId = conversationIdFromOrigin(artifact.origin)
+        if (!conversationId) return ''
+        return conversationTitles[conversationId] ?? t('artifacts.unknownConversation')
+      })()
+      const haystack = [
+        artifact.title,
+        typeLabel(artifact.artifactType),
+        artifact.artifactType,
+        conversationTitle,
+        fileBaseName(artifact.filePath),
+      ].join(' ').toLowerCase()
+      return haystack.includes(needle)
+    })
     const dir = sortDir === 'asc' ? 1 : -1
     filtered.sort((a, b) => {
       if (sortKey === 'name') {
@@ -261,7 +199,7 @@ export default function ArtifactGallery() {
       return (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) * dir
     })
     return filtered
-  }, [artifacts, filter, sortKey, sortDir])
+  }, [artifacts, conversationTitles, filter, searchQuery, sortDir, sortKey, t])
 
   const sortLabel = (key: SortKey, label: string) => {
     if (sortKey !== key) return label
@@ -271,15 +209,27 @@ export default function ArtifactGallery() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       {/* Topbar */}
-      <div className="topbar titlebar-drag" data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div className="topbar titlebar-drag" data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <span style={{ fontWeight: 600, fontSize: 14 }}>{t('artifacts.title')}</span>
-        <button
-          onClick={() => setShowModal(true)}
-          className="btn-primary titlebar-no-drag"
-          style={{ fontSize: 12, padding: '5px 14px' }}
-        >
-          {t('artifacts.generate')}
-        </button>
+        <input
+          type="search"
+          value={searchQuery}
+          onChange={event => setSearchQuery(event.target.value)}
+          placeholder={t('artifacts.searchPlaceholder')}
+          aria-label={t('artifacts.searchPlaceholder')}
+          className="titlebar-no-drag"
+          style={{
+            flex: 1,
+            maxWidth: 360,
+            marginLeft: 'auto',
+            padding: '6px 12px',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--border)',
+            background: 'var(--bg-surface)',
+            fontSize: 12,
+            color: 'var(--text-primary)',
+          }}
+        />
       </div>
 
       {/* Filters + sort */}
@@ -349,8 +299,8 @@ export default function ArtifactGallery() {
         ) : loadError ? null : visible.length === 0 ? (
           <EmptyMsg
             icon="📁"
-            text={t('artifacts.empty')}
-            sub={t('artifacts.emptyHint')}
+            text={artifacts.length === 0 ? t('artifacts.empty') : t('artifacts.emptySearch')}
+            sub={artifacts.length === 0 ? t('artifacts.emptyHint') : undefined}
           />
         ) : (
           <div style={{
@@ -362,7 +312,7 @@ export default function ArtifactGallery() {
               <ArtifactCard
                 key={artifact.id}
                 artifact={artifact}
-                conversationTitle={artifact.origin ? conversationTitles[artifact.origin] : undefined}
+                conversationTitle={resolveConversationTitle(artifact)}
                 selected={selectedId === artifact.id}
                 onOpen={() => handlePreview(artifact)}
                 onDelete={() => requestDelete(artifact)}
@@ -384,13 +334,6 @@ export default function ArtifactGallery() {
             setPanelOpen(false)
             setSelectedId(null)
           }}
-        />
-      )}
-
-      {showModal && (
-        <GenerateModal
-          onClose={() => setShowModal(false)}
-          onDone={() => { setShowModal(false); void loadArtifacts() }}
         />
       )}
 
@@ -524,11 +467,11 @@ function ArtifactCard({
 
       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
         {fmtDate(artifact.createdAt)}
-        {conversationTitle && (
+        {conversationTitle ? (
           <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Conversation · {conversationTitle}
+            {t('artifacts.conversationLabel', { title: conversationTitle })}
           </span>
-        )}
+        ) : null}
       </div>
 
       {showIssue && (

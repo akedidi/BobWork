@@ -1,44 +1,52 @@
 ---
 name: adoption-plan
-description: "Faire passer de l’activation initiale à l’usage durable."
+description: "Move from initial activation to sustained usage."
 icon: change
 ---
 
 # adoption-plan
 
-Utiliser ce skill pour faire passer de l’activation initiale à l’usage durable.
+Use this skill to move from initial activation to sustained usage.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir comportements cibles et segments.
-2. Aligner sponsor, managers, champions, support et processus.
-3. Planifier pilotes, onboarding, nudges, office hours et renforcement.
-4. Suivre adoption, qualité, friction et bénéfices puis adapter.
+1. Define target behaviors and segments.
+2. Align sponsor, managers, champions, support, and processes.
+3. Plan pilots, onboarding, nudges, office hours, and reinforcement.
+4. Track adoption, quality, friction, and benefits, then adapt.
 
-## Livrable
+## Deliverable
 
-Adoption roadmap, interventions, propriétaires et boucle d’apprentissage.
+Adoption roadmap, interventions, owners, and learning loop.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Adoption ne se réduit pas aux connexions.
-- Les comportements cibles sont mesurables.
-- Le plan inclut désapprentissage et retrait de l’ancien monde.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Adoption is not reduced to logins.
+- Target behaviors are measurable.
+- The plan includes unlearning and retiring the old way of working.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

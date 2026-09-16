@@ -1,24 +1,25 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import ArtifactGallery from './ArtifactGallery'
+import ArtifactGallery, { conversationIdFromOrigin } from './ArtifactGallery'
 
 const mocks = vi.hoisted(() => ({
   getArtifacts: vi.fn(),
   deleteArtifact: vi.fn(),
   openArtifact: vi.fn(),
-  generateArtifact: vi.fn(),
   getConversations: vi.fn(),
+  getArchivedConversations: vi.fn(),
   prepareFilePreview: vi.fn(),
   openPreviewResource: vi.fn(),
   revealInFileManager: vi.fn(),
+  fittedFrame: vi.fn(),
 }))
 
 vi.mock('../lib/ipc', () => ({
   getArtifacts: mocks.getArtifacts,
   deleteArtifact: mocks.deleteArtifact,
   openArtifact: mocks.openArtifact,
-  generateArtifact: mocks.generateArtifact,
   getConversations: mocks.getConversations,
+  getArchivedConversations: mocks.getArchivedConversations,
   prepareFilePreview: mocks.prepareFilePreview,
   openPreviewResource: mocks.openPreviewResource,
   revealInFileManager: mocks.revealInFileManager,
@@ -36,17 +37,35 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }))
 
+vi.mock('../components/FittedHtmlFrame', () => ({
+  FittedHtmlFrame: (props: { zoom?: number }) => {
+    mocks.fittedFrame(props)
+    return <div data-testid="fitted-html-frame">Fit · Actual size</div>
+  },
+  openHtmlPreviewExternally: vi.fn(),
+}))
+
+describe('conversationIdFromOrigin', () => {
+  it('extrait l’identifiant depuis bob-shell:', () => {
+    expect(conversationIdFromOrigin('bob-shell:c1')).toBe('c1')
+    expect(conversationIdFromOrigin('c1')).toBe('c1')
+    expect(conversationIdFromOrigin('bob-shell')).toBeUndefined()
+  })
+})
+
 describe('ArtifactGallery', () => {
   beforeEach(() => {
     mocks.getArtifacts.mockReset()
     mocks.deleteArtifact.mockReset()
     mocks.openArtifact.mockReset()
-    mocks.generateArtifact.mockReset()
     mocks.getConversations.mockReset()
+    mocks.getArchivedConversations.mockReset()
     mocks.prepareFilePreview.mockReset()
     mocks.openPreviewResource.mockReset()
     mocks.revealInFileManager.mockReset()
+    mocks.fittedFrame.mockReset()
     mocks.getConversations.mockResolvedValue([])
+    mocks.getArchivedConversations.mockResolvedValue([])
     mocks.prepareFilePreview.mockResolvedValue({
       path: '/tmp/a1.docx',
       name: 'a1.docx',
@@ -67,6 +86,7 @@ describe('ArtifactGallery', () => {
 
     expect(await screen.findByText('Aucun artefact')).toBeVisible()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '+ Générer' })).not.toBeInTheDocument()
   })
 
   it('montre une bannière d’erreur au lieu d’un vide trompeur', async () => {
@@ -83,55 +103,52 @@ describe('ArtifactGallery', () => {
     })
   })
 
-  it('génère un document Word via le modal', async () => {
-    mocks.getArtifacts
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
+  it('filtre les artefacts via la recherche', async () => {
+    mocks.getArtifacts.mockResolvedValue([
+      {
         id: 'a1',
         artifactType: 'docx',
         title: 'Rapport test',
         filePath: '/tmp/a1.docx',
         version: 1,
         sources: [],
+        origin: 'c1',
         validationStatus: 'valid',
         exported: false,
         createdAt: new Date().toISOString(),
         size: 1200,
-      }])
-    mocks.generateArtifact.mockResolvedValue({
-      id: 'a1',
-      artifactType: 'docx',
-      title: 'Rapport test',
-      filePath: '/tmp/a1.docx',
-      version: 1,
-      sources: [],
-      validationStatus: 'valid',
-      exported: false,
-      createdAt: new Date().toISOString(),
-      size: 1200,
-    })
+      },
+      {
+        id: 'a2',
+        artifactType: 'html',
+        title: 'Dashboard ventes',
+        filePath: '/tmp/dashboard.html',
+        version: 1,
+        sources: [],
+        validationStatus: 'valid',
+        exported: false,
+        createdAt: new Date().toISOString(),
+        size: 900,
+      },
+    ])
+    mocks.getConversations.mockResolvedValue([{
+      id: 'c1',
+      title: 'Brief Q2',
+      date: new Date().toISOString(),
+      type: 'chat',
+      pinned: false,
+      localOnly: true,
+      archived: false,
+      bobContextState: {},
+    }])
 
     render(<ArtifactGallery />)
-    expect(await screen.findByText('Aucun artefact')).toBeVisible()
-
-    fireEvent.click(screen.getByRole('button', { name: '+ Générer' }))
-    fireEvent.click(screen.getByRole('button', { name: /Document/ }))
-    fireEvent.change(screen.getByPlaceholderText('Ex : Rapport Q2 2024'), {
-      target: { value: 'Rapport test' },
-    })
-    fireEvent.change(screen.getByPlaceholderText(/Introduction/), {
-      target: { value: '## Intro\n- Point 1' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Générer' }))
-
-    await waitFor(() => {
-      expect(mocks.generateArtifact).toHaveBeenCalledWith({
-        artifactType: 'docx',
-        title: 'Rapport test',
-        content: '## Intro\n- Point 1',
-      })
-    })
     expect(await screen.findByText('Rapport test')).toBeVisible()
+    expect(screen.getByText('Dashboard ventes')).toBeVisible()
+
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Brief Q2' } })
+    expect(screen.getByText('Rapport test')).toBeVisible()
+    expect(screen.queryByText('Dashboard ventes')).not.toBeInTheDocument()
   })
 
   it('ouvre l’aperçu dans le panneau droit au clic, sans ouvrir le fichier externe', async () => {
@@ -142,7 +159,7 @@ describe('ArtifactGallery', () => {
       filePath: '/tmp/a1.docx',
       version: 1,
       sources: [],
-      origin: 'c1',
+      origin: 'bob-shell:c1',
       validationStatus: 'valid',
       exported: false,
       createdAt: new Date().toISOString(),
@@ -151,10 +168,12 @@ describe('ArtifactGallery', () => {
     mocks.getConversations.mockResolvedValue([{
       id: 'c1',
       title: 'Brief Q2',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      date: new Date().toISOString(),
+      type: 'chat',
       pinned: false,
+      localOnly: true,
       archived: false,
+      bobContextState: {},
     }])
 
     render(<ArtifactGallery />)
@@ -217,6 +236,46 @@ describe('ArtifactGallery', () => {
     fireEvent.click(zoomOut)
     expect(screen.getByRole('button', { name: /Zoom 90 %/ })).toBeVisible()
     expect(surface?.style.getPropertyValue('--preview-image-max-width')).toBe('90%')
+  })
+
+  it('zoome le document HTML sans agrandir sa barre Fit / Actual size', async () => {
+    mocks.getArtifacts.mockResolvedValue([{
+      id: 'a1',
+      artifactType: 'html',
+      title: 'Dashboard test',
+      filePath: '/tmp/dashboard.html',
+      version: 1,
+      sources: [],
+      validationStatus: 'valid',
+      exported: false,
+      createdAt: new Date().toISOString(),
+      size: 1200,
+    }])
+    mocks.prepareFilePreview.mockResolvedValue({
+      path: '/tmp/dashboard.html',
+      name: 'dashboard.html',
+      kind: 'html',
+      mimeType: 'text/html',
+      size: 1200,
+      modifiedAt: null,
+      previewPath: '/tmp/dashboard.html',
+      previewPaths: ['/tmp/dashboard.html'],
+      content: null,
+      entries: [],
+      quickLook: false,
+    })
+
+    const { container } = render(<ArtifactGallery />)
+    fireEvent.click(await screen.findByText('Dashboard test'))
+    await screen.findByTestId('fitted-html-frame')
+
+    const surface = container.querySelector<HTMLElement>('.preview-zoom-surface')
+    expect(surface?.style.zoom).toBe('1')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoomer' }))
+    expect(screen.getByRole('button', { name: /Zoom 110 %/ })).toBeVisible()
+    expect(surface?.style.zoom).toBe('1')
+    expect(mocks.fittedFrame).toHaveBeenLastCalledWith(expect.objectContaining({ zoom: 1.1 }))
   })
 
   it('redimensionne le panneau d’aperçu à la souris sans changer sa largeur par défaut', async () => {

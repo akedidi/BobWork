@@ -269,7 +269,13 @@ impl TaskService {
         conn.execute(
             "UPDATE tasks SET state='cancelled', end_date=?1, summary=?2, errors='[]',
              shell_task_id=coalesce(?3, shell_task_id),
-             resumable=CASE WHEN coalesce(?3, shell_task_id) IS NOT NULL THEN 1 ELSE 0 END,
+             resumable=CASE
+               WHEN EXISTS (
+                 SELECT 1 FROM approvals WHERE task_id = ?4 AND decision = 'denied'
+               ) THEN 0
+               WHEN coalesce(?3, shell_task_id) IS NOT NULL THEN 1
+               ELSE 0
+             END,
              bob_process_id=NULL, last_event_at=?1, updated_at=?1 WHERE id=?4",
             params![now, summary, shell_task_id, task_id],
         )?;
@@ -527,6 +533,17 @@ impl TaskService {
         Ok(())
     }
 
+    /// Stop Shell `--resume` for one task after the user refuses a composer
+    /// permission — otherwise the next turn can revive the blocked write.
+    pub fn clear_resumable_for_task(&self, db: &Database, task_id: &str) -> AppResult<()> {
+        let conn = db.connection();
+        conn.execute(
+            "UPDATE tasks SET resumable = 0 WHERE id = ?1",
+            params![task_id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         Ok(Task {
             id: row.get(0)?,
@@ -644,5 +661,61 @@ mod orphan_recovery_tests {
                 .as_deref(),
             Some("shell-task-1")
         );
+    }
+
+    #[test]
+    fn denied_permission_keeps_cancelled_run_non_resumable() {
+        let db = Database::new_in_memory().expect("database");
+        db.run_migrations().expect("migrations");
+        db.connection()
+            .execute(
+                "INSERT INTO conversations (id,title,date) VALUES ('conversation-1','Test','2026-09-08')",
+                [],
+            )
+            .expect("conversation");
+        let service = TaskService::new();
+        let task = service
+            .create(
+                &db,
+                CreateTaskInput {
+                    objective: "Créer un fichier".into(),
+                    project_id: None,
+                    conversation_id: Some("conversation-1".into()),
+                    mode: Some("agent".into()),
+                    permission_policy: None,
+                    budget: None,
+                    max_time: None,
+                    schedule_id: None,
+                },
+            )
+            .expect("task");
+        let run = service.start_run(&db, &task.id, "session-1").expect("run");
+        db.connection()
+            .execute(
+                "INSERT INTO approvals (id, task_id, action_type, human_description, risk_level, decision, created_at)
+                 VALUES ('appr-1', ?1, 'edit', 'Edit', 'high', 'denied', '2026-09-08')",
+                rusqlite::params![task.id],
+            )
+            .expect("denied approval");
+
+        service
+            .finish_cancelled_run(
+                &db,
+                &task.id,
+                Some(&run.id),
+                "Session interrompue.",
+                Some("shell-task-1"),
+            )
+            .expect("cancel run");
+        service
+            .clear_resumable_for_task(&db, &task.id)
+            .expect("clear");
+
+        let cancelled = service.get_by_id(&db, &task.id).unwrap().unwrap();
+        assert!(!cancelled.resumable);
+        assert!(service
+            .latest_resumable_shell_task_id(&db, "conversation-1")
+            .unwrap()
+            .is_none());
     }
 }

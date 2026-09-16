@@ -51,6 +51,14 @@ pub async fn get_conversations(
 }
 
 #[tauri::command]
+pub async fn get_archived_conversations(
+    project_id: Option<String>,
+    db: State<'_, Database>,
+) -> Result<Vec<Conversation>, AppError> {
+    ConversationService::new().get_archived(&db, project_id.as_deref())
+}
+
+#[tauri::command]
 pub async fn get_conversation(
     id: String,
     db: State<'_, Database>,
@@ -75,6 +83,7 @@ pub async fn update_conversation(
     pinned: Option<bool>,
     archived: Option<bool>,
     project_id: Option<String>,
+    bob_mode: Option<String>,
     app_handle: AppHandle,
     db: State<'_, Database>,
 ) -> Result<(), AppError> {
@@ -95,6 +104,9 @@ pub async fn update_conversation(
             Some(value.as_str())
         };
         service.set_project_id(&db, &id, pid)?;
+    }
+    if let Some(value) = bob_mode {
+        service.set_mode(&db, &id, &value)?;
     }
     let _ = app_handle.emit("conversation-updated", &id);
     Ok(())
@@ -440,6 +452,30 @@ pub async fn import_conversations(
     Ok(summary)
 }
 
+#[tauri::command]
+pub async fn import_conversations_from_backup(
+    path: String,
+    app_handle: AppHandle,
+    db: State<'_, Database>,
+) -> Result<ConversationTransferSummary, AppError> {
+    let backup_name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("backup.sqlite")
+        .to_string();
+    let service = ConversationService::new();
+    let (conversations, messages, skipped) =
+        service.import_from_backup(&db, std::path::Path::new(&path))?;
+    let summary = ConversationTransferSummary {
+        conversations,
+        messages,
+        skipped,
+        detected_format: backup_name,
+    };
+    let _ = app_handle.emit("conversation-updated", "import-backup");
+    Ok(summary)
+}
+
 struct ImportedConversation {
     title: String,
     messages: Vec<ImportedMessage>,
@@ -520,7 +556,7 @@ fn parse_chatgpt(item: Value) -> Option<ImportedConversation> {
     let title = item
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or("Conversation ChatGPT")
+        .unwrap_or("Imported conversation")
         .to_string();
     let mapping = item.get("mapping")?.as_object()?;
     let mut messages: Vec<(f64, ImportedMessage)> = mapping
@@ -575,7 +611,7 @@ fn parse_claude(item: Value) -> Option<ImportedConversation> {
         .get("name")
         .or_else(|| item.get("title"))
         .and_then(Value::as_str)
-        .unwrap_or("Conversation Claude")
+        .unwrap_or("Imported conversation")
         .to_string();
     let messages = item
         .get("chat_messages")?
@@ -672,7 +708,7 @@ mod import_tests {
     #[test]
     fn normalizes_chatgpt_export_in_chronological_order() {
         let input = serde_json::json!([{
-            "title": "Conversation ChatGPT test",
+            "title": "Imported conversation test",
             "mapping": {
                 "assistant": { "message": { "author": { "role": "assistant" }, "create_time": 2.0, "content": { "parts": ["Réponse"] } } },
                 "user": { "message": { "author": { "role": "user" }, "create_time": 1.0, "content": { "parts": ["Question"] } } },
@@ -683,7 +719,7 @@ mod import_tests {
         let (format, conversations) = normalized_conversations(&input).unwrap();
         assert_eq!(format, "chatgpt");
         assert_eq!(conversations.len(), 1);
-        assert_eq!(conversations[0].title, "Conversation ChatGPT test");
+        assert_eq!(conversations[0].title, "Imported conversation test");
         assert_eq!(conversations[0].messages.len(), 2);
         assert_eq!(conversations[0].messages[0].author, "user");
         assert_eq!(conversations[0].messages[0].content, "Question");
@@ -693,7 +729,7 @@ mod import_tests {
     #[test]
     fn normalizes_claude_cowork_export_and_keeps_attachments() {
         let input = serde_json::json!({ "conversations": [{
-            "name": "Conversation Claude test",
+            "name": "Imported conversation test",
             "chat_messages": [
                 { "sender": "human", "text": "Analyse ce fichier", "attachments": [{ "file_name": "rapport.pdf" }] },
                 { "sender": "assistant", "text": "Analyse terminée" }
@@ -727,7 +763,7 @@ mod import_tests {
         let conversation = Conversation {
             id: "conv-1".into(),
             project_id: None,
-            title: "Export ChatGPT".into(),
+            title: "Export conversation".into(),
             conversation_type: "chat".into(),
             business_mode: None,
             bob_mode: None,
@@ -737,6 +773,7 @@ mod import_tests {
             summary: None,
             bob_context_state: serde_json::json!({}),
             archived: false,
+            plan_activities: serde_json::json!([]),
         };
         let messages = vec![
             Message {
@@ -796,6 +833,7 @@ mod import_tests {
             summary: None,
             bob_context_state: serde_json::json!({}),
             archived: false,
+            plan_activities: serde_json::json!([]),
         };
         let messages = vec![Message {
             id: "msg-3".into(),

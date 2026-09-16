@@ -51,6 +51,8 @@ const MAX_UPLOAD_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
 const TUNNEL_URL_TIMEOUT: Duration = Duration::from_secs(45);
 const TUNNEL_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+const TUNNEL_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const TUNNEL_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(15);
 const PUBLIC_API_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PUBLIC_API_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 const PUBLIC_API_INITIAL_RETRY_INTERVAL: Duration = Duration::from_millis(750);
@@ -194,11 +196,13 @@ impl RemoteControlService {
         let token = URL_SAFE_NO_PAD.encode(token_bytes);
         let (events, _) = broadcast::channel(512);
         let listeners = forward_live_events(&app_handle, events.clone());
+        let remote_status = self.status.clone();
         let api_state = ApiState {
             app: app_handle.clone(),
             token: Arc::new(token.clone()),
             upload_dir: self.upload_dir.clone(),
-            events,
+            events: events.clone(),
+            remote_status: remote_status.clone(),
         };
         let router = api_router(api_state);
         let (port, shutdown) =
@@ -222,115 +226,14 @@ impl RemoteControlService {
         let status_for_tunnel = self.status.clone();
         let app_for_tunnel = app_handle.clone();
         let owner_file_for_tunnel = self.tunnel_owner_file.clone();
-        let tunnel = tauri::async_runtime::spawn(async move {
-            let mut command = Command::new(&cloudflared);
-            command
-                .args([
-                    "tunnel",
-                    // HTTP/2 remains reachable on managed/VPN networks where
-                    // a quick tunnel can publish a URL before QUIC is usable.
-                    "--protocol",
-                    "http2",
-                    "--url",
-                    &format!("http://127.0.0.1:{port}"),
-                    "--no-autoupdate",
-                ])
-                .env("NO_COLOR", "1")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
-            #[cfg(unix)]
-            {
-                command.process_group(0);
-            }
-            let mut child = match command.spawn() {
-                Ok(child) => child,
-                Err(error) => {
-                    set_runtime_error(
-                        &status_for_tunnel,
-                        &app_for_tunnel,
-                        format!("Cloudflare Tunnel n’a pas démarré : {error}"),
-                    );
-                    return;
-                }
-            };
-            let child_pid = child.id();
-            if let Some(pid) = child_pid {
-                let _ = write_tunnel_owner(&owner_file_for_tunnel, pid, port);
-            }
-
-            let stdout = child.stdout.take().map(|pipe| BufReader::new(pipe).lines());
-            let stderr = child.stderr.take().map(|pipe| BufReader::new(pipe).lines());
-            let mut stdout = stdout;
-            let mut stderr = stderr;
-            let mut found_url = false;
-            let mut last_lines: Vec<String> = Vec::new();
-
-            loop {
-                tokio::select! {
-                    line = next_line(&mut stdout) => {
-                        match line {
-                            Some(line) => {
-                                remember_tunnel_line(&mut last_lines, &line);
-                                if !found_url {
-                                    if let Some(public_url) = publish_tunnel_url(&line, &status_for_tunnel, &app_for_tunnel) {
-                                        found_url = true;
-                                        public_url_tx.send_replace(Some(public_url));
-                                    }
-                                }
-                            }
-                            None if stderr.is_none() => break,
-                            None => stdout = None,
-                        }
-                    }
-                    line = next_line(&mut stderr) => {
-                        match line {
-                            Some(line) => {
-                                remember_tunnel_line(&mut last_lines, &line);
-                                if !found_url {
-                                    if let Some(public_url) = publish_tunnel_url(&line, &status_for_tunnel, &app_for_tunnel) {
-                                        found_url = true;
-                                        public_url_tx.send_replace(Some(public_url));
-                                    }
-                                }
-                            }
-                            None if stdout.is_none() => break,
-                            None => stderr = None,
-                        }
-                    }
-                }
-            }
-
-            let exit = child.wait().await;
-            if let Some(pid) = child_pid {
-                clear_tunnel_owner(&owner_file_for_tunnel, pid);
-            }
-            // Invalidate the published URL before reporting the process exit so
-            // the health monitor can never restore an old tunnel to `ready`.
-            public_url_tx.send_replace(None);
-            let still_enabled = status_for_tunnel.lock().unwrap().enabled;
-            if still_enabled {
-                let detail = match exit {
-                    Ok(status) => format!("Cloudflare Tunnel s’est arrêté ({status})."),
-                    Err(error) => format!("Cloudflare Tunnel s’est arrêté : {error}"),
-                };
-                let log_tail = if last_lines.is_empty() {
-                    String::new()
-                } else {
-                    format!(" Derniers logs : {}", last_lines.join(" | "))
-                };
-                set_runtime_error(
-                    &status_for_tunnel,
-                    &app_for_tunnel,
-                    if found_url {
-                        format!("{detail}{log_tail}")
-                    } else {
-                        format!("Aucun lien Cloudflare reçu. {detail}{log_tail}")
-                    },
-                );
-            }
-        });
+        let tunnel = tauri::async_runtime::spawn(run_cloudflared_tunnel_loop(
+            cloudflared,
+            port,
+            public_url_tx,
+            status_for_tunnel,
+            app_for_tunnel,
+            owner_file_for_tunnel,
+        ));
 
         let status_for_health = self.status.clone();
         let app_for_health = app_handle.clone();
@@ -340,6 +243,7 @@ impl RemoteControlService {
             port,
             status_for_health,
             app_for_health,
+            events,
         ));
 
         if self.generation.load(Ordering::SeqCst) != generation {
@@ -543,6 +447,211 @@ fn remember_tunnel_line(lines: &mut Vec<String>, line: &str) {
     }
 }
 
+async fn run_cloudflared_tunnel_loop(
+    cloudflared: PathBuf,
+    port: u16,
+    public_url_tx: watch::Sender<Option<String>>,
+    status: Arc<Mutex<RemoteControlStatus>>,
+    app: tauri::AppHandle,
+    owner_file: PathBuf,
+) {
+    let mut reconnect_delay = TUNNEL_RECONNECT_INITIAL_DELAY;
+    let mut first_attempt = true;
+    loop {
+        if !status.lock().unwrap().enabled {
+            break;
+        }
+        if !first_attempt {
+            public_url_tx.send_replace(None);
+            let previous = status.lock().unwrap().clone();
+            update_status(
+                &status,
+                &app,
+                RemoteControlStatus {
+                    enabled: true,
+                    state: "reconnecting".into(),
+                    public_url: None,
+                    connection_url: previous.connection_url,
+                    error: None,
+                },
+            );
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay = reconnect_delay
+                .saturating_mul(2)
+                .min(TUNNEL_RECONNECT_MAX_DELAY);
+        }
+        first_attempt = false;
+        if !status.lock().unwrap().enabled {
+            break;
+        }
+        let session = run_cloudflared_session(
+            &cloudflared,
+            port,
+            &public_url_tx,
+            &status,
+            &app,
+            &owner_file,
+        )
+        .await;
+        match session {
+            CloudflaredSessionOutcome::Disabled => break,
+            CloudflaredSessionOutcome::UrlPublished => {
+                reconnect_delay = TUNNEL_RECONNECT_INITIAL_DELAY;
+            }
+            CloudflaredSessionOutcome::Exited { found_url, detail } => {
+                if !status.lock().unwrap().enabled {
+                    break;
+                }
+                tracing::warn!("Cloudflare quick tunnel exited: {detail}");
+                if !found_url {
+                    update_status(
+                        &status,
+                        &app,
+                        RemoteControlStatus {
+                            enabled: true,
+                            state: "reconnecting".into(),
+                            public_url: None,
+                            connection_url: status.lock().unwrap().connection_url.clone(),
+                            error: Some(format!(
+                                "Aucun lien Cloudflare reçu. Nouvelle tentative dans {} s.",
+                                reconnect_delay.as_secs().max(1)
+                            )),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    public_url_tx.send_replace(None);
+}
+
+enum CloudflaredSessionOutcome {
+    Disabled,
+    UrlPublished,
+    Exited { found_url: bool, detail: String },
+}
+
+async fn run_cloudflared_session(
+    cloudflared: &Path,
+    port: u16,
+    public_url_tx: &watch::Sender<Option<String>>,
+    status: &Arc<Mutex<RemoteControlStatus>>,
+    app: &tauri::AppHandle,
+    owner_file: &Path,
+) -> CloudflaredSessionOutcome {
+    if !status.lock().unwrap().enabled {
+        return CloudflaredSessionOutcome::Disabled;
+    }
+    let mut command = Command::new(cloudflared);
+    command
+        .args([
+            "tunnel",
+            // HTTP/2 remains reachable on managed/VPN networks where
+            // a quick tunnel can publish a URL before QUIC is usable.
+            "--protocol",
+            "http2",
+            "--url",
+            &format!("http://127.0.0.1:{port}"),
+            "--no-autoupdate",
+        ])
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return CloudflaredSessionOutcome::Exited {
+                found_url: false,
+                detail: format!("Cloudflare Tunnel n’a pas démarré : {error}"),
+            };
+        }
+    };
+    let child_pid = child.id();
+    if let Some(pid) = child_pid {
+        let _ = write_tunnel_owner(owner_file, pid, port);
+    }
+
+    let stdout = child.stdout.take().map(|pipe| BufReader::new(pipe).lines());
+    let stderr = child.stderr.take().map(|pipe| BufReader::new(pipe).lines());
+    let mut stdout = stdout;
+    let mut stderr = stderr;
+    let mut found_url = false;
+    let mut last_lines: Vec<String> = Vec::new();
+
+    loop {
+        if !status.lock().unwrap().enabled {
+            if let Some(pid) = child_pid {
+                clear_tunnel_owner(owner_file, pid);
+            }
+            let _ = child.kill().await;
+            return CloudflaredSessionOutcome::Disabled;
+        }
+        tokio::select! {
+            line = next_line(&mut stdout) => {
+                match line {
+                    Some(line) => {
+                        remember_tunnel_line(&mut last_lines, &line);
+                        if !found_url {
+                            if let Some(public_url) = publish_tunnel_url(&line, status, app) {
+                                found_url = true;
+                                public_url_tx.send_replace(Some(public_url));
+                            }
+                        }
+                    }
+                    None if stderr.is_none() => break,
+                    None => stdout = None,
+                }
+            }
+            line = next_line(&mut stderr) => {
+                match line {
+                    Some(line) => {
+                        remember_tunnel_line(&mut last_lines, &line);
+                        if !found_url {
+                            if let Some(public_url) = publish_tunnel_url(&line, status, app) {
+                                found_url = true;
+                                public_url_tx.send_replace(Some(public_url));
+                            }
+                        }
+                    }
+                    None if stdout.is_none() => break,
+                    None => stderr = None,
+                }
+            }
+        }
+    }
+
+    let exit = child.wait().await;
+    if let Some(pid) = child_pid {
+        clear_tunnel_owner(owner_file, pid);
+    }
+    if !status.lock().unwrap().enabled {
+        return CloudflaredSessionOutcome::Disabled;
+    }
+    let log_tail = if last_lines.is_empty() {
+        String::new()
+    } else {
+        format!(" Derniers logs : {}", last_lines.join(" | "))
+    };
+    let detail = match exit {
+        Ok(exit_status) => format!("Cloudflare Tunnel s’est arrêté ({exit_status}).{log_tail}"),
+        Err(error) => format!("Cloudflare Tunnel s’est arrêté : {error}.{log_tail}"),
+    };
+    if found_url {
+        CloudflaredSessionOutcome::UrlPublished
+    } else {
+        CloudflaredSessionOutcome::Exited {
+            found_url,
+            detail,
+        }
+    }
+}
+
 fn publish_tunnel_url(
     line: &str,
     status: &Arc<Mutex<RemoteControlStatus>>,
@@ -599,49 +708,65 @@ fn extract_cloudflare_url(line: &str) -> Option<String> {
     (parsed.scheme() == "https" && valid_host).then(|| candidate.to_string())
 }
 
+fn emit_connection_url_changed(events: &broadcast::Sender<Value>, next: &RemoteControlStatus) {
+    let Some(connection_url) = next.connection_url.as_ref() else {
+        return;
+    };
+    let _ = events.send(json!({
+        "type": "connection-url-changed",
+        "payload": {
+            "state": next.state,
+            "publicUrl": next.public_url,
+            "connectionUrl": connection_url,
+        },
+        "sentAt": chrono::Utc::now().to_rfc3339(),
+    }));
+}
+
+fn publish_remote_control_status(
+    status: &Arc<Mutex<RemoteControlStatus>>,
+    app: &tauri::AppHandle,
+    events: &broadcast::Sender<Value>,
+    next: RemoteControlStatus,
+) {
+    let previous_url = status.lock().unwrap().connection_url.clone();
+    update_status(status, app, next.clone());
+    if next.connection_url.as_deref() != previous_url.as_deref() {
+        emit_connection_url_changed(events, &next);
+    }
+}
+
+async fn wait_for_public_url(
+    public_url_rx: &mut watch::Receiver<Option<String>>,
+    timeout: Option<Duration>,
+) -> Option<String> {
+    let wait = async {
+        loop {
+            if let Some(url) = public_url_rx.borrow().clone() {
+                return Some(url);
+            }
+            if public_url_rx.changed().await.is_err() {
+                return None;
+            }
+        }
+    };
+    match timeout {
+        Some(duration) => match tokio::time::timeout(duration, wait).await {
+            Ok(url) => url,
+            Err(_) => None,
+        },
+        None => wait.await,
+    }
+}
+
 async fn monitor_public_api(
     mut public_url_rx: watch::Receiver<Option<String>>,
     token: String,
     port: u16,
     status: Arc<Mutex<RemoteControlStatus>>,
     app: tauri::AppHandle,
+    events: broadcast::Sender<Value>,
 ) {
-    let public_url = match tokio::time::timeout(TUNNEL_URL_TIMEOUT, async {
-        loop {
-            if let Some(url) = public_url_rx.borrow().clone() {
-                break Some(url);
-            }
-            if public_url_rx.changed().await.is_err() {
-                break None;
-            }
-        }
-    })
-    .await
-    {
-        Ok(Some(url)) => url,
-        Ok(None) => return,
-        Err(_) => {
-            set_runtime_error(
-                &status,
-                &app,
-                "Cloudflare n’a pas fourni de lien dans le délai imparti.".into(),
-            );
-            return;
-        }
-    };
-    let connection_url = format!("{public_url}/#token={token}");
-    update_status(
-        &status,
-        &app,
-        RemoteControlStatus {
-            enabled: true,
-            state: "verifying".into(),
-            connection_url: None,
-            public_url: Some(public_url.clone()),
-            error: None,
-        },
-    );
-
     let client = match reqwest::Client::builder()
         .timeout(PUBLIC_API_REQUEST_TIMEOUT)
         .build()
@@ -649,94 +774,145 @@ async fn monitor_public_api(
         Ok(client) => client,
         Err(_) => return,
     };
-    let verification_deadline = Instant::now() + TUNNEL_VERIFY_TIMEOUT;
-    let mut verified_once = false;
-    let mut consecutive_failures = 0u8;
+    let mut first_url = true;
 
     loop {
-        if public_url_rx.borrow().is_none() {
+        if !status.lock().unwrap().enabled {
             return;
         }
-        let public_probe = if verified_once {
-            probe_public_api(&client, &public_url, &token).await
+        let timeout = if first_url {
+            Some(TUNNEL_URL_TIMEOUT)
         } else {
-            match probe_public_dns(&public_url).await {
-                Ok(()) => probe_public_api(&client, &public_url, &token).await,
-                Err(error) => Err(error),
-            }
+            None
         };
-        match public_probe {
-            Ok(()) => {
-                if public_url_rx.borrow().is_none() {
-                    return;
-                }
-                consecutive_failures = 0;
-                verified_once = true;
-                let should_publish = {
-                    let current = status.lock().unwrap();
-                    current.enabled
-                        && (current.state != "ready"
-                            || current.public_url.as_deref() != Some(public_url.as_str()))
-                };
-                if should_publish {
-                    update_status(
-                        &status,
-                        &app,
-                        RemoteControlStatus {
-                            enabled: true,
-                            state: "ready".into(),
-                            connection_url: Some(connection_url.clone()),
-                            public_url: Some(public_url.clone()),
-                            error: None,
-                        },
-                    );
-                }
+        let Some(public_url) = wait_for_public_url(&mut public_url_rx, timeout).await else {
+            if first_url {
+                set_runtime_error(
+                    &status,
+                    &app,
+                    "Cloudflare n’a pas fourni de lien dans le délai imparti.".into(),
+                );
             }
-            Err(_) => {
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                if !verified_once && Instant::now() >= verification_deadline {
-                    let should_report = {
+            if !status.lock().unwrap().enabled {
+                return;
+            }
+            continue;
+        };
+        first_url = false;
+        let connection_url = format!("{public_url}/#token={token}");
+        publish_remote_control_status(
+            &status,
+            &app,
+            &events,
+            RemoteControlStatus {
+                enabled: true,
+                state: "verifying".into(),
+                connection_url: None,
+                public_url: Some(public_url.clone()),
+                error: None,
+            },
+        );
+
+        let verification_deadline = Instant::now() + TUNNEL_VERIFY_TIMEOUT;
+        let mut verified_once = false;
+        let mut consecutive_failures = 0u8;
+
+        loop {
+            if !status.lock().unwrap().enabled {
+                return;
+            }
+            let current_public_url = public_url_rx.borrow().clone();
+            if current_public_url.as_deref() != Some(public_url.as_str()) {
+                break;
+            }
+            let public_probe = if verified_once {
+                probe_public_api(&client, &public_url, &token).await
+            } else {
+                match probe_public_dns(&public_url).await {
+                    Ok(()) => probe_public_api(&client, &public_url, &token).await,
+                    Err(error) => Err(error),
+                }
+            };
+            match public_probe {
+                Ok(()) => {
+                    if public_url_rx.borrow().as_deref() != Some(public_url.as_str()) {
+                        break;
+                    }
+                    consecutive_failures = 0;
+                    verified_once = true;
+                    let should_publish = {
                         let current = status.lock().unwrap();
-                        current.enabled && current.state != "error"
+                        current.enabled
+                            && (current.state != "ready"
+                                || current.public_url.as_deref() != Some(public_url.as_str())
+                                || current.connection_url.as_deref()
+                                    != Some(connection_url.as_str()))
                     };
-                    if should_report {
-                        update_status(
+                    if should_publish {
+                        publish_remote_control_status(
                             &status,
                             &app,
+                            &events,
                             RemoteControlStatus {
                                 enabled: true,
-                                state: "error".into(),
-                                connection_url: None,
+                                state: "ready".into(),
+                                connection_url: Some(connection_url.clone()),
                                 public_url: Some(public_url.clone()),
-                                error: Some("Le lien Cloudflare n’est pas encore joignable depuis Internet. Désactivez puis réactivez la télécommande pour créer un nouveau lien.".into()),
+                                error: None,
                             },
                         );
                     }
                 }
-                let became_unavailable =
-                    verified_once && consecutive_failures >= PUBLIC_API_FAILURE_THRESHOLD;
-                if became_unavailable && probe_local_api(port, &token).await.is_err() {
-                    update_status(
-                        &status,
-                        &app,
-                        RemoteControlStatus {
-                            enabled: true,
-                            state: "error".into(),
-                            public_url: Some(public_url.clone()),
-                            connection_url: Some(connection_url.clone()),
-                            error: Some("L’API locale de télécommande ne répond plus.".into()),
-                        },
-                    );
+                Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    if !verified_once && Instant::now() >= verification_deadline {
+                        let should_report = {
+                            let current = status.lock().unwrap();
+                            current.enabled
+                                && current.state != "error"
+                                && current.state != "reconnecting"
+                        };
+                        if should_report {
+                            publish_remote_control_status(
+                                &status,
+                                &app,
+                                &events,
+                                RemoteControlStatus {
+                                    enabled: true,
+                                    state: "error".into(),
+                                    connection_url: None,
+                                    public_url: Some(public_url.clone()),
+                                    error: Some("Le lien Cloudflare n’est pas encore joignable depuis Internet. Bob Work va réessayer automatiquement.".into()),
+                                },
+                            );
+                        }
+                    }
+                    let became_unavailable =
+                        verified_once && consecutive_failures >= PUBLIC_API_FAILURE_THRESHOLD;
+                    if became_unavailable && probe_local_api(port, &token).await.is_err() {
+                        publish_remote_control_status(
+                            &status,
+                            &app,
+                            &events,
+                            RemoteControlStatus {
+                                enabled: true,
+                                state: "error".into(),
+                                public_url: Some(public_url.clone()),
+                                connection_url: Some(connection_url.clone()),
+                                error: Some("L’API locale de télécommande ne répond plus.".into()),
+                            },
+                        );
+                    }
                 }
             }
-        }
 
-        tokio::time::sleep(if verified_once {
-            PUBLIC_API_HEALTH_INTERVAL
-        } else {
-            PUBLIC_API_INITIAL_RETRY_INTERVAL
-        })
-        .await;
+            tokio::time::sleep(if verified_once {
+                PUBLIC_API_HEALTH_INTERVAL
+            } else {
+                PUBLIC_API_INITIAL_RETRY_INTERVAL
+            })
+            .await;
+        }
     }
 }
 
@@ -951,15 +1127,21 @@ struct ApiState {
     token: Arc<String>,
     upload_dir: PathBuf,
     events: broadcast::Sender<Value>,
+    remote_status: Arc<Mutex<RemoteControlStatus>>,
 }
 
 fn api_router(state: ApiState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/connection", get(connection_info))
         .route("/api/v1/bootstrap", get(bootstrap))
         .route(
             "/api/v1/location",
             axum::routing::post(update_current_location).delete(clear_current_location),
+        )
+        .route(
+            "/api/v1/settings/execution-mode",
+            axum::routing::patch(update_execution_mode),
         )
         .route("/api/v1/usage", get(usage_status))
         .route("/api/v1/sync", get(sync_snapshot))
@@ -1038,11 +1220,7 @@ fn api_router(state: ApiState) -> Router {
             axum::routing::patch(update_remote_plugin),
         )
         .route(
-            "/api/v1/plugins/{id}/update",
-            axum::routing::post(install_remote_plugin_update),
-        )
-        .route(
-            "/api/v1/skills/{slug}",
+            "/api/v1/skills/{*slug}",
             axum::routing::patch(update_remote_skill),
         )
         .route(
@@ -1338,13 +1516,33 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
+fn remote_control_payload(status: &RemoteControlStatus) -> Value {
+    json!({
+        "state": status.state,
+        "publicUrl": status.public_url,
+        "connectionUrl": status.connection_url,
+    })
+}
+
 async fn health(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Value> {
     authorize(&headers, &state.token)?;
     let bob = state.app.state::<BobService>();
+    let remote = state.remote_status.lock().unwrap().clone();
     Ok(Json(json!({
         "status": "ok",
         "apiVersion": API_VERSION,
         "bobAvailable": bob.detect().found,
+        "remoteControl": remote_control_payload(&remote),
+    })))
+}
+
+async fn connection_info(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Value> {
+    authorize(&headers, &state.token)?;
+    let remote = state.remote_status.lock().unwrap().clone();
+    Ok(Json(json!({
+        "state": remote.state,
+        "publicUrl": remote.public_url,
+        "connectionUrl": remote.connection_url,
     })))
 }
 
@@ -1428,6 +1626,33 @@ async fn clear_current_location(
     SettingsService::new().update_all(&db, &settings)?;
     MapMcpService.sync_location(false, None, None, None)?;
     Ok(Json(json!({ "enabled": false })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionModeInput {
+    /// `true` = Sandbox, `false` = Accès direct au disque (Desktop parity).
+    sandbox_mode: bool,
+}
+
+async fn update_execution_mode(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<ExecutionModeInput>,
+) -> ApiResult<Value> {
+    authorize(&headers, &state.token)?;
+    let db = state.app.state::<Database>();
+    let mut settings = SettingsService::new().get(&db)?;
+    settings.sandbox_mode = input.sandbox_mode;
+    SettingsService::new().update_all(&db, &settings)?;
+    let _ = state.app.emit(
+        "settings-updated",
+        json!({ "sandboxMode": settings.sandbox_mode }),
+    );
+    Ok(Json(json!({
+        "sandboxMode": settings.sandbox_mode,
+        "executionMode": if settings.sandbox_mode { "sandbox" } else { "direct_disk" },
+    })))
 }
 
 async fn usage_status(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Value> {
@@ -1800,6 +2025,7 @@ async fn start_task_follow_up(
         task.project_id,
         None,
         resume_task_id,
+        None,
         None,
         state.app.state::<BobService>(),
         state
@@ -2976,6 +3202,10 @@ struct SendRemotePrompt {
     db_names: Vec<String>,
     #[serde(default)]
     attachments: Vec<RemoteAttachment>,
+    /// Composer task permissions (Desktop parity). When omitted, Bob Work
+    /// keeps the remote default (ask for every composer group).
+    #[serde(default)]
+    task_approval: Option<crate::services::bob::TaskApprovalConfig>,
 }
 
 async fn send_prompt(
@@ -3050,6 +3280,7 @@ async fn dispatch_remote_prompt(
         (!attachment_paths.is_empty()).then_some(attachment_paths),
         input.resume_task_id,
         Some(input.plugin_ids),
+        input.task_approval,
         state.app.state::<BobService>(),
         state
             .app
@@ -3412,7 +3643,6 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
                 "enabled": plugin.install_state == "installed",
                 "favorite": favorites.contains(&format!("plugin:{}", plugin.id)),
                 "version": plugin.version,
-                "availableVersion": plugin.available_version,
                 "lastUsedAt": plugin.last_executed_at,
                 "validationState": plugin.validation_state,
                 "permissions": manifest_string_list(&plugin.manifest, "/permissions"),
@@ -3420,7 +3650,6 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
                 "tools": plugin_tools(&plugin.manifest),
                 "configuration": configuration,
                 "requiresMacConfiguration": !integration_ready || other_setup_required,
-                "canUpdate": !builtin && plugin.available_version.is_some(),
             })
         })
         .collect::<Vec<_>>();
@@ -3428,6 +3657,25 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
         .list_skills(None)
         .into_iter()
         .map(|skill| {
+            let child_skills = skill
+                .child_skills
+                .iter()
+                .map(|child| {
+                    json!({
+                        "slug": child.slug,
+                        "name": child.name,
+                        "description": child.description,
+                        "scope": child.scope,
+                        "enabled": child.enabled,
+                        "builtin": child.builtin,
+                        "parentSlug": child.parent_slug,
+                        "relativePath": child.relative_path,
+                        "favorite": favorites.contains(&format!("skill:{}", child.slug)),
+                        "updatedAt": child.updated_at,
+                        "icon": child.icon,
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
                 "slug": skill.slug,
                 "name": skill.name,
@@ -3438,6 +3686,8 @@ async fn catalog(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult
                 "favorite": favorites.contains(&format!("skill:{}", skill.slug)),
                 "updatedAt": skill.updated_at,
                 "icon": skill.icon,
+                "nestedCount": child_skills.len(),
+                "childSkills": child_skills,
             })
         })
         .collect::<Vec<_>>();
@@ -3546,43 +3796,6 @@ async fn update_remote_plugin(
     Ok(Json(json!({ "plugin": updated })))
 }
 
-async fn install_remote_plugin_update(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> ApiResult<Value> {
-    authorize(&headers, &state.token)?;
-    let db = state.app.state::<Database>();
-    let service = PluginService::new();
-    let current = service
-        .get_by_id(&db, &id)?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plugin introuvable.".into()))?;
-    let builtin = current
-        .manifest
-        .get("builtin")
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| current.id.starts_with("builtin-"));
-    if builtin {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "Les plugins intégrés sont mis à jour avec Bob Work sur le Mac.".into(),
-        ));
-    }
-    let version = current.available_version.clone().ok_or_else(|| {
-        ApiError(
-            StatusCode::CONFLICT,
-            "Aucune mise à jour locale n’est disponible pour ce plugin.".into(),
-        )
-    })?;
-    let updated = service.activate_version(&db, &id, &version)?;
-    if updated.install_state == "installed" {
-        let bob = state.app.state::<BobService>();
-        sync_remote_plugin_mcp(&bob, &updated, true)?;
-    }
-    let _ = state.app.emit("catalog-updated", &id);
-    Ok(Json(json!({ "plugin": updated })))
-}
-
 async fn update_remote_skill(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -3592,16 +3805,8 @@ async fn update_remote_skill(
     authorize(&headers, &state.token)?;
     let db = state.app.state::<Database>();
     let service = WorkspaceService::new();
-    let skill = service
-        .list_skills(None)
-        .into_iter()
-        .find(|skill| {
-            skill.slug == slug
-                && input
-                    .scope
-                    .as_deref()
-                    .is_none_or(|scope| skill.scope == scope)
-        })
+    let skills = service.list_skills(None);
+    let skill = find_catalog_skill(&skills, &slug, input.scope.as_deref())
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Skill introuvable.".into()))?;
     if let Some(enabled) = input.enabled {
         service.set_skill_enabled(&skill.slug, &skill.scope, None, enabled)?;
@@ -3609,13 +3814,50 @@ async fn update_remote_skill(
     if let Some(favorite) = input.favorite {
         set_catalog_favorite(&db, format!("skill:{slug}"), favorite)?;
     }
-    let updated = service
-        .list_skills(None)
-        .into_iter()
-        .find(|item| item.slug == slug && item.scope == skill.scope)
+    let updated = find_catalog_skill(&service.list_skills(None), &slug, Some(skill.scope.as_str()))
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Skill introuvable.".into()))?;
     let _ = state.app.emit("catalog-updated", &slug);
-    Ok(Json(json!({ "skill": updated })))
+    Ok(Json(json!({
+        "skill": {
+            "slug": updated.slug,
+            "name": updated.name,
+            "description": updated.description,
+            "scope": updated.scope,
+            "enabled": updated.enabled,
+            "builtin": updated.builtin,
+            "parentSlug": updated.parent_slug,
+            "relativePath": updated.relative_path,
+            "nestedCount": updated.child_skills.len(),
+            "childSkills": updated.child_skills.iter().map(|child| json!({
+                "slug": child.slug,
+                "name": child.name,
+                "description": child.description,
+                "scope": child.scope,
+                "enabled": child.enabled,
+                "builtin": child.builtin,
+                "parentSlug": child.parent_slug,
+                "relativePath": child.relative_path,
+            })).collect::<Vec<_>>(),
+        }
+    })))
+}
+
+fn find_catalog_skill(
+    skills: &[crate::models::workspace::Skill],
+    slug: &str,
+    scope: Option<&str>,
+) -> Option<crate::models::workspace::Skill> {
+    for skill in skills {
+        if skill.slug == slug && scope.is_none_or(|value| skill.scope == value) {
+            return Some(skill.clone());
+        }
+        for child in &skill.child_skills {
+            if child.slug == slug && scope.is_none_or(|value| child.scope == value) {
+                return Some(child.clone());
+            }
+        }
+    }
+    None
 }
 
 async fn update_remote_integration(
@@ -3922,7 +4164,7 @@ mod tests {
     fn mobile_plugin_and_skill_choices_reach_bob_as_explicit_mentions() {
         let mentions = capability_mentions(
             &[
-                "builtin-cloud-architect".into(),
+                "agentic-cloud-architect".into(),
                 "bob-work-cto-invest".into(),
             ],
             &["newer-custom".into()],
@@ -3933,7 +4175,7 @@ mod tests {
         assert_eq!(
             mentions,
             [
-                "@plugin:builtin-cloud-architect",
+                "@plugin:agentic-cloud-architect",
                 "@plugin:bob-work-cto-invest",
                 "@skill:newer-custom",
                 "@mcp:weather-api",
@@ -4037,7 +4279,7 @@ mod tests {
                 },
             )
             .expect("conversation");
-        ConversationService::new()
+        let inserted_message = ConversationService::new()
             .add_message(
                 &db,
                 AddMessageInput {
@@ -4094,11 +4336,17 @@ mod tests {
         assert_eq!(updated.title, "Titre renommé");
         assert!(updated.pinned);
         assert!(updated.project_id.is_none());
-        assert!(WorkspaceService::new()
+        let message_result = WorkspaceService::new()
             .search(&db, "Bonjour iOS", 10)
             .expect("message search")
             .iter()
-            .any(|result| result.entity_type == "message" && result.entity_id == conversation.id));
+            .find(|result| result.entity_type == "message" && result.entity_id == conversation.id)
+            .cloned()
+            .expect("matching message result");
+        assert_eq!(
+            message_result.message_created_at.as_deref(),
+            Some(inserted_message.created_at.as_str())
+        );
 
         service
             .set_archived(&db, &conversation.id, true)

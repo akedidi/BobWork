@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   importBobModeYaml,
@@ -12,6 +12,7 @@ import type { ModeCatalogEntry } from '@bob-work/shared-types'
 import { useT } from '../i18n'
 import { ModalOverlay, ModalPanel } from '../components/ModalOverlay'
 import { useAppDialog } from '../components/AppDialog'
+import { useTransientStatus } from '../hooks/useTransientStatus'
 
 const DOCS_URL = 'https://bob.ibm.com/docs/shell/configuration/custom-modes-bobshell'
 
@@ -32,10 +33,9 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
   const [loadError, setLoadError] = useState<unknown>(null)
   const [search, setSearch] = useState('')
   const [busySlug, setBusySlug] = useState<string | null>(null)
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useTransientStatus(3000)
   const [importOpen, setImportOpen] = useState(false)
   const [importYaml, setImportYaml] = useState('')
-  const statusTimerRef = useRef<number | null>(null)
 
   const load = async () => {
     setLoadError(null)
@@ -52,15 +52,6 @@ export default function ModesView({ embedded = false }: { embedded?: boolean }) 
   }
 
   useEffect(() => { void load() }, [])
-
-  useEffect(() => {
-    if (!status) return
-    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    statusTimerRef.current = window.setTimeout(() => setStatus(''), 3500)
-    return () => {
-      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
-    }
-  }, [status])
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()

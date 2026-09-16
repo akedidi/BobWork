@@ -227,7 +227,7 @@ export default function PluginBuilderView() {
               <div><dt>Flux</dt><dd style={{ whiteSpace: 'pre-wrap' }}>{preview.io}</dd></div>
             </dl>
             <p className="settings-note">
-              Bob génère le bundle à partir de ce plan (plus d’entretien). Ensuite, ouvrez Plugins pour la mise en service.
+              Bob génère le bundle à partir de ce plan (plus d’entretien). Ensuite, ouvrez Plugins pour l’activer.
             </p>
           </section>
         )}

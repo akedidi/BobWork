@@ -1,44 +1,50 @@
 ---
 name: information-architecture
-description: "Structurer contenus, navigation et taxonomie autour des modèles mentaux."
+description: "Structure content, navigation, and taxonomy around mental models."
 icon: designer
 ---
 
 # information-architecture
 
-Utiliser ce skill pour structurer contenus, navigation et taxonomie autour des modèles mentaux.
+Use this skill to structure content, navigation, and taxonomy around mental models.
 
-## Entrées minimales
+## Minimum inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- expected objective or decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Inventorier contenus, objets, tâches et contraintes.
-2. Regrouper et nommer selon le vocabulaire utilisateur.
-3. Définir hiérarchie, navigation, recherche, métadonnées et états vides.
-4. Tester la trouvabilité par tree test, card sort ou scénarios représentatifs.
+1. Inventory content, objects, tasks, and constraints.
+2. Group and label using user vocabulary.
+3. Define hierarchy, navigation, search, metadata, and empty states.
+4. Test findability with tree tests, card sorts, or representative scenarios.
 
-## Livrable
+## Deliverable
 
-Sitemap, taxonomie, modèle de navigation et résultats de validation.
+Sitemap, taxonomy, navigation model, and validation results.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include when applicable: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps.
 
-## Contrôles qualité
+## Quality checks
 
-- Libellés non ambigus et cohérents.
-- Aucun cul-de-sac de navigation.
-- La structure supporte les tâches prioritaires et la croissance.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Unambiguous, consistent labels.
+- No navigation dead ends.
+- Structure supports priority tasks and growth.
+- Clearly distinguish fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validations.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Resources
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the common delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
+
+## Language
+
+- This skill file is authored in English.
+- Deliverables must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.

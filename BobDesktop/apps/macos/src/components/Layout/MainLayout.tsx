@@ -1,16 +1,15 @@
 // ============================================================
 // Bob Work – MainLayout
-// Shell principal + ApprovalOverlay câblé en temps réel
+// Shell principal + file d’approvals (affichage uniquement dans ChatView)
 // ============================================================
 
 import { useEffect, useRef, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import Sidebar from '../Sidebar/Sidebar'
-import { ApprovalOverlay } from '../Approval/ApprovalOverlay'
 import { LoadErrorBanner } from '../LoadErrorBanner'
-import { useAppStore } from '../../stores/appStore'
-import { useBobSessionDone } from '../../hooks/useTauriEvents'
+import { completedTaskUnreadCount, useAppStore } from '../../stores/appStore'
 import { getPendingApprovals, getSettings, listAppNotifications, takePendingNotificationOpen } from '../../lib/ipc'
 import type { AppNotificationPayload } from '../../lib/ipc'
 import { requestStartupPermissions } from '../../lib/startupPermissions'
@@ -18,7 +17,10 @@ import { useT } from '../../i18n'
 import type { Approval, AppSettings } from '@bob-work/shared-types'
 
 interface SessionDonePayload {
+  sessionId?: string
   conversationId: string
+  taskId?: string | null
+  success?: boolean
   cancelled?: boolean
 }
 
@@ -48,15 +50,22 @@ export default function MainLayout() {
   const locationRef = useRef(location.pathname)
   locationRef.current = location.pathname
   const [approvalsError, setApprovalsError] = useState<unknown>(null)
-  const { pendingApprovals, setPendingApprovals, markConversationUnread, markConversationRead, setActiveConversation } = useAppStore((s) => ({
-    pendingApprovals: s.pendingApprovals,
+  const unreadCompletedTaskCount = useAppStore(completedTaskUnreadCount)
+  const { setPendingApprovals, markConversationUnread, markCompletedTaskUnread, markConversationRead, setActiveConversation } = useAppStore((s) => ({
     setPendingApprovals: s.setPendingApprovals,
     markConversationUnread: s.markConversationUnread,
+    markCompletedTaskUnread: s.markCompletedTaskUnread,
     markConversationRead: s.markConversationRead,
     setActiveConversation: s.setActiveConversation,
   }))
   const addApproval = (a: Approval) =>
     useAppStore.getState().setPendingApprovals([...useAppStore.getState().pendingApprovals, a])
+
+  useEffect(() => {
+    void getCurrentWindow()
+      .setBadgeCount(unreadCompletedTaskCount > 0 ? unreadCompletedTaskCount : undefined)
+      .catch(() => {})
+  }, [unreadCompletedTaskCount])
 
   // Builder context is only meaningful inside a builder chat. Keeping it while
   // navigating elsewhere made a later ordinary conversation look like a skill
@@ -158,6 +167,14 @@ export default function MainLayout() {
 
     listen<Approval>('approval-required', (event) => {
       addApproval(event.payload)
+      // Never surface the card outside ChatView (Settings, Plugins, …).
+      // Mark the owning conversation unread so the user can return to the prompt.
+      const conversationId = useAppStore.getState().tasks.find(
+        task => task.id === event.payload.taskId,
+      )?.conversationId
+      if (conversationId && locationRef.current !== `/chat/${conversationId}`) {
+        markConversationUnread(conversationId)
+      }
     }).then(fn => { unlistenApproval = fn })
 
     listen<NotificationOpenPayload>('notification-open', (event) => {
@@ -169,7 +186,14 @@ export default function MainLayout() {
       const done = event.payload
       if (done.cancelled || !done.conversationId) return
       if (locationRef.current === `/chat/${done.conversationId}`) return
-      markConversationUnread(done.conversationId)
+      if (done.success === false) {
+        markConversationUnread(done.conversationId)
+        return
+      }
+      markCompletedTaskUnread(
+        done.taskId || done.sessionId || `conversation:${done.conversationId}`,
+        done.conversationId,
+      )
     }).then(fn => { unlistenDone = fn })
 
     takePendingNotificationOpen()
@@ -181,9 +205,7 @@ export default function MainLayout() {
       unlistenOpen?.()
       unlistenDone?.()
     }
-  }, [markConversationUnread, markConversationRead, navigate])
-
-  const topApproval = pendingApprovals.find(a => a.decision === 'pending')
+  }, [markConversationUnread, markCompletedTaskUnread, markConversationRead, navigate])
 
   return (
     <div className="app-shell">
@@ -198,9 +220,6 @@ export default function MainLayout() {
         ) : null}
         <Outlet />
       </div>
-      {topApproval && (
-        <ApprovalOverlay approval={topApproval} />
-      )}
     </div>
   )
 }

@@ -149,7 +149,8 @@ export default function RemoteSettingsTab(props: any) {
           </div>
         )}
       </Card>
-      <McpGatewaySettings settings={settings} change={change} t={t} />
+      {/* Hidden until the remote MCP gateway is ready to ship. */}
+      {false && <McpGatewaySettings settings={settings} change={change} t={t} />}
     </>
   )
 }

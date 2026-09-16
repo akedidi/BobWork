@@ -1,44 +1,52 @@
 ---
 name: solution-architecture
-description: "Composer la vue cible, ses responsabilités et sa roadmap."
+description: "Compose the target view, responsibilities, and roadmap."
 icon: architecture
 ---
 
 # solution-architecture
 
-Utiliser ce skill pour composer la vue cible, ses responsabilités et sa roadmap.
+Use this skill to compose the target view, responsibilities, and roadmap.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Définir contexte, frontières, acteurs et systèmes externes.
-2. Décomposer capacités, services, données, interactions et déploiement.
-3. Tracer exigences et drivers vers composants et décisions.
-4. Décrire transition, opérations, risques et points de validation.
+1. Define context, boundaries, actors, and external systems.
+2. Decompose capabilities, services, data, interactions, and deployment.
+3. Trace requirements and drivers to components and decisions.
+4. Describe transition, operations, risks, and validation points.
 
-## Livrable
+## Deliverable
 
-Dossier d’architecture cible, vues, décisions, risques et roadmap.
+Target architecture dossier, views, decisions, risks, and roadmap.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Cohérence entre vues logique, données, intégration et déploiement.
-- Les composants ont des responsabilités nettes.
-- La solution est opérable et testable.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Consistency across logical, data, integration, and deployment views.
+- Components have clear responsibilities.
+- Solution is operable and testable.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.

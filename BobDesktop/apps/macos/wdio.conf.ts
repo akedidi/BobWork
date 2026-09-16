@@ -25,7 +25,7 @@ export const config: Options.Testrunner = {
         BOBWORK_OAUTH_SLACK_CLIENT_ID: 'e2e-slack-client',
         BOBWORK_OAUTH_MONDAY_CLIENT_ID: 'e2e-monday-client',
         BOBWORK_OAUTH_MICROSOFT_CLIENT_ID: '00000000-0000-4000-8000-000000000001',
-        TMDB_API_KEY: process.env.TMDB_API_KEY || 'f3d757824f08ea2cff45eb8f47ca3a1e',
+        ...(process.env.TMDB_API_KEY ? { TMDB_API_KEY: process.env.TMDB_API_KEY } : {}),
         RUST_LOG: 'bob_work=debug,tauri=warn',
       },
     },

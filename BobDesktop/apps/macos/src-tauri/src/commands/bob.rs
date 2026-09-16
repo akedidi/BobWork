@@ -6,6 +6,7 @@
 use crate::db::Database;
 use crate::error::AppError;
 use crate::models::conversation::AddMessageInput;
+use crate::models::plugin::PluginBrowserStatus;
 use crate::models::task::CreateTaskInput;
 use crate::models::workspace::McpServer;
 use crate::services::audit::AuditService;
@@ -230,12 +231,171 @@ pub async fn install_bob_shell() -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[tauri::command]
+pub async fn uninstall_bob_shell() -> Result<bool, AppError> {
+    let prefix = dirs::home_dir()
+        .ok_or_else(|| AppError::Io("Dossier utilisateur introuvable".into()))?
+        .join(".local");
+    let uninstall = std::process::Command::new("npm")
+        .args([
+            "uninstall",
+            "-g",
+            "--prefix",
+        ])
+        .arg(&prefix)
+        .arg("bobshell")
+        .output()
+        .map_err(|e| {
+            AppError::BobExecutionFailed(format!("Désinstallation npm impossible : {}", e))
+        })?;
+    if !uninstall.status.success() {
+        let stderr = String::from_utf8_lossy(&uninstall.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&uninstall.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "npm uninstall a échoué".into()
+        };
+        return Err(AppError::BobExecutionFailed(detail));
+    }
+    // Best-effort cleanup if npm left a shim behind.
+    if let Some(bin) = dirs::home_dir().map(|home| home.join(".local").join("bin").join("bob")) {
+        if bin.is_file() {
+            let _ = std::fs::remove_file(bin);
+        }
+    }
+    Ok(true)
+}
+
 // ── send_message ──────────────────────────────────────────────
 //
 // Non-blocking: saves user message to DB, starts a background
 // streaming session and returns immediately.
 // The frontend receives tokens via `bob-token` and knows when
 // the session is done via `bob-session-done`.
+
+fn fail_after_user_turn(
+    conv_service: &ConversationService,
+    db: &Database,
+    app_handle: &tauri::AppHandle,
+    conversation_id: &str,
+    err: AppError,
+) -> Result<StartSessionResult, AppError> {
+    let message = match &err {
+        AppError::PermissionDenied(detail) => detail.clone(),
+        other => other.to_string(),
+    };
+    let _ = conv_service.add_message(
+        db,
+        AddMessageInput {
+            conversation_id: conversation_id.to_string(),
+            author: "assistant".to_string(),
+            content: format!("Erreur : {message}"),
+            attachments: None,
+            sources: None,
+        },
+    );
+    let _ = app_handle.emit("conversation-updated", conversation_id);
+    Err(err)
+}
+
+fn missing_browser_capability_error(
+    plugin_name: &str,
+    missing: &[PluginBrowserStatus],
+    app_name: &str,
+) -> String {
+    let names = missing
+        .iter()
+        .map(|extension| extension.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let setting_disabled = missing
+        .iter()
+        .filter(|extension| extension.state == "disabled")
+        .collect::<Vec<_>>();
+    // Settings toggle first — never jump to MCP / OS permissions while the
+    // Accès & contrôle switch is still off.
+    if !setting_disabled.is_empty() {
+        let mut parts = vec![format!(
+            "Le plugin {plugin_name} nécessite : {names}."
+        )];
+        for extension in &setting_disabled {
+            match extension.capability.as_str() {
+                "computer_use" => parts.push(
+                    "Étape 1 : dans Réglages → Accès et contrôle, activez « Contrôle de l’ordinateur » (Contrôle bureau macOS). Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP et ne demande pas Accessibilité."
+                        .into(),
+                ),
+                "chrome" => parts.push(
+                    "Étape 1 : dans Réglages → Accès et contrôle, activez « Contrôle Chrome ». Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP Chrome et ne demande pas Automatisation."
+                        .into(),
+                ),
+                _ => parts.push(format!(
+                    "Étape 1 : activez « {} » dans Réglages → Accès et contrôle.",
+                    extension.name
+                )),
+            }
+        }
+        parts.push(
+            "Ensuite seulement : Revérifier le statut MCP / droits macOS dans le même onglet, puis relancez la demande."
+                .into(),
+        );
+        return parts.join(" ");
+    }
+
+    let details = missing
+        .iter()
+        .map(|extension| extension.message.trim())
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let needs_automation = missing.iter().any(|extension| {
+        extension.capability == "chrome"
+            || extension.message.to_ascii_lowercase().contains("automatisation")
+    });
+    let needs_accessibility = missing.iter().any(|extension| {
+        extension.capability == "computer_use"
+            || extension
+                .message
+                .to_ascii_lowercase()
+                .contains("accessibilité")
+    });
+    let mut parts = vec![format!(
+        "Le plugin {plugin_name} nécessite une capacité déjà activée dans Accès et contrôle : {names}."
+    )];
+    if needs_automation {
+        parts.push(format!(
+            "Il manque le droit macOS Automatisation pour « {app_name} » → Google Chrome."
+        ));
+        if app_name != "Bob Work" {
+            parts.push(format!(
+                "Vous utilisez {app_name} : dans Réglages Système → Confidentialité et sécurité → Automatisation, cochez {app_name} → Google Chrome. Une case déjà cochée pour Bob Work ne suffit pas."
+            ));
+        } else {
+            parts.push(
+                "Réglages Système → Confidentialité et sécurité → Automatisation : Bob Work → Google Chrome. Si vous lancez Bob Work-test, autorisez Bob Work-test — pas seulement Bob Work."
+                    .into(),
+            );
+        }
+        parts.push(format!(
+            "Dans Réglages → Permissions, cliquez « Demander Automatisation Chrome » pour faire apparaître {app_name} dans la liste, puis Revérifier."
+        ));
+    } else if needs_accessibility {
+        parts.push(format!(
+            "Le réglage est activé, mais Accessibilité macOS manque pour {app_name}. Réglages Système → Confidentialité et sécurité → Accessibilité : autorisez {app_name}, puis Revérifier dans Permissions."
+        ));
+    } else {
+        parts.push(
+            "Le réglage Accès et contrôle est activé, mais l’outil MCP compatible n’est pas prêt. Ouvrez Accès et contrôle, Revérifier, puis relancez."
+                .into(),
+        );
+    }
+    if !details.is_empty() {
+        parts.push(details);
+    }
+    parts.join(" ")
+}
 
 #[tauri::command]
 pub async fn send_message(
@@ -247,11 +407,22 @@ pub async fn send_message(
     attachment_paths: Option<Vec<String>>,
     resume_task_id: Option<String>,
     approved_plugin_ids: Option<Vec<String>>,
+    task_approval: Option<crate::services::bob::TaskApprovalConfig>,
     bob_service: State<'_, BobService>,
     runtime_manager: State<'_, RuntimeManager>,
     db: State<'_, Database>,
 ) -> Result<StartSessionResult, AppError> {
     let conv_service = ConversationService::new();
+    let plugin_reference_ids =
+        crate::services::prompt_mentions::plugin_reference_ids(&db)?;
+    let message = crate::services::prompt_mentions::normalize_plugin_mentions(
+        &message,
+        &plugin_reference_ids,
+    );
+    // The selected mode belongs to the conversation and must survive both
+    // route changes and application restarts. Persist again at dispatch time
+    // so mobile/remote clients receive the same guarantee as the desktop UI.
+    conv_service.set_mode(&db, &conversation_id, &mode)?;
     let approved_plugin_ids = approved_plugin_ids.unwrap_or_default();
     let project = if let Some(project_id) = project_id.as_deref() {
         crate::services::project::ProjectService::new().get_by_id(&db, project_id)?
@@ -265,240 +436,6 @@ pub async fn send_message(
         // browser_snapshot implementation opened Chrome for ordinary research.
         crate::services::chrome_mcp::ChromeMcpService::ensure_bundle()?;
     }
-    if let Some(project) = project
-        .as_ref()
-        .filter(|value| !value.allowed_plugins.is_empty())
-    {
-        for captures in regex::Regex::new(r"@skill:([a-z0-9-]+)")
-            .unwrap()
-            .captures_iter(&message)
-        {
-            let permission = format!("skill:{}", &captures[1]);
-            if !project.allowed_plugins.contains(&permission) {
-                return Err(AppError::PermissionDenied(format!(
-                    "Le skill {} n’est pas autorisé dans ce projet.",
-                    &captures[1]
-                )));
-            }
-        }
-        for captures in regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)")
-            .unwrap()
-            .captures_iter(&message)
-        {
-            if !project
-                .allowed_plugins
-                .iter()
-                .any(|value| value == &captures[1])
-            {
-                return Err(AppError::PermissionDenied(
-                    "Ce plugin n’est pas autorisé dans ce projet.".into(),
-                ));
-            }
-        }
-    }
-
-    let mut plugin_integration_ids = vec![];
-    let mut plugin_hooks = vec![];
-    let mut office_plugins = vec![];
-    let mut missing_local_tools = vec![];
-    let mut checked_plugin_ids = std::collections::HashSet::new();
-    for captures in regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)")
-        .unwrap()
-        .captures_iter(&message)
-    {
-        let plugin_id = &captures[1];
-        if !checked_plugin_ids.insert(plugin_id.to_string()) {
-            continue;
-        }
-        let plugin = crate::services::plugin::PluginService::new()
-            .get_by_id(&db, plugin_id)?
-            .ok_or_else(|| AppError::NotFound(format!("Plugin {} introuvable", plugin_id)))?;
-        if plugin.install_state != "installed" {
-            return Err(AppError::PermissionDenied(format!(
-                "Le plugin {} est désactivé.",
-                plugin.name
-            )));
-        }
-        // Runtime declarations are resolved by the platform before the agent is
-        // started. The prompt never receives physical paths or installation
-        // commands, and an optional heavy runtime is never downloaded silently.
-        runtime_manager.register_plugin_requirements(&db, &plugin.id, &plugin.manifest)?;
-        for capability in shared_capabilities(&plugin.manifest) {
-            runtime_manager.resolve_capability(&db, &plugin.id, &plugin.manifest, &capability)?;
-        }
-        for requirement in external_runtime_requirements(&plugin.manifest) {
-            let Some(runtime_id) = requirement.get("id").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if let Err(error) = runtime_manager.resolve_external_runtime(
-                &db,
-                &plugin.id,
-                &plugin.manifest,
-                runtime_id,
-            ) {
-                return Err(AppError::PermissionDenied(format!(
-                    "Le plugin {} requiert le runtime optionnel {}. Consultez Réglages → Stockage et runtimes pour vérifier sa source, sa taille et l’installer explicitement. ({})",
-                    plugin.name, runtime_id, error
-                )));
-            }
-        }
-        for dependency in private_dependencies(&plugin.manifest) {
-            let Some(dependency_id) = dependency.get("id").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let source_kind = dependency
-                .get("source")
-                .and_then(|value| value.get("kind"))
-                .and_then(|value| value.as_str());
-            let bundle_root = plugin
-                .manifest
-                .get("bundlePath")
-                .and_then(|value| value.as_str())
-                .map(std::path::Path::new);
-            if let Err(error) = runtime_manager.resolve_private_executable(
-                &plugin.id,
-                &plugin.manifest,
-                bundle_root,
-                dependency_id,
-            ) {
-                let requirement_name = dependency
-                    .get("name")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(dependency_id);
-                let kind = if source_kind == Some("known-existing-executable") {
-                    "composant local approuvé"
-                } else {
-                    "dépendance privée du plugin"
-                };
-                return Err(AppError::PermissionDenied(format!(
-                    "Le plugin {} requiert {} ({}), indisponible ou non vérifié : {}. Installez ou réparez ce composant via sa source officielle, puis relancez.",
-                    plugin.name, requirement_name, kind, error
-                )));
-            }
-        }
-        let requires_preflight = plugin
-            .manifest
-            .get("permissions")
-            .and_then(|value| value.as_array())
-            .is_some_and(|permissions| {
-                permissions.iter().any(|permission| {
-                    matches!(
-                        permission.get("type").and_then(|value| value.as_str()),
-                        Some(
-                            "command.execute"
-                                | "file.delete"
-                                | "network.request"
-                                | "mcp.connect"
-                                | "hook.execute"
-                                | "browser.control"
-                        )
-                    )
-                })
-            });
-        // Packaged Work modes (Brief Mission IBM, CTO Invest…) use specializedMode with
-        // builtin:false so they stay out of the "native skill" catalog — still trusted locally.
-        let trusted_local_office = plugin.manifest.get("specializedMode").is_some();
-        if requires_preflight
-            && !trusted_local_office
-            && !approved_plugin_ids.iter().any(|value| value == plugin_id)
-        {
-            return Err(AppError::PermissionDenied(format!(
-                "Le plugin {} nécessite une autorisation explicite avant cette exécution.",
-                plugin.name
-            )));
-        }
-        if crate::services::plugin_mcp::PluginMcpService::has_servers(&plugin.manifest) {
-            let bundle_dir =
-                crate::services::plugin_mcp::PluginMcpService::bundle_dir(&plugin.manifest)?;
-            let mcp = crate::services::plugin_mcp::PluginMcpService::new();
-            let mut unavailable = mcp
-                .status(&plugin.id, &plugin.manifest, &bundle_dir)?
-                .into_iter()
-                .filter(|server| server.required && (!server.configured || !server.enabled))
-                .map(|server| server.name)
-                .collect::<Vec<_>>();
-            // Local specialized modes: register/enable MCP on first use instead of a dead-end error.
-            if !unavailable.is_empty() && trusted_local_office {
-                if let Some(bob_path) = bob_service.get_binary_path() {
-                    match mcp.sync(&bob_path, &plugin.id, &plugin.manifest, &bundle_dir, true) {
-                        Ok(_) => {
-                            unavailable = mcp
-                                .status(&plugin.id, &plugin.manifest, &bundle_dir)?
-                                .into_iter()
-                                .filter(|server| {
-                                    server.required && (!server.configured || !server.enabled)
-                                })
-                                .map(|server| server.name)
-                                .collect();
-                        }
-                        Err(error) => {
-                            return Err(AppError::PermissionDenied(format!(
-                                "Impossible d’activer les outils MCP du plugin {} : {}. Vérifiez que Bob Shell est installé, puis réessayez depuis Plugins.",
-                                plugin.name,
-                                error
-                            )));
-                        }
-                    }
-                }
-            }
-            if !unavailable.is_empty() {
-                return Err(AppError::PermissionDenied(format!(
-                    "Les outils connectés du plugin {} ne sont pas actifs : {}. Activez le plugin dans Plugins (MCP) puis relancez.",
-                    plugin.name,
-                    unavailable.join(", ")
-                )));
-            }
-        }
-        let extensions = PluginExtensionService::new().status(
-            &plugin.id,
-            &plugin.manifest,
-            &db,
-            &bob_service,
-        )?;
-        let missing_integrations = extensions
-            .integrations
-            .iter()
-            .filter(|integration| {
-                integration.required
-                    && !matches!(integration.state.as_str(), "connected" | "configured")
-            })
-            .map(|integration| integration.name.clone())
-            .collect::<Vec<_>>();
-        if !missing_integrations.is_empty() {
-            return Err(AppError::PermissionDenied(format!(
-                "Le plugin {} nécessite une vraie connexion : {}. Autorisez-la dans Intégrations et MCP avant de relancer la demande.",
-                plugin.name,
-                missing_integrations.join(", ")
-            )));
-        }
-        let missing_browser = extensions
-            .browser_extensions
-            .iter()
-            .filter(|extension| extension.required && extension.state != "ready")
-            .map(|extension| extension.name.clone())
-            .collect::<Vec<_>>();
-        if !missing_browser.is_empty() {
-            return Err(AppError::PermissionDenied(format!(
-                "Le plugin {} nécessite une capacité navigateur autorisée : {}. Activez-la dans Réglages Bob Work → Accès et contrôle, puis configurez l’outil MCP compatible.",
-                plugin.name,
-                missing_browser.join(", ")
-            )));
-        }
-        plugin_integration_ids.extend(
-            extensions
-                .integrations
-                .iter()
-                .filter(|integration| integration.state == "connected")
-                .map(|integration| integration.provider.clone()),
-        );
-        plugin_hooks.extend(PluginExtensionService::new().prepare_hooks(&plugin.manifest)?);
-        missing_local_tools
-            .extend(crate::services::plugin_local_runtime::missing_tools_for_plugin(&plugin));
-        if plugin.manifest.get("specializedMode").is_some() {
-            office_plugins.push(plugin);
-        }
-    }
-
     let overlay = crate::services::plugin_user_resources::PluginUserResourceService::new();
     let db_service = crate::services::db_connection::DbConnectionService::new();
     let mut db_connections = db_service.resolve_mentioned(&db, &message)?;
@@ -506,7 +443,9 @@ pub async fn send_message(
         .iter()
         .map(|item| item.id.clone())
         .collect::<std::collections::HashSet<_>>();
-    for connection_id in overlay.linked_connection_ids_for_message(&message) {
+    for connection_id in
+        overlay.linked_connection_ids_for_message(&message, &plugin_reference_ids)
+    {
         if !seen_db_ids.insert(connection_id.clone()) {
             continue;
         }
@@ -522,7 +461,8 @@ pub async fn send_message(
     // Composer paths (e.g. ~/Downloads) are outside Bob Shell's sandbox unless
     // we copy them under `--workspace` first.
     let mut requested_attachment_paths = attachment_paths.unwrap_or_default();
-    requested_attachment_paths.extend(overlay.paths_for_plugin_mentions(&message));
+    requested_attachment_paths
+        .extend(overlay.paths_for_plugin_mentions(&message, &plugin_reference_ids));
     requested_attachment_paths.extend(
         crate::services::db_connection::DbConnectionService::sqlite_file_paths(&db_connections),
     );
@@ -599,11 +539,11 @@ pub async fn send_message(
             sources: None,
         },
     )?;
-    // The conversation becomes sidebar-visible as soon as its first user
-    // message is persisted. Title generation is best-effort and can be
-    // delayed (notably while another Bob task is already running), so it must
-    // never gate creation of the conversation entry.
+    // Title generation is scheduled in the background so the conversation
+    // appears immediately and Bob can start streaming without waiting.
     let _ = app_handle.emit("conversation-updated", &conversation_id);
+    // Title generation must not block Bob from starting. Schedule in the
+    // background so the sidebar updates ASAP while the work session streams.
     let should_generate_title = conv_service
         .get_by_id(&db, &conversation_id)
         .ok()
@@ -613,6 +553,327 @@ pub async fn send_message(
             .get_messages(&db, &conversation_id)
             .map(|messages| messages.iter().filter(|item| item.author == "user").count() == 1)
             .unwrap_or(false);
+
+    if should_generate_title {
+        schedule_conversation_title(app_handle.clone(), conversation_id.clone(), message.clone());
+    }
+
+    if let Some(project) = project
+        .as_ref()
+        .filter(|value| !value.allowed_plugins.is_empty())
+    {
+        for captures in regex::Regex::new(r"@skill:([a-z0-9-]+)")
+            .unwrap()
+            .captures_iter(&message)
+        {
+            let permission = format!("skill:{}", &captures[1]);
+            if !project.allowed_plugins.contains(&permission) {
+                return fail_after_user_turn(
+                    &conv_service,
+                    &db,
+                    &app_handle,
+                    &conversation_id,
+                    AppError::PermissionDenied(format!(
+                        "Le skill {} n’est pas autorisé dans ce projet.",
+                        &captures[1]
+                    )),
+                );
+            }
+        }
+        for requested in crate::services::prompt_mentions::collect_plugin_mention_ids(
+            &message,
+            &plugin_reference_ids,
+        ) {
+            let plugin_id = match crate::services::plugin::PluginService::new()
+                .get_by_reference(&db, &requested)
+            {
+                Ok(Some(plugin)) => plugin.id,
+                Ok(None) => requested.clone(),
+                Err(err) => {
+                    return fail_after_user_turn(
+                        &conv_service,
+                        &db,
+                        &app_handle,
+                        &conversation_id,
+                        err,
+                    )
+                }
+            };
+            if !project.allowed_plugins.iter().any(|value| {
+                crate::services::prompt_mentions::canonical_plugin_mention_id(value)
+                    == crate::services::prompt_mentions::canonical_plugin_mention_id(&plugin_id)
+            }) {
+                return fail_after_user_turn(
+                    &conv_service,
+                    &db,
+                    &app_handle,
+                    &conversation_id,
+                    AppError::PermissionDenied(
+                        "Ce plugin n’est pas autorisé dans ce projet.".into(),
+                    ),
+                );
+            }
+        }
+    }
+
+    let app_display_name = crate::app_identity::app_display_name();
+    let sandbox_mode = settings.sandbox_mode;
+    let plugin_preflight = (|| -> Result<
+        (
+            Vec<String>,
+            Vec<crate::services::plugin_extensions::PreparedPluginHook>,
+            Vec<crate::models::plugin::Plugin>,
+            Vec<crate::services::plugin_local_runtime::MissingLocalTool>,
+            std::collections::HashSet<String>,
+        ),
+        AppError,
+    > {
+        let mut plugin_integration_ids = vec![];
+        let mut plugin_hooks = vec![];
+        let mut office_plugins = vec![];
+        let mut missing_local_tools: Vec<
+            crate::services::plugin_local_runtime::MissingLocalTool,
+        > = vec![];
+        let mut checked_plugin_ids = std::collections::HashSet::new();
+        for requested in crate::services::prompt_mentions::collect_plugin_mention_ids(
+            &message,
+            &plugin_reference_ids,
+        ) {
+            let plugin = crate::services::plugin::PluginService::new()
+                .get_by_reference(&db, &requested)?
+                .ok_or_else(|| AppError::NotFound(format!("Plugin {} introuvable", requested)))?;
+            let plugin_id = plugin.id.clone();
+            if !checked_plugin_ids.insert(plugin_id.clone()) {
+                continue;
+            }
+            if plugin.install_state != "installed" {
+                return Err(AppError::PermissionDenied(format!(
+                    "Le plugin {} est désactivé.",
+                    plugin.name
+                )));
+            }
+            runtime_manager.register_plugin_requirements(&db, &plugin.id, &plugin.manifest)?;
+            for capability in shared_capabilities(&plugin.manifest) {
+                runtime_manager.resolve_capability(&db, &plugin.id, &plugin.manifest, &capability)?;
+            }
+            for requirement in external_runtime_requirements(&plugin.manifest) {
+                let Some(runtime_id) = requirement.get("id").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                if let Err(error) = runtime_manager.resolve_external_runtime(
+                    &db,
+                    &plugin.id,
+                    &plugin.manifest,
+                    runtime_id,
+                ) {
+                    if sandbox_mode {
+                        return Err(AppError::PermissionDenied(
+                            crate::services::plugin_local_runtime::external_runtime_sandbox_blocked(
+                                &plugin.name,
+                                runtime_id,
+                                &error.to_string(),
+                            ),
+                        ));
+                    }
+                    return Err(AppError::PermissionDenied(format!(
+                        "Le plugin {} requiert le runtime optionnel {}. Consultez Réglages → Stockage et runtimes pour vérifier sa source, sa taille et l’installer explicitement. ({})",
+                        plugin.name, runtime_id, error
+                    )));
+                }
+            }
+            for dependency in private_dependencies(&plugin.manifest) {
+                let Some(dependency_id) = dependency.get("id").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let source_kind = dependency
+                    .get("source")
+                    .and_then(|value| value.get("kind"))
+                    .and_then(|value| value.as_str());
+                let bundle_root = plugin
+                    .manifest
+                    .get("bundlePath")
+                    .and_then(|value| value.as_str())
+                    .map(std::path::Path::new);
+                if let Err(error) = runtime_manager.resolve_private_executable(
+                    &plugin.id,
+                    &plugin.manifest,
+                    bundle_root,
+                    dependency_id,
+                ) {
+                    let requirement_name = dependency
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(dependency_id);
+                    let kind = if source_kind == Some("known-existing-executable") {
+                        "composant local approuvé"
+                    } else {
+                        "dépendance privée du plugin"
+                    };
+                    return Err(AppError::PermissionDenied(if sandbox_mode {
+                        format!(
+                            "{} Plugin « {} » dépend de {} ({}) hors isolation fiable. ({})",
+                            crate::security::terminal_sandbox::sandbox_limit_message(
+                                crate::security::terminal_sandbox::SandboxLimitKind::ExternalRuntime
+                            ),
+                            plugin.name,
+                            requirement_name,
+                            kind,
+                            error
+                        )
+                    } else {
+                        format!(
+                            "Le plugin {} requiert {} ({}), indisponible ou non vérifié : {}. Installez ou réparez ce composant via sa source officielle, puis relancez.",
+                            plugin.name, requirement_name, kind, error
+                        )
+                    }));
+                }
+            }
+            let requires_preflight = plugin
+                .manifest
+                .get("permissions")
+                .and_then(|value| value.as_array())
+                .is_some_and(|permissions| {
+                    permissions.iter().any(|permission| {
+                        matches!(
+                            permission.get("type").and_then(|value| value.as_str()),
+                            Some(
+                                "command.execute"
+                                    | "file.delete"
+                                    | "network.request"
+                                    | "mcp.connect"
+                                    | "hook.execute"
+                                    | "browser.control"
+                            )
+                        )
+                    })
+                });
+            let trusted_local_office = plugin.manifest.get("specializedMode").is_some();
+            if requires_preflight
+                && !trusted_local_office
+                && !approved_plugin_ids.iter().any(|value| value == &plugin_id)
+            {
+                return Err(AppError::PermissionDenied(format!(
+                    "Le plugin {} nécessite une autorisation explicite avant cette exécution.",
+                    plugin.name
+                )));
+            }
+            if crate::services::plugin_mcp::PluginMcpService::has_servers(&plugin.manifest) {
+                let bundle_dir =
+                    crate::services::plugin_mcp::PluginMcpService::bundle_dir(&plugin.manifest)?;
+                let mcp = crate::services::plugin_mcp::PluginMcpService::new();
+                let mut unavailable = mcp
+                    .status(&plugin.id, &plugin.manifest, &bundle_dir)?
+                    .into_iter()
+                    .filter(|server| server.required && (!server.configured || !server.enabled))
+                    .map(|server| server.name)
+                    .collect::<Vec<_>>();
+                if !unavailable.is_empty() && trusted_local_office {
+                    if let Some(bob_path) = bob_service.get_binary_path() {
+                        match mcp.sync(&bob_path, &plugin.id, &plugin.manifest, &bundle_dir, true) {
+                            Ok(_) => {
+                                unavailable = mcp
+                                    .status(&plugin.id, &plugin.manifest, &bundle_dir)?
+                                    .into_iter()
+                                    .filter(|server| {
+                                        server.required && (!server.configured || !server.enabled)
+                                    })
+                                    .map(|server| server.name)
+                                    .collect();
+                            }
+                            Err(error) => {
+                                return Err(AppError::PermissionDenied(format!(
+                                    "Impossible d’activer les outils MCP du plugin {} : {}. Vérifiez que Bob Shell est installé, puis réessayez depuis Plugins.",
+                                    plugin.name,
+                                    error
+                                )));
+                            }
+                        }
+                    }
+                }
+                if !unavailable.is_empty() {
+                    return Err(AppError::PermissionDenied(format!(
+                        "Les outils connectés du plugin {} ne sont pas actifs : {}. Activez le plugin dans Plugins (MCP) puis relancez.",
+                        plugin.name,
+                        unavailable.join(", ")
+                    )));
+                }
+            }
+            let extensions = PluginExtensionService::new().status(
+                &plugin.id,
+                &plugin.manifest,
+                &db,
+                &bob_service,
+            )?;
+            let missing_integrations = extensions
+                .integrations
+                .iter()
+                .filter(|integration| {
+                    integration.required
+                        && !matches!(integration.state.as_str(), "connected" | "configured")
+                })
+                .map(|integration| integration.name.clone())
+                .collect::<Vec<_>>();
+            if !missing_integrations.is_empty() {
+                return Err(AppError::PermissionDenied(format!(
+                    "Le plugin {} nécessite une vraie connexion : {}. Autorisez-la dans Intégrations et MCP avant de relancer la demande.",
+                    plugin.name,
+                    missing_integrations.join(", ")
+                )));
+            }
+            let missing_browser = extensions
+                .browser_extensions
+                .iter()
+                .filter(|extension| extension.required && extension.state != "ready")
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_browser.is_empty() {
+                return Err(AppError::PermissionDenied(missing_browser_capability_error(
+                    &plugin.name,
+                    &missing_browser,
+                    &app_display_name,
+                )));
+            }
+            plugin_integration_ids.extend(
+                extensions
+                    .integrations
+                    .iter()
+                    .filter(|integration| integration.state == "connected")
+                    .map(|integration| integration.provider.clone()),
+            );
+            plugin_hooks.extend(PluginExtensionService::new().prepare_hooks(&plugin.manifest)?);
+            missing_local_tools
+                .extend(crate::services::plugin_local_runtime::missing_tools_for_plugin(&plugin));
+            if plugin.manifest.get("specializedMode").is_some() {
+                office_plugins.push(plugin);
+            }
+        }
+        Ok((
+            plugin_integration_ids,
+            plugin_hooks,
+            office_plugins,
+            missing_local_tools,
+            checked_plugin_ids,
+        ))
+    })();
+
+    let (
+        plugin_integration_ids,
+        plugin_hooks,
+        mut office_plugins,
+        missing_local_tools,
+        checked_plugin_ids,
+    ) = match plugin_preflight {
+        Err(err) => {
+            return fail_after_user_turn(
+                &conv_service,
+                &db,
+                &app_handle,
+                &conversation_id,
+                err,
+            )
+        }
+        Ok(values) => values,
+    };
 
     // 2. Check Bob availability
     let bob_info = bob_service.detect();
@@ -799,8 +1060,66 @@ pub async fn send_message(
             crate::services::attachment_staging::attachment_paths_from_history(&history);
     }
 
+    let office_capabilities = crate::services::office_runtime::capabilities_for_prompt(
+        &message,
+        &mode,
+        &prompt_attachment_paths,
+    );
+    let alternative_office_tool =
+        crate::services::office_runtime::user_requests_alternative_office_tool(&message);
+    let office_runtime_policy = if office_capabilities.is_empty() {
+        None
+    } else {
+        if !alternative_office_tool {
+            for capability in &office_capabilities {
+                if let Err(error) = runtime_manager.resolve_platform_capability(
+                    &db,
+                    "platform-office",
+                    capability,
+                ) {
+                    tracing::warn!("Office runtime {capability}: {error}");
+                }
+            }
+        }
+        let plugin_service = crate::services::plugin::PluginService::new();
+        let bob_path = bob_service.get_binary_path();
+        for capability in &office_capabilities {
+            let Some(plugin_id) =
+                crate::services::office_runtime::plugin_id_for_capability(capability)
+            else {
+                continue;
+            };
+            if checked_plugin_ids.contains(plugin_id) {
+                continue;
+            }
+            let Some(plugin) = plugin_service.get_by_id(&db, plugin_id)? else {
+                continue;
+            };
+            if plugin.install_state != "installed" {
+                continue;
+            }
+            if let Err(error) = plugin_service.ensure_office_plugin_ready(
+                &db,
+                &runtime_manager,
+                bob_path.as_deref(),
+                &plugin,
+            ) {
+                tracing::warn!("Office MCP sync for {}: {error}", plugin.id);
+            }
+            if !office_plugins.iter().any(|item| item.id == plugin.id) {
+                office_plugins.push(plugin);
+            }
+        }
+        Some(crate::services::office_runtime::default_runtime_policy_block(
+            &office_capabilities,
+            alternative_office_tool,
+        ))
+    };
+
     // 5. Build context-aware prompt with history
-    let shell_message = translate_prompt_mentions(&db, &message);
+    let creator_skill = detect_creator_skill(&message, &mode);
+    let prompt_message = prepend_creator_skill_mention(&message, creator_skill);
+    let shell_message = translate_prompt_mentions(&db, &prompt_message);
     let mut integration_ids = project
         .as_ref()
         .map(|value| value.allowed_integrations.clone())
@@ -817,11 +1136,16 @@ pub async fn send_message(
                 "onenote".into(),
             ]
         });
+    integration_ids.extend(
+        regex::Regex::new(r"@integration:([A-Za-z0-9-]+)")
+            .unwrap()
+            .captures_iter(&message)
+            .filter_map(|captures| captures.get(1).map(|value| value.as_str().to_string())),
+    );
     integration_ids.extend(plugin_integration_ids);
     integration_ids.sort();
     integration_ids.dedup();
-    let plugin_creation = plugin_creation_protocol(&message, &mode)
-        .or_else(|| skill_creation_protocol(&message, &mode));
+    let plugin_creation = creator_skill.map(creator_skill_activation);
     let mcp_catalog = WorkspaceService::new().list_mcp_servers();
     let db_catalog_lines = crate::services::db_connection::DbConnectionService::new()
         .list(&db)
@@ -838,7 +1162,7 @@ pub async fn send_message(
         .collect::<Vec<_>>();
     let creation_environment = plugin_creation
         .as_ref()
-        .filter(|text| text.contains("création de plugin"))
+        .filter(|text| text.contains("plugin-creator"))
         .map(|_| {
             plugin_creation_environment_context(
                 settings.web_enabled,
@@ -894,7 +1218,6 @@ pub async fn send_message(
         local_audio_transcription_context(&local_audio_transcripts)
     };
     let visible_chrome_requested = settings.chrome_control_enabled
-        && !settings.sandbox_mode
         && (crate::services::bob::explicitly_requests_visible_chrome(&message)
             || mode.to_lowercase().contains("chrome"));
     let mut prompt = if sending_condense {
@@ -909,6 +1232,7 @@ pub async fn send_message(
         build_prompt_with_history(
             &shell_message,
             &mode,
+            &settings.language,
             history_for_prompt,
             stored_summary.as_deref(),
             &settings.global_instructions,
@@ -916,14 +1240,29 @@ pub async fn send_message(
                 .as_ref()
                 .and_then(|p| p.custom_instructions.as_deref()),
             &prompt_attachment_paths,
-            settings.web_enabled && !settings.sandbox_mode,
+            settings.web_enabled,
             &available_integration_context(&bob_service, &integration_ids),
             db_context,
             {
-                let office =
-                    build_office_specialized_context(&office_plugins, &prompt_attachment_paths);
-                let missing =
-                    crate::services::plugin_local_runtime::prompt_block(&missing_local_tools);
+                let office = match (
+                    build_office_specialized_context(&office_plugins, &prompt_attachment_paths),
+                    office_runtime_policy,
+                ) {
+                    (Some(mut ctx), Some(policy)) => {
+                        ctx.push_str("\n\n");
+                        ctx.push_str(&policy);
+                        Some(ctx)
+                    }
+                    (Some(ctx), None) => Some(ctx),
+                    (None, Some(policy)) => Some(format!(
+                        "Protocole Bob Work — Office local\n\n{policy}"
+                    )),
+                    (None, None) => None,
+                };
+                let missing = crate::services::plugin_local_runtime::prompt_block_with_sandbox(
+                    &missing_local_tools,
+                    settings.sandbox_mode,
+                );
                 match (office, missing) {
                     (Some(office), Some(missing)) => Some(format!("{office}\n\n{missing}")),
                     (office, missing) => office.or(missing),
@@ -939,13 +1278,62 @@ pub async fn send_message(
         )
     };
 
+    if !sending_condense && checked_plugin_ids.contains("agentic-cloud-architect") {
+        prompt.push_str(
+            "\n\nCONTRAT DE LIVRAISON CLOUD ARCHITECT — contrôle plateforme obligatoire : pour tout diagramme d’architecture livré comme `architecture.svg` / `architecture.png`, le chemin principal est OBLIGATOIREMENT `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py` (icônes officielles du catalogue, master déterministe avec bande « Cross-cutting platform capabilities »). Interdiction absolue de créer, écraser ou exécuter un clone workspace de `scripts/render_professional_svg.py` / `scripts/qa_professional_svg.py` — ces noms doivent pointer uniquement vers le plugin installé. Sans directive d’orientation, utilise le paysage 1920×1080. N’invente pas et n’exécute pas en premier un script freestyle (`generate_architecture_svg.py`, SVG géométrique maison, HTML/CSS, shapes génériques, colonnes verticales denses sans icônes data:image). Le freestyle n’est autorisé qu’en fallback explicite APRÈS un échec réel et journalisé du renderer plugin, et doit alors être déclaré comme dégradé. La vue D2/ELK complète reste un livrable technique séparé (`architecture-technical.*`) et ne doit jamais remplacer le master. Génère aussi les vues deployment/network et operations lorsque le modèle dépasse 18 composants. Valide le master avec `python3 \"$HOME/.bob/skills/cloud-architect/scripts/qa_professional_svg.py\" architecture.svg --master`; une dimension ou orientation différente de la demande, l’absence d’icônes officielles embarquées, un enchevêtrement de flux ou l’absence des vues requises bloque la livraison. Ne fabrique pas un rapport QA manuel et ne déclare pas PASS si cette commande n’a pas réussi.",
+        );
+        match cloud_architect_display_format(&message) {
+            Some("executive-boxes") => prompt.push_str(
+                "\nFORMAT EXPLICITE `executive-boxes` : force le master via `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py` (1920×1080 sauf orientation explicite), même sous les seuils de densité. Style obligatoire du renderer embarqué : flux principal gauche→droite (Consumers → Ingress → AKS runtime → AI → Data), bande basse Cross-cutting, cartes blanches avec icônes Azure officielles embarquées (data:image), pas de barres de titre chrome ni de colonnes verticales freestyle. Déporte PE/namespaces/détail dans des vues complémentaires.",
+            ),
+            Some("technical-detailed") => prompt.push_str(
+                "\nFORMAT EXPLICITE `technical-detailed` : produis une vue technique séparée avec tous les composants et flux utiles, dans `architecture-technical.svg` et `architecture-technical.png`. Conserve aussi le master `architecture.svg`/`architecture.png` via `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py` (executive-boxes). Ne réduis pas les polices pour faire tenir artificiellement la topologie.",
+            ),
+            Some("auto") => prompt.push_str(
+                "\nFORMAT EXPLICITE `auto` : le master `architecture.svg`/`architecture.png` passe toujours par `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py` ; réserve l’auto-layout D2 au livrable technique séparé.",
+            ),
+            _ => prompt.push_str(
+                "\nSans format explicite : le master `architecture.svg`/`architecture.png` passe quand même par `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py` ; freestyle uniquement en fallback après échec réel de ce script plugin.",
+            ),
+        }
+        match cloud_architect_orientation(&message) {
+            Some("horizontal") => prompt.push_str(
+                "\nORIENTATION EXPLICITE `horizontal` : impose un canvas paysage 1920×1080, une composition gauche→droite et `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py --orientation horizontal`. Valide avec `$HOME/.bob/skills/cloud-architect/scripts/qa_professional_svg.py architecture.svg --master --orientation horizontal`.",
+            ),
+            Some("vertical") => prompt.push_str(
+                "\nORIENTATION EXPLICITE `vertical` : impose un canvas portrait 1080×1920, une composition haut→bas et `$HOME/.bob/skills/cloud-architect/scripts/render_professional_svg.py --orientation vertical`. Valide avec `$HOME/.bob/skills/cloud-architect/scripts/qa_professional_svg.py architecture.svg --master --orientation vertical`. Ne livre jamais un paysage simplement pivoté ou étiré.",
+            ),
+            _ => {}
+        }
+    }
+
     // Generated deliverables need a stable home: the conversation workspace is
     // retained and indexed as Bob Work artifacts, while shell temp folders are
     // not. This also gives the UI a deterministic route to its inline preview.
-    if !sending_condense {
-        prompt.push_str(&format!(
-            "\n\nSorties et visualisations : tout fichier que tu crées doit être écrit dans le workspace de cette conversation : `{}`. N’utilise jamais /tmp pour un livrable. Pour toute visualisation demandée, crée une exportation HTML locale durable en complément de la VisualSpec/du rendu et cite le chemin absolu du fichier final dans la réponse. Ce fichier sera enregistré comme artefact et affiché directement dans la conversation ainsi que dans le panneau d’aperçu. Si l’utilisateur demande un site, une page Web complète ou un graphique volontairement pleine page, conserve sa mise en page documentaire et ajoute `<meta name=\"bob-preview-mode\" content=\"full-page\">` dans le `<head>` : l’aperçu Bob Work utilisera alors la taille naturelle avec défilement horizontal et vertical au besoin. N’aplatis pas une page complète en dashboard compact uniquement pour supprimer le scroll.",
-            workspace_root.display()
+    let task_approval = task_approval.unwrap_or_default();
+    let disable_tool_groups = permission_governance::disabled_tool_groups(
+        &task_approval.allowed_permissions,
+        true,
+    );
+    let edit_denied = disable_tool_groups.iter().any(|group| group == "edit");
+    let ui_locale = crate::services::agent_locale::resolve_app_locale(&settings.language);
+    if !sending_condense && !edit_denied {
+        prompt.push_str(&crate::services::agent_locale::outputs_workspace_guidance(
+            ui_locale,
+            &workspace_root.display().to_string(),
+        ));
+    }
+    if !disable_tool_groups.is_empty() {
+        let labels: Vec<&str> = disable_tool_groups
+            .iter()
+            .map(|group| permission_governance::composer_group_label_fr(group))
+            .collect();
+        // Bob IDE parity: tools stay registered; unchecked groups require a
+        // card when the tool is actually called. Soft-refusing in text never
+        // surfaces Deny / Allow once / Allow group.
+        prompt.push_str(&crate::services::agent_locale::permissions_appendix(
+            ui_locale,
+            &labels.join(", "),
         ));
     }
 
@@ -985,7 +1373,14 @@ pub async fn send_message(
         trust_workspace: false,
         allow_visible_chrome: visible_chrome_requested,
         db_environment,
+        task_approval: task_approval.clone(),
+        enforce_composer_permissions: true,
+        disable_tool_groups: disable_tool_groups.clone(),
     };
+
+    if let Some(task_id) = run_options.task_id.as_deref() {
+        bob_service.set_task_approval(task_id, run_options.task_approval.clone());
+    }
 
     let awaiting_approval = if permission_governance::needs_preflight(
         &settings.permission_policy,
@@ -1001,7 +1396,7 @@ pub async fn send_message(
                 "Autoriser Bob Shell à démarrer cette session ? Capacité : {}{}.",
                 risk.summary(),
                 if settings.sandbox_mode {
-                    " · mode sandbox (workspace uniquement, sans --trust)"
+                    " · mode sandbox (Seatbelt ; --trust pour skills/plugins sous ~/.bob/skills)"
                 } else {
                     ""
                 }
@@ -1079,7 +1474,7 @@ pub async fn send_message(
             false,
             has_grant,
             settings.sandbox_mode,
-        );
+        ) && !edit_denied;
         bob_service.start_streaming_session(
             app_handle.clone(),
             session_id.clone(),
@@ -1091,10 +1486,6 @@ pub async fn send_message(
         )?;
         false
     };
-
-    if should_generate_title {
-        schedule_conversation_title(app_handle.clone(), conversation_id.clone(), message.clone());
-    }
 
     // 8. Return session_id so the frontend can correlate events
     Ok(StartSessionResult {
@@ -1136,40 +1527,28 @@ async fn generate_first_prompt_title(
     conversation_id: String,
     first_prompt: String,
 ) {
-    // Bob Shell can reject a second invocation while a work session is using
-    // the account. Queue title jobs and wait for an idle window instead of
-    // abandoning the automatic title after one failed attempt.
+    // send_message awaits this before starting the work session so the sidebar
+    // title is ready before Bob streams. Try immediately; only wait for idle if
+    // another Bob session is already holding the Shell.
     let generation_lock = TITLE_GENERATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
     let _generation_guard = generation_lock.lock().await;
 
-    for _ in 0..450 {
-        let current_title = {
-            let db = app_handle.state::<Database>();
-            ConversationService::new()
-                .get_by_id(&db, &conversation_id)
-                .ok()
-                .flatten()
-                .map(|conversation| conversation.title)
-                .unwrap_or_default()
-        };
-        if !is_automatic_title_placeholder(&current_title) {
-            return;
-        }
-
-        let bob_idle = {
-            let bob_service = app_handle.state::<BobService>();
-            let idle = bob_service.sessions.lock().unwrap().is_empty();
-            idle
-        };
-        if bob_idle {
-            break;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
+    let placeholder_title = || {
+        let db = app_handle.state::<Database>();
+        ConversationService::new()
+            .get_by_id(&db, &conversation_id)
+            .ok()
+            .flatten()
+            .map(|conversation| conversation.title)
+            .unwrap_or_default()
+    };
 
     let mut generated_title = None;
     for attempt in 1..=3 {
+        let current_title = placeholder_title();
+        if !is_automatic_title_placeholder(&current_title) {
+            return;
+        }
         let generated = {
             let bob_service = app_handle.state::<BobService>();
             bob_service.generate_conversation_title(&first_prompt).await
@@ -1185,11 +1564,54 @@ async fn generate_first_prompt_title(
                     attempt, conversation_id, error
                 );
                 if attempt < 3 {
-                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
                 }
             }
         }
     }
+
+    if generated_title.is_none() {
+        for _ in 0..450 {
+            if !is_automatic_title_placeholder(&placeholder_title()) {
+                return;
+            }
+            let bob_idle = {
+                let bob_service = app_handle.state::<BobService>();
+                let sessions = bob_service.sessions.lock().unwrap();
+                sessions.is_empty()
+            };
+            if bob_idle {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        for attempt in 1..=3 {
+            if !is_automatic_title_placeholder(&placeholder_title()) {
+                return;
+            }
+            let generated = {
+                let bob_service = app_handle.state::<BobService>();
+                bob_service.generate_conversation_title(&first_prompt).await
+            };
+            match generated {
+                Ok(value) => {
+                    generated_title = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    debug!(
+                        "Silent title generation retry {} failed for conversation {}: {}",
+                        attempt, conversation_id, error
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64))
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
     let Some(title) = generated_title else {
         return;
     };
@@ -1221,39 +1643,60 @@ async fn generate_first_prompt_title(
     }
 }
 
-/// Bob Work presents ChatGPT-style `@skill:name` / `@plugin:id` mentions,
+/// Bob Work presents `@skill:name` / `@plugin:id` mentions,
 /// while Bob Shell 2 invokes skills with `$name`.
 fn translate_prompt_mentions(db: &Database, message: &str) -> String {
     let skill_re = regex::Regex::new(r"@skill:([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)").unwrap();
     let mut translated = skill_re.replace_all(message, "$$$1").to_string();
-    let plugin_re = regex::Regex::new(r"@plugin:([A-Za-z0-9-]+)").unwrap();
-    translated = plugin_re
+    let plugin_reference_ids =
+        crate::services::prompt_mentions::plugin_reference_ids(db).unwrap_or_default();
+    translated = crate::services::prompt_mentions::translate_plugin_mentions(
+        db,
+        &translated,
+        &plugin_reference_ids,
+    );
+    let integration_re = regex::Regex::new(r"@integration:([A-Za-z0-9-]+)").unwrap();
+    translated = integration_re
         .replace_all(&translated, |captures: &regex::Captures| {
             let id = captures.get(1).map(|value| value.as_str()).unwrap_or("");
-            let slug = crate::services::plugin::PluginService::new()
-                .get_by_id(db, id)
-                .ok()
-                .flatten()
-                .map(|plugin| {
-                    plugin
-                        .manifest
-                        .get("slug")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(&plugin.name)
-                        .to_string()
-                })
-                .map(|value| {
-                    value
-                        .to_lowercase()
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                        .collect::<String>()
-                });
-            slug.map(|value| format!("${}", value.trim_matches('-')))
-                .unwrap_or_else(|| captures[0].to_string())
+            match id {
+                "github" | "slack" | "monday" => format!("$bob-work-{id}"),
+                "outlook-mail" | "outlook-calendar" | "teams" | "onedrive" => {
+                    format!("$bob-work-{id}")
+                }
+                "onenote" => "$bob-work-microsoft-onenote".into(),
+                _ => captures[0].to_string(),
+            }
+        })
+        .to_string();
+    let api_re = regex::Regex::new(r"@api:([A-Za-z0-9._-]+)").unwrap();
+    translated = api_re
+        .replace_all(&translated, |captures: &regex::Captures| {
+            let id = captures.get(1).map(|value| value.as_str()).unwrap_or("api");
+            let tool = id
+                .chars()
+                .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') { character } else { '_' })
+                .collect::<String>();
+            format!(
+                "Utilise l’API configurée « {id} » via l’outil `{tool}_api_get`; son authentification est injectée automatiquement."
+            )
         })
         .to_string();
     translated
+}
+
+fn cloud_architect_display_format(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    ["executive-boxes", "technical-detailed", "auto"]
+        .into_iter()
+        .find(|format| normalized.contains(&format!("[diagram-format:{format}]")))
+}
+
+fn cloud_architect_orientation(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    ["horizontal", "vertical"]
+        .into_iter()
+        .find(|orientation| normalized.contains(&format!("[diagram-orientation:{orientation}]")))
 }
 
 // ── stop_task ─────────────────────────────────────────────────
@@ -1530,6 +1973,7 @@ async fn maybe_run_native_condense(
 fn build_prompt_with_history(
     message: &str,
     mode: &str,
+    ui_language: &str,
     history: &[crate::models::conversation::Message],
     conversation_summary: Option<&str>,
     global_instructions: &str,
@@ -1547,32 +1991,21 @@ fn build_prompt_with_history(
     related_context: Option<String>,
     local_audio_context: Option<String>,
 ) -> String {
-    // Keep sandbox guidance consistent even if a caller passes enabled capabilities.
-    let web_enabled = web_enabled && !sandbox_mode;
+    use crate::services::agent_locale;
+    let locale = agent_locale::resolve_app_locale(ui_language);
+    // Keep sandbox guidance consistent even if a caller passes Computer Use.
+    // Chrome stays available when enabled — host AppleScript bridge is remounted.
+    // Shared document runtimes are remounted under ~/.bob/runtimes in sandbox.
+    // Web stays available when the user enabled it: HTTPS is already allowed for the model.
     let computer_use_enabled = computer_use_enabled && !sandbox_mode;
-    let chrome_control_enabled = chrome_control_enabled && !sandbox_mode;
-    let prefix = match mode {
-        "ask" | "quick_chat" =>
-            "Réponds de façon concise et directe.",
-        "plan" | "planning" =>
-            "Génère un plan structuré, validable étape par étape, avant toute action.",
-        "presentation" =>
-            "Tu dois créer une présentation professionnelle. Commence par proposer le plan des slides.",
-        "document" =>
-            "Crée un document structuré avec titres, sections et conclusion.",
-        "research" =>
-            "Effectue une recherche approfondie avec sources et niveau de confiance.",
-        "spreadsheet" =>
-            "Analyse les données et produis des tableaux et insights clairs.",
-        "orchestrator" =>
-            "Décompose l'objectif en étapes avec dépendances. Liste chaque étape clairement.",
-        "plugin_builder" =>
-            "Tu es en mode création de plugin, indépendamment du wizard. Décris d’abord l’intelligence métier, puis déclare les capacités Runtime Architecture V2 nécessaires : Shared pour les capacités génériques, External Managed pour un framework lourd optionnel, Private pour une dépendance spécifique approuvée. N’invente ni URL, ni chemin, ni commande d’installation et ne télécharge aucun exécutable. Ne mène un entretien que si le bénéfice utilisateur est encore flou. description = bénéfice utilisateur ; outils et intégrations dans resources.",
-        "skill_builder" =>
-            "Tu es en mode création de skill. Mène un entretien court puis écris un SKILL.md local (pas un plugin agentique).",
-        _ =>
-            "Tu es un assistant de travail professionnel.",
-    };
+    let chrome_control_enabled = chrome_control_enabled;
+    let document_guidance = "\nDocuments natifs Bob Work : le plugin Documents (`builtin-documents`) est utilisé par défaut pour PDF, texte, Markdown et documents génériques joints au prompt — sans @mention obligatoire. LaTeX (Tectonic) et Pandoc sont des runtimes partagés fournis par la plateforme. Utilise les exécutables $BOB_WORK_LATEX et $BOB_WORK_PANDOC ou tectonic/pandoc déjà présents dans PATH. Ne les installe pas et ne les duplique pas dans les plugins. Compile un .tex avec `tectonic -X compile --untrusted --outdir <dossier> <source.tex>`. Convertis Markdown/LaTeX/DOCX/HTML/EPUB avec Pandoc ; pour une sortie PDF utilise `--pdf-engine=tectonic`. Tectonic peut télécharger ses paquets TeX à la première compilation et les réutilise en cache. Place les livrables dans le workspace, vérifie la réussite de la conversion et cite le chemin absolu du PDF final : Bob Work l'affichera dans le lecteur PDF intégré à la conversation. Les plugins déclarent sharedCapabilities latex ou document.convert.\nOffice local Bob Work : pour DOCX, PPTX et XLSX/CSV joints ou demandés, utilise par défaut les runtimes partagés `shared.docx` (python-docx), `shared.pptx` (python-pptx) et `shared.xlsx` (openpyxl) — sauf si l'utilisateur mentionne explicitement un autre outil (Docling, Pandoc, LibreOffice, etc.) dans son message. Déclare sharedCapabilities docx, pptx ou xlsx ; ne pip-install jamais ces bibliothèques dans le workspace ni dans un bundle plugin.";
+    let global_instructions = format!("{global_instructions}{document_guidance}");
+    let prefix = format!(
+        "{}\n\n{}",
+        agent_locale::reply_language_policy(locale),
+        agent_locale::mode_prefix(mode, locale)
+    );
 
     // Build conversation context (skip the last message — that's the current one)
     // Collect into vec first, then slice to last 8
@@ -1587,13 +2020,35 @@ fn build_prompt_with_history(
     };
     let prev_messages = &filtered[start..];
 
-    let creating_plugin = plugin_creation.is_some();
+    let creating_plugin = plugin_creation
+        .as_ref()
+        .is_some_and(|text| text.contains("plugin-creator"));
     let instruction_context = [
+        Some("Suivi du plan Bob Work : pour toute tâche en plusieurs étapes, `update_todo_list` doit être le tout premier appel d’outil s’il est disponible, avant `use_skill`, toute lecture, recherche, commande ou modification. Publie immédiatement un plan initial concret d’au moins 2 étapes, avec une granularité proportionnée à la tâche, zéro étape `completed` et exactement une étape `in_progress`. Après avoir lu les skills ou découvert de nouvelles contraintes, affine ce même plan au lieu d’en créer un tardivement. Le plan peut dépasser 8 étapes lorsque le travail le justifie, sans plafond arbitraire. Mets à jour ce même plan après chaque transition et termine avec toutes les étapes `completed`, `failed` ou `skipped`. N’établis pas de plan pour une question simple ou une action unique.".to_string()),
+        Some(crate::services::plugin_deploy::PLUGIN_ROUTING_GUIDANCE.to_string()),
         Some(crate::services::plugin_deploy::PLUGIN_INVOCATION_POLICY.to_string()),
-        Some("Suivi du plan Bob Work : pour une tâche d’implémentation en plusieurs étapes, notamment la création ou la restructuration d’un projet, utilise `update_todo_list` s’il est disponible. Publie avant la première modification un plan concret d’au moins 2 étapes, avec une granularité proportionnée à la tâche et exactement une étape `in_progress` ; le plan peut dépasser 8 étapes lorsque le travail le justifie, sans plafond arbitraire. Mets à jour ce même plan après chaque transition et termine avec toutes les étapes `completed`, `failed` ou `skipped`. N’établis pas de plan pour une question simple ou une action unique.".to_string()),
-        conversation_summary.filter(|value| !value.trim().is_empty()).map(|value| format!("Résumé cumulatif de la conversation (source de vérité pour les échanges plus anciens) :\n{}", value.trim())),
-        (!global_instructions.trim().is_empty()).then(|| format!("Instructions globales :\n{}", global_instructions.trim())),
-        project_instructions.filter(|v| !v.trim().is_empty()).map(|v| format!("Instructions du projet :\n{}", v.trim())),
+        Some(crate::services::plugin_deploy::LAZY_CAPABILITY_GUIDANCE.to_string()),
+        conversation_summary.filter(|value| !value.trim().is_empty()).map(|value| {
+            format!(
+                "{} :\n{}",
+                agent_locale::label_conversation_summary(locale),
+                value.trim()
+            )
+        }),
+        (!global_instructions.trim().is_empty()).then(|| {
+            format!(
+                "{} :\n{}",
+                agent_locale::label_global_instructions(locale),
+                global_instructions.trim()
+            )
+        }),
+        project_instructions.filter(|v| !v.trim().is_empty()).map(|v| {
+            format!(
+                "{} :\n{}",
+                agent_locale::label_project_instructions(locale),
+                v.trim()
+            )
+        }),
         related_context,
         local_audio_context,
         plugin_creation,
@@ -1608,9 +2063,15 @@ fn build_prompt_with_history(
         creating_plugin.then(|| {
             "Création de plugin : le wizard est facultatif. Déclare `sharedCapabilities`, `externalRuntimes` et `privateDependencies` selon Runtime Architecture V2. Une dépendance privée référence uniquement un actif packagé, un fichier fourni par l’utilisateur, une source approuvée ou un exécutable connu ; le Runtime Manager réalise l’installation et la validation. Ne lance jamais curl, pip, npm global, Homebrew ou un téléchargement d’exécutable depuis le modèle.".to_string()
         }),
-        sandbox_mode.then(crate::services::permission_governance::sandbox_guidance),
-        computer_use_enabled.then(|| "Contrôle bureau Bob Work : utilise uniquement les outils MCP bob-work-computer-use (accessibility_status, list_apps, open_app, focus_app, get_app_state, ui_click, ui_set_value, app_command, capture_screen, desktop_click, desktop_type, desktop_scroll, press_key). Boucle obligatoire : observe avec get_app_state, décide d’une seule action, exécute-la, puis observe à nouveau pour vérifier son effet avant toute autre action. Arrête après l’objectif, un refus, trois observations sans progrès ou la limite signalée par l’outil. Style ChatGPT Work : reste dans Bob Work et pilote les apps en arrière-plan. open_app sans activate (défaut). Préfère get_app_state puis ui_click / ui_set_value / app_command — sans focus_app. N’appelle focus_app ni bring_to_front=true qu’en dernier recours (fenêtre masquée, saisie clavier globale indispensable). Ne vérifie pas que frontmost=true avant d’agir. Si l’arbre AX est pauvre, capture_screen sans bring_to_front (max 3). Jamais d’action dans Bob Work ou ChatGPT. Ne raconte pas chaque micro-action. N’utilise jamais un aperçu Chrome pour une app Mac ni une URI non HTTP(S). N’exécute jamais osascript/python3/Terminal pour piloter l’UI. Les validations sensibles sont imposées par Bob Work : n’essaie jamais de les contourner ni de répéter une action refusée. Si Accessibilité ou Enregistrement de l’écran est refusé, demande d’autoriser **Bob Work** (pas python3, pas Terminal, pas osascript).".to_string()),
-        chrome_control_enabled.then(|| "Contrôle Chrome Bob Work explicitement demandé pour ce message : utilise uniquement les outils `chrome_*` de bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, demande d’autoriser **Bob Work → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation.".to_string()),
+        sandbox_mode.then(|| agent_locale::sandbox_guidance(locale)),
+        computer_use_enabled.then(|| format!(
+            "Contrôle bureau Bob Work : MCP bob-work-computer-use. Avant toute action, appelle get_computer_use_guide (ou @skill:computer-use) pour le guide versionné — ne devine pas les flags. Puis boucle observe → act → verify. Reste dans Bob Work ; open_app sans activate par défaut. Interdit : créer, écrire ou modifier un plugin/skill sous `~/.bob/skills/` (pas de `SKILL.md`, pas de `.bob-work-plugin.json`, pas de plugin-creator) — exécute la demande avec les apps cibles uniquement. Création de plugin/skill seulement si l’utilisateur l’a demandé explicitement (« crée un plugin », mode plugin_builder / skill_builder). Si Accessibilité est refusée, demande d’autoriser **{app}** dans Réglages Système → Confidentialité et sécurité → Accessibilité (Bob Work et Bob Work-test sont distincts).",
+            app = crate::app_identity::app_display_name()
+        )),
+        chrome_control_enabled.then(|| format!(
+            "Contrôle Chrome Bob Work explicitement demandé pour ce message : utilise uniquement les outils `chrome_*` de bob-work-chrome-control. N’utilise pas osascript/python3. Si Automatisation est refusée, dis explicitement d’autoriser **{app} → Google Chrome** dans Réglages Système → Confidentialité et sécurité → Automatisation — pas python3, pas osascript. Bob Work et Bob Work-test sont des apps distinctes : une case pour l’une ne suffit pas pour l’autre. Dans Réglages → Permissions, clique « Demander Automatisation Chrome » si {app} n’apparaît pas encore.",
+            app = crate::app_identity::app_display_name()
+        )),
         (!integration_context.is_empty()).then(|| format!("Intégrations locales disponibles (utilise les variables d’environnement nommées, sans jamais les afficher) :\n{}", integration_context.join("\n"))),
         db_context,
     ].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
@@ -1622,7 +2083,7 @@ fn build_prompt_with_history(
             .iter()
             .map(|m| {
                 let role = if m.author == "user" {
-                    "Utilisateur"
+                    agent_locale::history_role_user(locale)
                 } else {
                     "Bob"
                 };
@@ -1636,8 +2097,9 @@ fn build_prompt_with_history(
             .join("\n");
 
         format!(
-            "{}\n\n--- Historique de la conversation ---\n{}\n--- Fin de l'historique ---\n\nNouveau message: {}",
-            format!("{}\n\n{}", prefix, instruction_context), ctx, message
+            "{}\n\n{}",
+            format!("{}\n\n{}", prefix, instruction_context),
+            agent_locale::history_block(locale, &ctx, message)
         )
     }
 }
@@ -1717,13 +2179,37 @@ fn build_office_specialized_context(
             .filter(|value| !value.trim().is_empty())
             .map(str::trim);
 
+        let mcp_server = mode
+            .get("mcpServer")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                plugin
+                    .manifest
+                    .get("browserExtensions")
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| {
+                        items.iter().find_map(|item| {
+                            item.get("mcpServer").and_then(|value| value.as_str())
+                        })
+                    })
+            })
+            .unwrap_or("");
+        let mcp_hint = if mcp_server.is_empty() {
+            "Utilise d’abord le MCP du plugin via use_mcp_tool, puis une commande Python si nécessaire.".to_string()
+        } else {
+            format!(
+                "Utilise d’abord `use_mcp_tool` avec server=`{mcp_server}` (tools: {allowed_tools}), puis une commande Python si nécessaire."
+            )
+        };
+
         blocks.push(format!(
-            "Mode spécialisé actif — {} :\n- Format de sortie attendu : {}\n- Outils autorisés : {}\n- Bibliothèques Python recommandées : {}\n- Workflow : {}\n- Utilise d’abord le MCP du plugin via use_mcp_tool, puis une commande Python si nécessaire.\n{}{}",
+            "Mode spécialisé actif — {} :\n- Format de sortie attendu : {}\n- Outils autorisés : {}\n- Bibliothèques Python recommandées : {}\n- Workflow : {}\n- {}\n{}{}",
             label,
             output_formats,
             allowed_tools,
             libraries,
             workflow,
+            mcp_hint,
             delivery_protocol
                 .map(|protocol| format!("\n- Livraison obligatoire : {}", protocol))
                 .unwrap_or_default(),
@@ -1733,6 +2219,12 @@ fn build_office_specialized_context(
                 == Some("market-data")
             {
                 "\n- Données de marché publiques et informatives uniquement (pas un conseil en investissement personnalisé)."
+            } else if mode
+                .get("sandbox")
+                .and_then(|value| value.as_str())
+                == Some("network-read-only")
+            {
+                "\n- Carte structurée kind=bob-map uniquement : ne génère pas de fichier HTML de carte."
             } else {
                 "\n- Traitement 100 % local : ne pas uploader les pièces jointes."
             }
@@ -1802,162 +2294,197 @@ fn contains_plugin_tool_keyword(normalized: &str) -> bool {
     .any(|word| padded.contains(word))
 }
 
-fn plugin_creation_protocol(message: &str, mode: &str) -> Option<String> {
-    let normalized = message.to_lowercase();
-    // Skill-only prompts mention « skill » + « pas un plugin » — don't inject Work plugin bar.
-    if normalized.contains("skill")
-        && (normalized.contains("pas un plugin") || normalized.contains("pas de plugin"))
-    {
-        return None;
-    }
-    let in_plugin_builder = mode == "plugin_builder";
-    let asks_for_plugin = normalized.contains("plugin");
-    let asks_to_create = [
-        "crée",
-        "cree",
-        "créer",
-        "creer",
-        "create",
-        "build",
-        "mets à jour",
-        "met a jour",
-        "update",
-    ]
-    .iter()
-    .any(|word| normalized.contains(word));
-    let asks_to_vendor_tools = contains_plugin_tool_keyword(&normalized);
-    if !in_plugin_builder && !(asks_for_plugin && (asks_to_create || asks_to_vendor_tools)) {
-        return None;
-    }
-    Some(
-        [
-        r#"Protocole Bob Work — création de plugin (niveau ChatGPT Work) :
-
-## Initiative (obligatoire — le wizard est facultatif)
-- Le formulaire Plugins n’est PAS requis. Dès que l’utilisateur demande un plugin, définis son intelligence métier, ses outils et son manifeste V2, puis laisse Bob Work résoudre les dépendances.
-- Classe chaque besoin : capacité générique réutilisable → Shared Runtime ; framework lourd optionnel → External Managed Runtime ; dépendance propre au plugin → Plugin Private Runtime.
-- Ne demande pas à l’utilisateur de choisir un dossier technique et n’invente jamais une URL, une commande d’installation ou un chemin d’exécutable.
-- Le modèle ne télécharge, n’installe et n’exécute aucun binaire arbitraire. Une dépendance privée doit venir d’un actif packagé, d’un fichier fourni, d’une source approuvée ou d’un exécutable connu, puis être validée par le Runtime Manager.
-- Succès = bundle et manifeste réellement écrits, dépendances déclarées, permissions honnêtes et résolution contrôlable par Bob Work.
-
-## Barre qualité (obligatoire)
-- Un skill seul (SKILL.md d’instructions) n’est PAS un plugin Work-level. Le plugin doit être un produit : mode spécialisé + surface exécutable + connecteurs déclarés.
-- Minimum : (1) `specializedMode` avec label/outils/workflow, (2) au moins une surface réelle parmi CLI `entrypoints`, binaire/shell du bundle, MCP local `mcp/`, ou MCP distant HTTPS, (3) permissions honnêtes, (4) zéro secret en clair.
-- Un plugin peut être un « homme à tout faire » local : CLI, shell, binaires embarqués, MCP et APIs selon le workflow — pas seulement des intégrations distantes.
-- À la fin de la création, explique les choix Shared / External / Private, les versions, sources approuvées, empreintes disponibles, éléments optionnels et permissions.
-
-## Exploration obligatoire (avant d’écrire les fichiers)
-Explore TOUTES les familles pertinentes pour le cas d’usage, même si certaines restent optionnelles :
-1. Capacités partagées — Python, Visualisation, Diagramme et Artefact via le Runtime Manager
-2. OAuth catalogue Bob (GitHub, Slack, Monday, Microsoft Graph / Outlook / Teams / Calendar / OneDrive / OneNote)
-3. MCP locaux du bundle et MCP déjà configurés dans Bob Work
-4. APIs publiques (sans clé) et APIs avec clé (`${ENV}` / headers)
-5. Autre MCP distant HTTPS / streamable-http / SSE (OAuth côté serveur distant)
-6. Recherche web Bob (si le réglage Accès web est actif) — permission `network.request`
-7. Appel au LLM Bob (toujours disponible dans le chat ; déclare-le dans `resources` si le workflow raisonne / synthétise)
-8. Computer Use / Contrôle Chrome si le workflow pilote le bureau ou le navigateur
-9. Bases de données — si l’utilisateur donne une URL ou un hôte (PostgreSQL, MySQL, **IBM Db2**, SQLite, MongoDB…), Bob Work crée la connexion pour le plugin
-Ne retiens que ce qui sert le workflow, mais DOCUMENTÉ ce que tu as exploré et écarté.
-
-## Routage des capacités partagées
-- Diagrammes cloud / C4 / ER → Diagram Runtime, D2 par défaut
-- Flux / séquence / état → Diagram Runtime, Mermaid par défaut
-- Graphes de dépendances complexes → Diagram Runtime, Graphviz par défaut
-- Graphiques métier / KPI → Visualization Runtime, ECharts par défaut
-- Données scientifiques / statistiques / coordonnées 3D → Visualization Runtime, Plotly par défaut
-- Véritables scènes et objets 3D → Visualization Runtime, Three.js
-- Données et calculs génériques → Shared Python immuable
-Ne recopie jamais ces moteurs dans le plugin. Une autre dépendance n’est privée que si elle est réellement spécifique et déclarée avec version, plateforme, source approuvée, intégrité et permissions.
-"#,
-            crate::services::plugin_bundle_layout::protocol_section(),
-            r#"
-
-## Description & resources (obligatoire dans .bob-work-plugin.json)
-- `description` = bénéfice utilisateur en 1–2 phrases claires (ce que le plugin fait / pour qui / résultat). Interdit : jargon d’implémentation seul (« MCP », « CLI », « Work-level », listes de connecteurs).
-  Exemple bon : « Propose des idées d’actions chiffrées pour un CTO français. »
-  Exemple mauvais : « Plugin Work-level + CLI/MCP Python + Stooq. »
-- Les intégrations (y compris optionnelles) vont dans `resources` et `connectorStrategy`, PAS dans `description`.
-- Déclare `resources` (tableau) avec chaque ressource explorée/retenue :
-  `{ "kind": "oauth"|"mcp"|"api-public"|"api-key"|"web-search"|"bob-llm"|"computer-use"|"chrome"|"stdio-cli"|"bundled-bin"|"shell"|"node-cli"|"database"|"pdf"|"spreadsheet"|"file", "label": "…", "optional": true|false, "provider": "…", "notes": "…" }`
-- `connectorStrategy` résume les tiers (T1–T5) + fallback + `explored` (liste courte des familles examinées).
-- `capabilities` doit refléter les usages (ex. `web.search`, `llm.synthesize`, `slack.post` si applicable).
-
-## Bases de données (Bob Work crée la connexion)
-- Si l’utilisateur fournit une URL (`postgres://…`, `mysql://…`, `jdbc:db2://host:50000/SAMPLE`, `mongodb://…`, fichier SQLite) ou les champs hôte / port / base / utilisateur / mot de passe, **Bob Work** enregistre la connexion dans Intégrations → DB (secret uniquement dans le coffre) et **la lie au plugin**. Elle apparaît dans le détail du plugin (Sources / Bases liées) et via `@db:nom`.
-- Ne copie JAMAIS le mot de passe dans SKILL.md, le manifeste, git, ni un fichier durable du bundle.
-- Déclare `resources` : `{ "kind": "database", "label": "…", "optional": false, "notes": "moteur + usage métier" }`.
-- Optionnel : `~/.bob/skills/<slug>/.bob-work-db.json` (`name`, `engine`, `host`, `port`, `database`, `username`, `password`) — Bob Work l’importe dans le coffre puis **supprime le fichier**.
-- Moteurs : oracle, mysql, sqlserver, postgresql, mongodb, redis, elasticsearch, **IBM Db2 (`db2`, port 50000)**, sqlite, snowflake, mariadb, cassandra, dynamodb, bigquery, clickhouse.
-- En fin de création, confirme que la connexion est liée, sans répéter le secret.
-
-## Tiers de connecteurs
-- T1 API ouverte sans clé — préférer si suffisant.
-- T2 API ouverte avec `${ENV_API_KEY}` — enrichissement optionnel.
-- T3 MCP / CLI Python / shell / binaire embarqué dans le bundle (ex. Mermaid, D2).
-- T4 MCP HTTPS public / URL utilisateur.
-- T5 OAuth catalogue Bob — vrai flux ; ne jamais simuler.
-- + Web search Bob et LLM Bob selon le workflow (déclarés dans `resources`).
-
-## Fichiers & structure
-- Bundle uniquement dans ~/.bob/skills/<slug>/ selon le schéma Bob Work ci-dessus (slug a-z, 0-9, tirets). Ne pas inventer d’autres dossiers.
-- Obligatoire : SKILL.md + `.bob-work-plugin.json` (schemaVersion, name, slug, version, description, category, permissions, runtime, entrypoints, specializedMode, connectorStrategy, resources, icon).
-- `icon` (obligatoire) : Bob Work doit lui affecter une icône **par défaut** en adéquation avec la description et le métier. Cherche un logo/favicon public représentatif (outil, profession, secteur) et écris une URL HTTPS du type `https://www.google.com/s2/favicons?domain=<domaine>&sz=128`. Tu peux aussi utiliser une clé locale (`word`, `excel`, `powerpoint`, `onenote`, `document`, `invest`, `computer`, `chrome`, `github`, `slack`, `monday`, `outlook`, `teams`, `calendar`, `onedrive`, `meeting`, `designer`, `consultant`, `rfp`, `product`, `delivery`, `change`, `architecture`, `agentic`, `plugin`) si elle correspond vraiment. Jamais laisser `icon` vide ni le générique `plugin` s’il existe une meilleure correspondance.
-- Ne crée pas de second plugin pour un slug déjà couvert par un builtin Bob Work (Word/Excel/PowerPoint/OneNote/Documents/Computer Use/Chrome…).
-- MCP / CLI / binaires / shell / integrations / browserExtensions selon le besoin réel. Secrets = `${PLACEHOLDER}` ou OAuth catalogue uniquement.
-
-## Annonce
-- Succès seulement si fichiers écrits et validés.
-- Après succès, invite l’utilisateur à ouvrir Plugins → le plugin pour lancer « Mise en service » (validate / sync MCP / test).
-- Section finale « Choix de conception » : ressources retenues vs écartées, activation utilisateur, limites."#,
-        ]
-        .concat(),
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatorSkillKind {
+    PluginCreator,
+    SkillCreator,
 }
 
-fn skill_creation_protocol(message: &str, mode: &str) -> Option<String> {
-    let normalized = message.to_lowercase();
-    let mode_skill = mode == "skill_builder";
-    let asks_for_skill = normalized.contains("skill");
-    let asks_to_create = [
-        "crée",
-        "cree",
-        "créer",
-        "creer",
-        "create",
-        "build",
-        "importe",
-        "import",
-        "rapatrier",
+fn strip_capability_mentions_for_intent(message: &str) -> String {
+    // `@plugin:foo` / `@skill:bar` invoke existing catalog entries — they are not
+    // requests to author a new plugin/skill. Strip before creation-intent detection.
+    let mention =
+        regex::Regex::new(r"(?i)@(?:plugin|skill):[A-Za-z0-9._-]+").expect("mention regex");
+    let dollar = regex::Regex::new(r"(?i)\$(?:plugin|skill)-creator\b").expect("dollar regex");
+    let stripped = mention.replace_all(message, " ");
+    dollar.replace_all(&stripped, " ").into_owned()
+}
+
+fn mentions_plugin_as_product(normalized: &str) -> bool {
+    [
+        "un plugin",
+        "le plugin",
+        "mon plugin",
+        "ce plugin",
+        "du plugin",
+        "au plugin",
+        "des plugins",
+        "plugin pour",
+        "plugin qui",
+        "plugin de",
+        "nouveau plugin",
+        "new plugin",
+        "create a plugin",
+        "create plugin",
+        "build a plugin",
+        "build plugin",
+        "update plugin",
+        "update the plugin",
+        "edit the plugin",
+        "fix the plugin",
     ]
     .iter()
-    .any(|word| normalized.contains(word));
-    if !mode_skill && (!asks_for_skill || !asks_to_create) {
+    .any(|phrase| normalized.contains(phrase))
+}
+
+fn mentions_skill_as_product(normalized: &str) -> bool {
+    [
+        "un skill",
+        "le skill",
+        "mon skill",
+        "ce skill",
+        "du skill",
+        "au skill",
+        "skill pour",
+        "skill qui",
+        "nouveau skill",
+        "new skill",
+        "create a skill",
+        "create skill",
+        "update the skill",
+        "edit the skill",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
+}
+
+fn asks_to_change_capability(normalized: &str) -> bool {
+    [
+        "crée", "cree", "créer", "creer", "create", "build", "mets à jour", "met a jour",
+        "update", "modif", "modifier", "édite", "edite", "edit", "améliore", "ameliore",
+        "corrige", "fix", "étend", "etend", "importe", "import", "rapatrier", "ajoute",
+        "intègre", "integre",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word))
+}
+
+/// Follow-ups like « pourquoi un plugin / pas un skill » must not re-enter
+/// plugin-creator or skill-creator (that rewrote the bundle and confused users).
+fn is_plugin_vs_skill_clarification(normalized: &str) -> bool {
+    let mentions_both = normalized.contains("plugin") && normalized.contains("skill");
+    if !mentions_both {
+        return false;
+    }
+    [
+        "pourquoi",
+        "why ",
+        "why?",
+        "explique",
+        "explain",
+        "différence",
+        "difference",
+        "au lieu",
+        "instead",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn detect_creator_skill(message: &str, mode: &str) -> Option<CreatorSkillKind> {
+    let normalized = strip_capability_mentions_for_intent(message).to_lowercase();
+    if mode == "plugin_builder" {
+        return Some(CreatorSkillKind::PluginCreator);
+    }
+    if mode == "skill_builder" {
+        return Some(CreatorSkillKind::SkillCreator);
+    }
+
+    if is_plugin_vs_skill_clarification(&normalized) {
         return None;
     }
-    if normalized.contains("plugin")
-        && !normalized.contains("pas un plugin")
-        && !normalized.contains("pas de plugin")
-        && !mode_skill
-    {
-        return None;
+
+    // Explicit "skill only, not a plugin" create/edit intent.
+    let skill_only = asks_to_change_capability(&normalized)
+        && normalized.contains("skill")
+        && (normalized.contains("pas un plugin") || normalized.contains("pas de plugin"));
+    if skill_only {
+        return Some(CreatorSkillKind::SkillCreator);
     }
-    Some(
-        r#"Protocole Bob Work — création / import de skill :
 
-## Qu’est-ce qu’un skill
-- Un skill = instructions markdown (`SKILL.md`), pas un plugin agentique (pas de MCP/CLI Python obligatoire).
-- Si l’utilisateur a besoin d’outils exécutables, oriente-le vers le Plugin Builder.
+    let change = asks_to_change_capability(&normalized);
+    let asks_for_plugin = change
+        && normalized.contains("plugin")
+        && (mentions_plugin_as_product(&normalized) || contains_plugin_tool_keyword(&normalized));
+    let asks_for_skill =
+        change && normalized.contains("skill") && mentions_skill_as_product(&normalized);
 
-## Format
-- Dossier `~/.bob/skills/<slug>/SKILL.md`
-- Frontmatter YAML : `name`, `description` (bénéfice utilisateur 1–2 phrases), `user-invocable: true`, `icon`
-- `icon` (obligatoire) : favicon/logo HTTPS trouvé sur internet en adéquation avec la description et le métier (`https://www.google.com/s2/favicons?domain=<domaine-représentatif>&sz=128`), ou clé locale Bob (`meeting`, `designer`, `word`…) si elle correspond. Jamais d’icône générique si un métier est identifiable.
-- Corps : consignes claires, limites, exemples.
+    if asks_for_plugin {
+        return Some(CreatorSkillKind::PluginCreator);
+    }
+    if asks_for_skill {
+        return Some(CreatorSkillKind::SkillCreator);
+    }
+    None
+}
 
-## Annonce
-- Succès seulement si le fichier est écrit.
-- Demande de rafraîchir la page Skills."#.to_string(),
-    )
+fn creator_skill_slug(kind: CreatorSkillKind) -> &'static str {
+    match kind {
+        CreatorSkillKind::PluginCreator => "plugin-creator",
+        CreatorSkillKind::SkillCreator => "skill-creator",
+    }
+}
+
+fn prepend_creator_skill_mention(message: &str, kind: Option<CreatorSkillKind>) -> String {
+    let Some(kind) = kind else {
+        return message.to_string();
+    };
+    let slug = creator_skill_slug(kind);
+    let at_token = format!("@skill:{slug}");
+    let shell_token = format!("${slug}");
+    if message.contains(&at_token) || message.contains(&shell_token) {
+        return message.to_string();
+    }
+    format!("{at_token} {message}")
+}
+
+fn creator_skill_activation(kind: CreatorSkillKind) -> String {
+    let slug = creator_skill_slug(kind);
+    match kind {
+        CreatorSkillKind::PluginCreator => format!(
+            "Protocole Bob Work — plugin personnel : le skill intégré `{slug}` est invoqué. \
+             Charge-le immédiatement via `use_skill` et applique **tout** son contenu avant d’écrire ou modifier des fichiers. \
+             Les livrables sont des **plugins** (pas des skills seuls) sous `~/.bob/skills/<slug>/` — ce dossier est le dépôt des bundles ; \
+             le fichier `.bob-work-plugin.json` (+ `bobWorkImportConsent: true` et `.bob-work-import-ok`) en fait un plugin importé dans **Plugins**. \
+             Ne dis jamais « j’ai créé un skill » si le manifeste plugin est présent. \
+             Quand l’utilisateur demande plugin vs skill, réponds clairement en 3–5 phrases sans recréer le bundle. \
+             Jamais `.bob-work-builtin`, jamais `builtin-*`. Bob Work importe automatiquement le bundle à la fin du run."
+        ),
+        CreatorSkillKind::SkillCreator => format!(
+            "Protocole Bob Work — skill personnel : le skill intégré `{slug}` est invoqué. \
+             Charge-le immédiatement via `use_skill` et applique **tout** son contenu avant d’écrire ou modifier des fichiers. \
+             Les livrables sont des **skills seuls** sous `~/.bob/skills/<slug>/SKILL.md` **sans** `.bob-work-plugin.json`. \
+             Ne crée pas de manifeste plugin, pas d’entrypoints, pas de scripts exécutables. \
+             Quand l’utilisateur demande skill vs plugin, réponds clairement : un skill = instructions ; un plugin = produit exécutable. \
+             Jamais de marqueurs plugin ni built-in."
+        ),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn plugin_creation_protocol(message: &str, mode: &str) -> Option<String> {
+    match detect_creator_skill(message, mode)? {
+        CreatorSkillKind::PluginCreator => Some(creator_skill_activation(CreatorSkillKind::PluginCreator)),
+        CreatorSkillKind::SkillCreator => None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn skill_creation_protocol(message: &str, mode: &str) -> Option<String> {
+    match detect_creator_skill(message, mode)? {
+        CreatorSkillKind::SkillCreator => Some(creator_skill_activation(CreatorSkillKind::SkillCreator)),
+        CreatorSkillKind::PluginCreator => None,
+    }
 }
 
 fn plugin_creation_environment_context(
@@ -2089,46 +2616,40 @@ mod plugin_creation_protocol_tests {
     use super::plugin_creation_protocol;
 
     #[test]
-    fn injects_work_level_bar_and_connector_tiers_when_creating_a_plugin() {
+    fn activates_plugin_creator_skill_when_creating_a_plugin() {
         let protocol =
             plugin_creation_protocol("Crée un plugin Python pour analyser mon CTO", "agent")
                 .expect("protocol");
-        assert!(protocol.contains("niveau ChatGPT Work"));
-        assert!(protocol.contains("connectorStrategy"));
-        assert!(protocol.contains("T1"));
-        assert!(protocol.contains("Choix de conception"));
-        assert!(protocol.contains("specializedMode"));
-        assert!(protocol.contains("resources"));
-        assert!(protocol.contains("web-search"));
-        assert!(protocol.contains("bob-llm"));
-        assert!(protocol.contains("Exploration obligatoire"));
-        assert!(protocol.contains("bénéfice utilisateur"));
-        assert!(protocol.contains("PAS dans `description`"));
-        assert!(protocol.contains("Mise en service"));
-        assert!(protocol.contains("bundled-bin"));
-        assert!(protocol.contains("Mermaid"));
-        assert!(protocol.contains("homme à tout faire"));
-        assert!(protocol.contains("command.execute"));
-        assert!(protocol.contains("favicons"));
-        assert!(protocol.contains("métier"));
-        assert!(protocol.contains("Initiative"));
-        assert!(protocol.contains("wizard est facultatif"));
-        assert!(protocol.contains("Runtime Manager"));
-        assert!(protocol.contains("Shared Runtime"));
-        assert!(protocol.contains("External Managed Runtime"));
-        assert!(protocol.contains("Plugin Private Runtime"));
-        assert!(protocol.contains("vendor/<outil>/<version>/bin"));
-        assert!(protocol.contains("Visualization Runtime"));
-        assert!(protocol.contains("Diagram Runtime"));
-        assert!(protocol.contains("PATH global"));
-        assert!(
-            protocol.contains("kind\": \"database\"")
-                || protocol.contains("kind: \"database\"")
-                || protocol.contains(r#""database""#)
-        );
-        assert!(protocol.contains("IBM Db2"));
-        assert!(protocol.contains("jdbc:db2"));
-        assert!(protocol.contains("Intégrations → DB"));
+        assert!(protocol.contains("plugin-creator"));
+        assert!(protocol.contains("use_skill"));
+        assert!(protocol.contains("~/.bob/skills/"));
+        assert!(protocol.to_lowercase().contains("jamais `.bob-work-builtin`"));
+        assert!(protocol.contains("bobWorkImportConsent"));
+        assert!(protocol.contains("Plugins"));
+    }
+
+    #[test]
+    fn clarification_questions_do_not_reenter_creator_skills() {
+        assert!(super::detect_creator_skill(
+            "pourquoi tu as cree un plugin et pas un skill",
+            "agent"
+        )
+        .is_none());
+        assert!(super::detect_creator_skill(
+            "pourquoi tu as cree un skill et pas un plugin",
+            "agent"
+        )
+        .is_none());
+        assert!(plugin_creation_protocol(
+            "pourquoi tu as cree un plugin et pas un skill",
+            "agent"
+        )
+        .is_none());
+        assert!(super::skill_creation_protocol(
+            "pourquoi tu as cree un skill et pas un plugin",
+            "agent"
+        )
+        .is_none());
     }
 
     #[test]
@@ -2143,15 +2664,38 @@ mod plugin_creation_protocol_tests {
     }
 
     #[test]
-    fn skill_prompt_gets_skill_protocol_not_plugin_bar() {
+    fn does_not_activate_creator_for_computer_use_or_incidental_create() {
+        assert!(plugin_creation_protocol(
+            "ouvre notes, et crée moi une liste de course pour le diner @plugin:bob-work-computer-use",
+            "agent"
+        )
+        .is_none());
+        assert!(plugin_creation_protocol(
+            "@plugin:bob-work-computer-use crée une note dans Apple Notes",
+            "agent"
+        )
+        .is_none());
+        assert!(super::detect_creator_skill(
+            "Crée un plugin pour piloter Notes avec Computer Use",
+            "agent"
+        )
+        .is_some());
+        assert!(super::skill_creation_protocol(
+            "crée moi un skill pour résumer mes mails",
+            "agent"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn skill_prompt_gets_skill_creator_not_plugin_creator() {
         let protocol = super::skill_creation_protocol(
             "Crée avec moi un skill personnel Bob Work (pas un plugin agentique).",
             "skill_builder",
         )
         .expect("skill protocol");
-        assert!(protocol.contains("création / import de skill"));
-        assert!(protocol.contains("icon"));
-        assert!(protocol.contains("favicons"));
+        assert!(protocol.contains("skill-creator"));
+        assert!(protocol.contains("use_skill"));
         assert!(plugin_creation_protocol(
             "Crée avec moi un skill personnel Bob Work (pas un plugin agentique).",
             "agent"
@@ -2160,10 +2704,94 @@ mod plugin_creation_protocol_tests {
     }
 
     #[test]
+    fn prepends_creator_skill_mention_once() {
+        let with_plugin = super::prepend_creator_skill_mention(
+            "Crée un plugin CTO",
+            Some(super::CreatorSkillKind::PluginCreator),
+        );
+        assert!(with_plugin.starts_with("@skill:plugin-creator "));
+        let again = super::prepend_creator_skill_mention(
+            &with_plugin,
+            Some(super::CreatorSkillKind::PluginCreator),
+        );
+        assert_eq!(with_plugin, again);
+    }
+
+    #[test]
+    fn english_ui_locale_sets_reply_policy_with_user_message_priority() {
+        let prompt = super::build_prompt_with_history(
+            "SANDBOX WRITE CHECK",
+            "agent",
+            "en",
+            &[],
+            None,
+            "",
+            None,
+            &[],
+            false,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            None,
+            None,
+        );
+        assert!(prompt.contains("Reply language (mandatory)"));
+        assert!(prompt.contains("always match the language of the user's latest message"));
+        assert!(prompt.contains("French user message → reply and todos in French"));
+        assert!(prompt.contains("You are a professional work assistant."));
+        assert!(prompt.contains("Bob Work sandbox mode"));
+        assert!(!prompt.contains("Tu es un assistant de travail professionnel."));
+        assert!(!prompt.contains("Mode sandbox Bob Work (style Cowork)"));
+    }
+
+    #[test]
+    fn french_user_prompt_with_english_ui_still_prioritizes_user_language() {
+        let prompt = super::build_prompt_with_history(
+            "avec des données factices, agrège les revenus mensuels et produis un PPT",
+            "agent",
+            "en",
+            &[],
+            None,
+            "",
+            None,
+            &[],
+            false,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
+        assert!(prompt.contains("always match the language of the user's latest message"));
+        assert!(prompt.contains("plan/todo update"));
+        // Must not hard-require English replies when UI is English.
+        assert!(!prompt.contains("write every user-facing reply, summary, plan update, and explanation in English"));
+    }
+
+    #[test]
+    fn detects_plugin_modification_requests() {
+        assert_eq!(
+            super::detect_creator_skill("Modifie le plugin brief pour ajouter Slack", "agent"),
+            Some(super::CreatorSkillKind::PluginCreator)
+        );
+    }
+
+    #[test]
     fn prompt_includes_related_context_block() {
         let prompt = super::build_prompt_with_history(
             "Relance le screening",
             "agent",
+            "fr",
             &[],
             Some("Le projet suit AIR.PA et la contrainte de risque est faible."),
             "",
@@ -2192,22 +2820,34 @@ mod plugin_creation_protocol_tests {
         assert!(prompt.contains("récupère les contenus en arrière-plan"));
         assert!(prompt.contains("n’autorise jamais l’ouverture de Chrome"));
         assert!(prompt.contains("update_todo_list"));
+        assert!(prompt.contains("tout premier appel d’outil"));
+        assert!(prompt.contains("avant `use_skill`"));
+        assert!(prompt.contains("zéro étape `completed`"));
         assert!(prompt.contains("exactement une étape `in_progress`"));
         assert!(prompt.contains("peut dépasser 8 étapes"));
         assert!(prompt.contains("Mets à jour ce même plan après chaque transition"));
+        assert!(prompt.contains("Routage intelligent natif vs plugin"));
+        assert!(prompt.contains("capability-router"));
+        assert!(prompt.contains("Chargement lazy Bob Work"));
+        assert!(prompt.contains("builtin-visualize") || prompt.contains("@plugin:visualize"));
+        assert!(prompt.contains("jamais `file://`") || prompt.contains("never `file://`"));
+        assert!(prompt.contains("builtin-documents"));
+        assert!(prompt.contains("Politique plugins/skills Bob Work"));
         assert!(!prompt.contains("Vendoring"));
     }
 
     #[test]
-    fn plugin_creation_prompt_tells_bob_to_vendor_oss_without_wizard() {
+    fn plugin_creation_prompt_activates_plugin_creator_in_builder_mode() {
         let protocol = plugin_creation_protocol(
             "Crée un plugin qui génère des diagrammes architecture",
             "plugin_builder",
         )
         .expect("protocol");
+        assert!(protocol.contains("plugin-creator"));
         let prompt = super::build_prompt_with_history(
             "Crée un plugin qui génère des diagrammes architecture",
             "plugin_builder",
+            "fr",
             &[],
             None,
             "",
@@ -2236,6 +2876,7 @@ mod plugin_creation_protocol_tests {
         let prompt = super::build_prompt_with_history(
             "Joue Blue sur Spotify",
             "agent",
+            "fr",
             &[],
             None,
             "",
@@ -2255,9 +2896,38 @@ mod plugin_creation_protocol_tests {
         );
         assert!(prompt.contains("Bob Work"));
         assert!(prompt.contains("Accessibilité"));
-        assert!(prompt.contains("osascript"));
-        assert!(prompt.contains("pas python3"));
         assert!(prompt.contains("bob-work-computer-use"));
+        assert!(prompt.contains("Interdit : créer, écrire ou modifier un plugin/skill"));
+    }
+
+    #[test]
+    fn chrome_prompt_tells_bob_to_name_the_running_app_for_automation() {
+        let prompt = super::build_prompt_with_history(
+            "Ouvre Chrome sur ibm.com",
+            "agent",
+            "fr",
+            &[],
+            None,
+            "",
+            None,
+            &[],
+            true,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            true,
+            None,
+            None,
+        );
+        assert!(prompt.contains("→ Google Chrome"));
+        assert!(prompt.contains("Bob Work-test"));
+        assert!(prompt.contains("Automatisation"));
+        assert!(prompt.contains("Accès et contrôle"));
+        assert!(prompt.contains("osascript"));
     }
 
     #[test]
@@ -2266,6 +2936,7 @@ mod plugin_creation_protocol_tests {
             let prompt = super::build_prompt_with_history(
                 "Lis un fichier extérieur",
                 "agent",
+                "fr",
                 &[],
                 None,
                 "",
@@ -2283,9 +2954,15 @@ mod plugin_creation_protocol_tests {
                 None,
                 None,
             );
-            assert!(prompt.contains(&crate::services::permission_governance::sandbox_guidance()));
+            assert!(prompt.contains(&crate::services::agent_locale::sandbox_guidance(
+                crate::services::agent_locale::AppLocale::Fr
+            )));
+            // Computer Use stays forced off even if the caller passes true.
+            assert!(!prompt.contains("Contrôle bureau Bob Work"));
             assert!(!prompt.contains("demande d’autoriser **Bob Work"));
-            assert!(!prompt.contains("Accès web Bob Work :"));
+            // Chrome remains available via the host bridge when requested.
+            assert!(prompt.contains("Contrôle Chrome Bob Work"));
+            assert!(prompt.contains("limitations de la sandbox Bob Work"));
         }
     }
 
@@ -2294,6 +2971,7 @@ mod plugin_creation_protocol_tests {
         let prompt = super::build_prompt_with_history(
             "Interroge @db:sales",
             "agent",
+            "fr",
             &[],
             None,
             "",
@@ -2365,15 +3043,21 @@ mod plugin_creation_protocol_tests {
         assert!(context.contains("github, slack"));
         assert!(context.contains("@db:sales"));
         assert!(context.contains("IBM Db2"));
-        assert!(context.contains("mermaid"));
-        assert!(context.contains("GitHub Releases"));
-        assert!(context.contains("wizard"));
+        assert!(context.contains("Mermaid"));
+        assert!(context.contains("sharedCapabilities"));
+        assert!(context.contains("privateDependencies"));
     }
 }
 
 #[cfg(test)]
 mod cto_invest_prompt_tests {
-    use super::{build_office_specialized_context, translate_prompt_mentions};
+    use super::{
+        build_office_specialized_context, cloud_architect_display_format,
+        cloud_architect_orientation, translate_prompt_mentions,
+    };
+    use crate::services::prompt_mentions::{
+        normalize_plugin_mentions, plugin_reference_ids,
+    };
     use crate::db::Database;
     use crate::services::plugin::PluginService;
 
@@ -2443,7 +3127,7 @@ mod cto_invest_prompt_tests {
 
         let translated = translate_prompt_mentions(
             &db,
-            "@plugin:builtin-cloud-architect @skill:newer-custom Dessine l'architecture cible",
+            "@plugin:agentic-cloud-architect @skill:newer-custom Dessine l'architecture cible",
         );
 
         assert!(
@@ -2454,5 +3138,180 @@ mod cto_invest_prompt_tests {
             translated.contains("$newer-custom"),
             "personal skill must remain addressable by Bob Shell: {translated}"
         );
+
+        for legacy_id in ["agentic-senior-cloud-architect", "builtin-cloud-architect"] {
+            let translated = translate_prompt_mentions(
+                &db,
+                &format!("@plugin:{legacy_id} Dessine l'architecture cible"),
+            );
+            assert!(
+                translated.contains("$cloud-architect"),
+                "legacy mention must resolve to the canonical skill: {translated}"
+            );
+        }
+
+        for visualize_ref in ["visualize", "builtin-visualize"] {
+            let translated = translate_prompt_mentions(
+                &db,
+                &format!("@plugin:{visualize_ref} Fais un dashboard"),
+            );
+            assert!(
+                translated.contains("$visualize"),
+                "@plugin:{visualize_ref} must resolve to $visualize: {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn former_cloud_architect_mentions_are_canonicalized_and_deduplicated() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        PluginService::new()
+            .ensure_builtin_plugins(&db)
+            .expect("builtins");
+        let known = plugin_reference_ids(&db).expect("references");
+        assert_eq!(
+            normalize_plugin_mentions(
+                "@plugin:agentic-cloud-architect Dessine @plugin:builtin-cloud-architect @plugin:agentic-senior-cloud-architect",
+                &known,
+            ),
+            "@plugin:agentic-cloud-architect Dessine"
+        );
+    }
+
+    #[test]
+    fn cloud_architect_display_format_is_explicit_and_case_insensitive() {
+        assert_eq!(
+            cloud_architect_display_format("[diagram-format:EXECUTIVE-BOXES] Crée une vue Azure"),
+            Some("executive-boxes")
+        );
+        assert_eq!(
+            cloud_architect_display_format("[diagram-format:technical-detailed]"),
+            Some("technical-detailed")
+        );
+        assert_eq!(cloud_architect_display_format("Crée un diagramme"), None);
+    }
+
+    #[test]
+    fn cloud_architect_orientation_is_explicit_and_case_insensitive() {
+        assert_eq!(
+            cloud_architect_orientation("[diagram-orientation:HORIZONTAL]"),
+            Some("horizontal")
+        );
+        assert_eq!(
+            cloud_architect_orientation("[diagram-orientation:vertical]"),
+            Some("vertical")
+        );
+        assert_eq!(cloud_architect_orientation("diagramme horizontal"), None);
+    }
+
+    #[test]
+    fn integration_mentions_are_distinct_and_load_the_connector_skill() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let translated = translate_prompt_mentions(
+            &db,
+            "@integration:github Compte mes dépôts sans confondre la connexion et le skill",
+        );
+        assert!(translated.contains("$bob-work-github"));
+        assert!(!translated.contains("@integration:github"));
+    }
+
+    #[test]
+    fn api_mentions_select_the_rest_tool_without_exposing_a_secret() {
+        let db = Database::new_in_memory().expect("db");
+        db.run_migrations().expect("migrations");
+        let translated = translate_prompt_mentions(&db, "@api:tmdb Liste les séries récentes");
+        assert!(translated.contains("`tmdb_api_get`"));
+        assert!(!translated.contains("@api:tmdb"));
+        assert!(!translated.contains("api_key="));
+    }
+}
+
+#[cfg(test)]
+mod chrome_automation_error_tests {
+    use super::missing_browser_capability_error;
+    use crate::models::plugin::PluginBrowserStatus;
+
+    fn chrome_extension(message: &str) -> PluginBrowserStatus {
+        PluginBrowserStatus {
+            id: "chrome".into(),
+            name: "Contrôle Google Chrome".into(),
+            capability: "chrome".into(),
+            state: "disconnected".into(),
+            required: true,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn conversation_error_names_bob_work_test_automation() {
+        let message = missing_browser_capability_error(
+            "Contrôle Chrome",
+            &[chrome_extension("Automatisation macOS non accordée.")],
+            "Bob Work-test",
+        );
+        assert!(message.contains("Bob Work-test → Google Chrome"));
+        assert!(message.contains("Automatisation"));
+        assert!(message.contains("Une case déjà cochée pour Bob Work ne suffit pas"));
+        assert!(message.contains("Accès et contrôle"));
+        assert!(message.contains("Demander Automatisation Chrome"));
+        assert!(!message.contains("Permission denied"));
+    }
+
+    #[test]
+    fn conversation_error_mentions_test_app_even_from_bob_work() {
+        let message = missing_browser_capability_error(
+            "Contrôle Chrome",
+            &[chrome_extension("")],
+            "Bob Work",
+        );
+        assert!(message.contains("Si vous lancez Bob Work-test, autorisez Bob Work-test"));
+        assert!(message.contains("Automatisation"));
+    }
+
+    fn computer_use_extension(state: &str, message: &str) -> PluginBrowserStatus {
+        PluginBrowserStatus {
+            id: "desktop".into(),
+            name: "Contrôle bureau macOS".into(),
+            capability: "computer_use".into(),
+            state: state.into(),
+            required: true,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn conversation_error_prioritizes_computer_use_setting_before_mcp() {
+        let message = missing_browser_capability_error(
+            "Computer Use",
+            &[computer_use_extension(
+                "disabled",
+                "Réglages → Accès et contrôle : activez « Contrôle de l’ordinateur ».",
+            )],
+            "Bob Work-test",
+        );
+        assert!(message.contains("Accès et contrôle"));
+        assert!(message.contains("Contrôle de l’ordinateur") || message.contains("Contrôle bureau"));
+        assert!(message.contains("Étape 1"));
+        assert!(message.contains("n’installe pas le MCP"));
+        assert!(!message.to_ascii_lowercase().contains("puis configurez l’outil mcp"));
+        // Do not dump the old generic "capacité désactivée" trailer as the primary ask.
+        assert!(!message.contains("Cette capacité est désactivée dans les réglages de Bob Work"));
+    }
+
+    #[test]
+    fn conversation_error_mentions_accessibility_only_after_setting_on() {
+        let message = missing_browser_capability_error(
+            "Computer Use",
+            &[computer_use_extension(
+                "disconnected",
+                "MCP Computer Use installé, mais Accessibilité macOS non accordée.",
+            )],
+            "Bob Work-test",
+        );
+        assert!(message.contains("Accessibilité"));
+        assert!(message.contains("Bob Work-test"));
+        assert!(!message.contains("Étape 1"));
     }
 }

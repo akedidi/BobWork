@@ -16,16 +16,17 @@ export interface PromptAutocompleteItem {
   insert: string
 }
 
-/** Detect a `/` or `@` token at the caret (end of the current value). */
-export function detectAutocompleteQuery(text: string): AutocompleteQuery | null {
-  const slash = /(?:^|\s)\/([\w:-]*)$/.exec(text)
+/** Detect a `/` or `@` token immediately before the caret. */
+export function detectAutocompleteQuery(text: string, caretIndex = text.length): AutocompleteQuery | null {
+  const prefix = text.slice(0, Math.max(0, Math.min(caretIndex, text.length)))
+  const slash = /(?:^|\s)\/([\w:-]*)$/.exec(prefix)
   if (slash && slash.index !== undefined) {
-    const tokenIndex = text.lastIndexOf('/', slash.index + slash[0].length)
+    const tokenIndex = prefix.lastIndexOf('/', slash.index + slash[0].length)
     return { trigger: '/', query: slash[1] ?? '', startIndex: tokenIndex }
   }
-  const mention = /(?:^|\s)@([\w-]*)$/.exec(text)
+  const mention = /(?:^|\s)@([\w-]*)$/.exec(prefix)
   if (mention && mention.index !== undefined) {
-    const tokenIndex = text.lastIndexOf('@', mention.index + mention[0].length)
+    const tokenIndex = prefix.lastIndexOf('@', mention.index + mention[0].length)
     return { trigger: '@', query: mention[1] ?? '', startIndex: tokenIndex }
   }
   return null

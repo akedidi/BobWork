@@ -69,7 +69,7 @@ pub fn integration_scopes(integration_id: &str) -> Option<IntegrationScopes> {
     let (scopes, user_scopes): (&'static [&'static str], &'static [&'static str]) =
         match integration_id {
             "github" => (&["repo", "read:user", "read:org"], &[]),
-            // ChatGPT-style Slack MCP authorize: rich `user_scope` + resource=
+            // Slack MCP authorize: rich `user_scope` + resource=
             // mcp.slack.com. Localhost PKCE cannot request bot scopes (ChatGPT
             // can, because its redirect is https://chatgpt.com) — leave `scope`
             // empty and put everything in user_scope for an xoxp- token.
@@ -173,7 +173,7 @@ pub fn provider_setup_url(provider: &str) -> Option<String> {
         "microsoft" => Some(microsoft_create_app_url()),
         "github" => Some("https://github.com/settings/developers".into()),
         // Monday MCP uses Dynamic Client Registration — no Developer Center
-        // visit required for the ChatGPT-style PKCE connect flow.
+        // visit required for the PKCE connect flow.
         "monday" => None,
         _ => None,
     }

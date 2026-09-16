@@ -1,5 +1,5 @@
 /** Document / deliverable extensions Bob Work can preview or open. */
-const DELIVERABLE_EXT = 'pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers'
+const DELIVERABLE_EXT = 'tex|bib|epub|odt|rtf|pptx?|docx?|xlsx?|pdf|md|html?|csv|txt|py|png|jpe?g|gif|webp|svg|d2|dot|json|ya?ml|zip|key|pages|numbers'
 
 /**
  * Matches absolute or ~/ paths ending with a deliverable extension.
@@ -12,10 +12,17 @@ const ABSOLUTE_PATH_RE = new RegExp(
 )
 
 function cleanCandidate(raw: string): string {
-  return raw
-    .replace(/^file:\/\//i, '')
-    .replace(/[),.;:]+$/g, '')
-    .trim()
+  let cleaned = raw.replace(/[),.;:]+$/g, '').trim()
+  // `file:///Users/...` and accidental `///Users/...` (regex matched after `file:`)
+  // must become a real absolute path or the UI existence check drops the preview.
+  if (/^file:/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^file:\/\//i, '')
+    cleaned = cleaned.replace(/^localhost/i, '')
+  }
+  if (/^\/{2,}/.test(cleaned)) {
+    cleaned = cleaned.replace(/^\/+/, '/')
+  }
+  return cleaned
 }
 
 function followsWebUrlScheme(text: string, pathStart: number): boolean {
@@ -26,6 +33,8 @@ function followsWebUrlScheme(text: string, pathStart: number): boolean {
 /**
  * Collapse `/Users/me/Desktop/a.pptx` and `~/Desktop/a.pptx` to the same key
  * so chips / extracts don’t show the same file twice.
+ * Also collapse ephemeral sandbox HOME paths (`…/bob-isolated-…/.bob/skills/…`)
+ * onto the host `~/.bob/skills/…` key — same skill file, one chip.
  */
 export function normalizeLocalFilePathKey(path: string): string {
   const cleaned = cleanCandidate(path)
@@ -33,10 +42,35 @@ export function normalizeLocalFilePathKey(path: string): string {
   if (cleaned.startsWith('~/')) return `home:${cleaned.slice(2)}`
   const homeRelative = cleaned.match(/^\/(?:Users|home)\/[^/]+\/(.+)$/i)
   if (homeRelative) return `home:${homeRelative[1]}`
+  const isolatedBob = cleaned.match(
+    /(?:\/private)?\/var\/folders\/[^/]+\/[^/]+\/T\/bob-isolated-[^/]+\/(\.bob\/.+)$/i,
+  )
+  if (isolatedBob) return `home:${isolatedBob[1]}`
+  return cleaned
+}
+
+/** Expand `~/…` and rewrite dead bob-isolated skill paths to the host home tree. */
+export function resolveDurableLocalPath(path: string, homeDir: string): string {
+  const cleaned = cleanCandidate(path)
+  if (!cleaned || !homeDir) return cleaned
+  const home = homeDir.replace(/\/$/, '')
+  if (cleaned.startsWith('~/')) {
+    return `${home}/${cleaned.slice(2)}`
+  }
+  const isolated = cleaned.match(
+    /^((?:\/private)?\/var\/folders\/[^/]+\/[^/]+\/T\/bob-isolated-[^/]+)(\/.+)$/i,
+  )
+  if (isolated) {
+    return `${home}${isolated[2]}`
+  }
   return cleaned
 }
 
 export function preferAbsoluteLocalPath(a: string, b: string): string {
+  const aIsolated = /bob-isolated-/i.test(a)
+  const bIsolated = /bob-isolated-/i.test(b)
+  if (aIsolated && !bIsolated) return b
+  if (bIsolated && !aIsolated) return a
   if (a.startsWith('/') && !b.startsWith('/')) return a
   if (b.startsWith('/') && !a.startsWith('/')) return b
   // Prefer longer (more specific) absolute path

@@ -29,3 +29,5 @@ pub mod system;
 pub mod task;
 pub mod updater;
 pub mod workspace;
+
+pub mod document;

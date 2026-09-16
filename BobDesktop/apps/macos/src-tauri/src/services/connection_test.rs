@@ -25,7 +25,7 @@ impl ConnectionTestRecord {
     pub fn summary(&self) -> ConnectionTestSummary {
         ConnectionTestSummary {
             ok: self.ok,
-            message: self.message.clone(),
+            message: crate::security::secret_redaction::redact_secrets(&self.message),
             tested_at: self.tested_at.clone(),
             tools: self.tools.clone(),
         }
@@ -85,7 +85,22 @@ impl ConnectionTestService {
         let Some(raw) = raw else {
             return Ok(HashMap::new());
         };
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        let mut records: HashMap<String, ConnectionTestRecord> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        let mut changed = false;
+        for record in records.values_mut() {
+            let redacted = crate::security::secret_redaction::redact_secrets(&record.message);
+            if redacted != record.message {
+                record.message = redacted;
+                changed = true;
+            }
+        }
+        // Security migration: scrub credentials from connection-test history
+        // written by older Bob Work releases as soon as it is loaded.
+        if changed {
+            self.write_all(db, &records)?;
+        }
+        Ok(records)
     }
 
     pub fn get(&self, db: &Database, key: &str) -> AppResult<Option<ConnectionTestRecord>> {
@@ -116,7 +131,7 @@ impl ConnectionTestService {
             id: result.id.clone(),
             name: result.name.clone(),
             ok: result.ok,
-            message: result.message.clone(),
+            message: crate::security::secret_redaction::redact_secrets(&result.message),
             tools: result.tools.clone(),
             tested_at: tested_at.clone(),
             kind: "mcp".into(),
@@ -150,7 +165,7 @@ impl ConnectionTestService {
                 id: result.id.clone(),
                 name: result.name.clone(),
                 ok: result.ok,
-                message: result.message.clone(),
+                message: crate::security::secret_redaction::redact_secrets(&result.message),
                 tools: result.tools.clone(),
                 tested_at: Utc::now().to_rfc3339(),
                 kind: "plugin-mcp".into(),
@@ -176,7 +191,7 @@ impl ConnectionTestService {
             id: integration_id.to_string(),
             name: result.name.clone(),
             ok: result.ok,
-            message: result.message.clone(),
+            message: crate::security::secret_redaction::redact_secrets(&result.message),
             tools: result.tools.clone(),
             tested_at: Utc::now().to_rfc3339(),
             kind: "integration".into(),
@@ -232,5 +247,31 @@ mod tests {
         assert!(stored.ok);
         assert_eq!(stored.tools, vec!["list".to_string()]);
         assert!(!stored.tested_at.is_empty());
+    }
+
+    #[test]
+    fn scrubs_legacy_api_keys_from_persisted_test_history() {
+        let db = Database::new_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let service = ConnectionTestService::new();
+        let secret = "1234567890abcdef1234567890abcdef";
+        let result = PluginMcpTestResult {
+            id: "tmdb".into(),
+            name: "tmdb".into(),
+            ok: true,
+            message: format!(
+                "Endpoint HTTP joignable (https://api.example.test/3?api_key={secret})."
+            ),
+            tools: vec![],
+            tested_at: None,
+        };
+        service.save_mcp_test(&db, &result).unwrap();
+        let stored = service
+            .list(&db)
+            .unwrap()
+            .remove("mcp:tmdb")
+            .expect("stored");
+        assert!(!stored.message.contains(secret));
+        assert!(stored.message.contains("***REDACTED***"));
     }
 }

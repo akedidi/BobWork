@@ -25,10 +25,20 @@ BobDesktop/apps/macos/.build/
 .env
 .env.*
 !.env.example
+*.p12
+*.p12.password
+BobDesktop/scripts/enterprise/signing/
+BobDesktop/dist-enterprise/
 
 # Test artifacts
 **/coverage/
 **/.turbo/
+
+# Guide build QA dumps / Office lock files
+guide-bob-work/qa/
+guide-bob-work/qa-final.*/
+guide-bob-work/~$*
+**/~$*.docx
 
 # BobMobile generated outputs
 BobMobile/build/
@@ -58,3 +68,8 @@ BobDesktop/split_ui.js
 BobDesktop/apps/macos/src/views/test.js
 BobDesktop/apps/macos/src/views/test-patch.js
 BobDesktop/test-artifacts/
+
+/BobDesktop/apps/macos/public/runtime-pdf/
+
+# Large document runtime binaries (downloaded via build-document-runtimes.py)
+BobDesktop/apps/macos/src-tauri/resources/shared-runtimes/documents/*.zip

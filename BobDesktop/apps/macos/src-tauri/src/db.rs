@@ -4,7 +4,7 @@
 
 use crate::error::{AppError, AppResult};
 use chrono::Utc;
-use rusqlite::{backup::Backup, params, Connection};
+use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -93,6 +93,38 @@ impl Database {
         set_private_permissions(&final_path)?;
 
         backup_metadata(&final_path)
+    }
+
+    pub fn open_readonly_backup(backup_path: &Path) -> AppResult<Connection> {
+        if backup_path.extension().and_then(|value| value.to_str()) != Some("sqlite") {
+            return Err(AppError::ValidationFailed(
+                "Select a Bob Work backup file ending in .sqlite".into(),
+            ));
+        }
+        let metadata = std::fs::metadata(backup_path)?;
+        if metadata.len() > 500 * 1024 * 1024 {
+            return Err(AppError::ValidationFailed(
+                "The backup file exceeds 500 MB.".into(),
+            ));
+        }
+        {
+            let validation = Connection::open(backup_path)
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            ensure_integrity(&validation)?;
+        }
+        let connection = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let has_conversations: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_conversations == 0 {
+            return Err(AppError::ValidationFailed(
+                "Unrecognized SQLite file: missing Bob Work conversations table.".into(),
+            ));
+        }
+        Ok(connection)
     }
 
     pub fn restore_backup(&self, backup_path: &Path) -> AppResult<()> {
@@ -188,6 +220,9 @@ impl Database {
             ("020", MIGRATION_020_RUNTIME_INSTALLED_VERSION),
             ("021", MIGRATION_021_PERSISTENT_MEMORY),
             ("022", MIGRATION_022_PERSISTENT_MEMORY_SETTINGS),
+            ("023", MIGRATION_023_CONVERSATION_PLAN),
+            ("024", MIGRATION_024_CONVERSATION_MODE),
+            ("025", MIGRATION_025_PLUGIN_VERSION_RETENTION),
         ];
 
         for (version, sql) in migrations {
@@ -230,18 +265,37 @@ fn ensure_integrity(connection: &Connection) -> AppResult<()> {
     }
 }
 
+fn backup_timestamp(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%SZ") {
+        return parsed.and_utc().to_rfc3339();
+    }
+    raw.to_string()
+}
+
 fn backup_metadata(path: &Path) -> AppResult<DatabaseBackup> {
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| AppError::ValidationFailed("Invalid backup filename".into()))?
         .to_string();
-    let created_at = name
+    let raw_timestamp = name
         .strip_prefix("bob-work-automatic-")
         .or_else(|| name.strip_prefix("bob-work-manual-"))
         .and_then(|value| value.strip_suffix(".sqlite"))
         .unwrap_or_default()
         .to_string();
+    let created_at = if raw_timestamp.is_empty() {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(|modified| chrono::DateTime::<Utc>::from(modified).to_rfc3339())
+            .unwrap_or_default()
+    } else {
+        backup_timestamp(&raw_timestamp)
+    };
     Ok(DatabaseBackup {
         name,
         path: path.to_string_lossy().into_owned(),
@@ -284,6 +338,56 @@ mod backup_tests {
             .execute("CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY)", [])
             .expect("connection remains usable");
         assert!(!database.conn.is_poisoned());
+    }
+
+    #[test]
+    fn prune_backups_keeps_only_one_automatic_and_preserves_manual() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let backup_dir = temporary.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).expect("backup dir");
+        for name in [
+            "bob-work-automatic-20260101T000000Z.sqlite",
+            "bob-work-automatic-20260102T000000Z.sqlite",
+            "bob-work-automatic-20260103T000000Z.sqlite",
+            "bob-work-manual-20260102T120000Z.sqlite",
+        ] {
+            std::fs::write(backup_dir.join(name), b"sqlite").expect("write backup stub");
+        }
+
+        Database::prune_backups(&backup_dir, 1).expect("prune");
+        let remaining = Database::list_backups(&backup_dir).expect("list");
+        let names: Vec<_> = remaining.iter().map(|backup| backup.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "bob-work-manual-20260102T120000Z.sqlite",
+                "bob-work-automatic-20260103T000000Z.sqlite",
+            ]
+        );
+    }
+
+    #[test]
+    fn backup_metadata_exposes_rfc3339_created_at() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let backup_dir = temporary.path().join("backups");
+        let database = Database::new(&temporary.path().join("database.sqlite")).expect("database");
+        database.run_migrations().expect("migrations");
+
+        let backup = database.create_backup(&backup_dir, true).expect("backup");
+        assert!(!backup.created_at.is_empty());
+        assert!(backup.created_at.contains('T'));
+        assert!(
+            backup.created_at.ends_with("+00:00") || backup.created_at.ends_with('Z'),
+            "unexpected timestamp: {}",
+            backup.created_at
+        );
+
+        let listed = Database::list_backups(&backup_dir)
+            .expect("list")
+            .into_iter()
+            .find(|item| item.name == backup.name)
+            .expect("listed backup");
+        assert_eq!(listed.created_at, backup.created_at);
     }
 
     #[test]
@@ -400,6 +504,36 @@ mod backup_tests {
             .expect("project mode");
         assert_eq!(setting, "\"agent\"");
         assert_eq!(project, "agent");
+    }
+
+    #[test]
+    fn missing_conversation_modes_are_backfilled_to_agent() {
+        let database = Database::new_in_memory().expect("database");
+        database.run_migrations().expect("initial migrations");
+        {
+            let connection = database.conn.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO conversations (id,title,date,bob_mode) VALUES ('legacy-conversation','Legacy','now',NULL)",
+                    [],
+                )
+                .expect("legacy conversation");
+            connection
+                .execute("DELETE FROM schema_migrations WHERE version=24", [])
+                .expect("replay migration");
+        }
+        database.run_migrations().expect("mode migration");
+        let mode: String = database
+            .conn
+            .lock()
+            .expect("database lock")
+            .query_row(
+                "SELECT bob_mode FROM conversations WHERE id='legacy-conversation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("conversation mode");
+        assert_eq!(mode, "agent");
     }
 }
 
@@ -1140,4 +1274,31 @@ INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memo
 const MIGRATION_022_PERSISTENT_MEMORY_SETTINGS: &str = r#"
 INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_enabled', 'false', datetime('now'));
 INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('persistent_memory_engine', '"local"', datetime('now'));
+"#;
+
+// The current execution plan belongs to the conversation rather than to the
+// mounted React view. Keeping its structured activity snapshots here allows a
+// running or completed plan to survive navigation and application restarts.
+const MIGRATION_023_CONVERSATION_PLAN: &str = r#"
+ALTER TABLE conversations ADD COLUMN plan_activities TEXT NOT NULL DEFAULT '[]';
+"#;
+
+// Every conversation owns its execution mode. Older imports and drafts could
+// leave bob_mode NULL, which made the composer fall back to whichever mode was
+// still mounted from another conversation.
+const MIGRATION_024_CONVERSATION_MODE: &str = r#"
+UPDATE conversations
+SET bob_mode = 'agent'
+WHERE bob_mode IS NULL OR TRIM(bob_mode) = '';
+"#;
+
+// Bob Work no longer keeps a rollback history — only the active version and one
+// staged update remain in plugin_versions.
+const MIGRATION_025_PLUGIN_VERSION_RETENTION: &str = r#"
+DELETE FROM plugin_versions
+WHERE (plugin_id, version) NOT IN (
+    SELECT id, version FROM plugins
+    UNION
+    SELECT id, available_version FROM plugins WHERE available_version IS NOT NULL
+);
 "#;

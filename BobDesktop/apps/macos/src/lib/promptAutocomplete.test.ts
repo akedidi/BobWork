@@ -63,6 +63,20 @@ describe('prompt autocomplete', () => {
     expect(detectAutocompleteQuery('hello world')).toBeNull()
   })
 
+  it('detects mentions at the caret in the middle of a prompt', () => {
+    const text = 'avant @cl après'
+    expect(detectAutocompleteQuery(text, 'avant @cl'.length)).toEqual({
+      trigger: '@',
+      query: 'cl',
+      startIndex: 6,
+    })
+    expect(applyAutocompleteInsert(
+      text,
+      detectAutocompleteQuery(text, 'avant @cl'.length)!,
+      '@plugin:cloud ',
+    )).toBe('avant @plugin:cloud  après')
+  })
+
   it('cycles the highlighted index', () => {
     expect(cycleAutocompleteIndex(0, 1, 3)).toBe(1)
     expect(cycleAutocompleteIndex(2, 1, 3)).toBe(0)

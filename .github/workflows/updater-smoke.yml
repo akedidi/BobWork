@@ -31,22 +31,39 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p updater-smoke/from
-          gh release download "v${FROM_VERSION}" --pattern '*.dmg' --dir updater-smoke/from
+          gh release download "v${FROM_VERSION}" --pattern '*.dmg' --pattern '*.app.tar.gz' --dir updater-smoke/from
 
       - name: Install and certify release N
         run: |
           set -euo pipefail
-          DMG="$(find updater-smoke/from -name '*.dmg' -print -quit)"
           MOUNT_POINT="$RUNNER_TEMP/bob-work-from-dmg"
           INSTALL_ROOT="$RUNNER_TEMP/bob-work-updater-install"
           mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
-          SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
+          DMG="$(find updater-smoke/from -name '*.dmg' -print -quit)"
+          ARCHIVE="$(find updater-smoke/from -name '*.app.tar.gz' -print -quit)"
+          if [[ -n "$DMG" ]]; then
+            hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+            SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
+          elif [[ -n "$ARCHIVE" ]]; then
+            tar -xzf "$ARCHIVE" -C "$MOUNT_POINT"
+            SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 2 -name '*.app' -print -quit)"
+          else
+            echo "Release N has neither a DMG nor an app updater archive" >&2
+            exit 1
+          fi
+          if [[ -z "$SOURCE_APP" ]]; then
+            echo "Bob Work.app was not found in release N" >&2
+            exit 1
+          fi
           ditto "$SOURCE_APP" "$INSTALL_ROOT/Bob Work.app"
-          hdiutil detach "$MOUNT_POINT"
+          if [[ -n "$DMG" ]]; then hdiutil detach "$MOUNT_POINT"; fi
           codesign --verify --deep --strict --verbose=2 "$INSTALL_ROOT/Bob Work.app"
-          spctl --assess --type execute --verbose=4 "$INSTALL_ROOT/Bob Work.app"
-          xcrun stapler validate "$INSTALL_ROOT/Bob Work.app"
+          codesign -dr - "$INSTALL_ROOT/Bob Work.app" 2>&1 | tee updater-smoke/from-designated-requirement.txt
+          if grep -Eiq '\bcdhash\b' updater-smoke/from-designated-requirement.txt; then
+            echo "Release N has an unstable ad-hoc designated requirement" >&2
+            exit 1
+          fi
+          codesign -dv --verbose=4 "$INSTALL_ROOT/Bob Work.app" 2>&1 | sed -n 's/^Authority=//p' | head -1 > updater-smoke/from-signing-authority.txt
           echo "SMOKE_APP=$INSTALL_ROOT/Bob Work.app" >> "$GITHUB_ENV"
 
       - name: Exercise signed updater and process restart
@@ -86,7 +103,13 @@ jobs:
         run: |
           set -euo pipefail
           codesign --verify --deep --strict --verbose=2 "$SMOKE_APP"
-          spctl --assess --type execute --verbose=4 "$SMOKE_APP"
+          codesign -dr - "$SMOKE_APP" 2>&1 | tee updater-smoke/to-designated-requirement.txt
+          if grep -Eiq '\bcdhash\b' updater-smoke/to-designated-requirement.txt; then
+            echo "Updated app has an unstable ad-hoc designated requirement" >&2
+            exit 1
+          fi
+          codesign -dv --verbose=4 "$SMOKE_APP" 2>&1 | sed -n 's/^Authority=//p' | head -1 > updater-smoke/to-signing-authority.txt
+          diff -u updater-smoke/from-signing-authority.txt updater-smoke/to-signing-authority.txt
 
       - name: Upload updater smoke evidence
         if: always()

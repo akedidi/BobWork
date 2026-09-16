@@ -46,6 +46,7 @@ vi.mock('../lib/ipc', () => ({
   getTasks: mocks.getTasks,
   getBobModes: vi.fn().mockResolvedValue([
     { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'test' },
+    { slug: 'ibm-ppt-designer', name: 'IBM PPT', description: 'Créer une présentation IBM', groups: [], builtin: false, source: 'test' },
   ]),
   getSettings: vi.fn().mockResolvedValue({ defaultMode: 'agent' }),
   getProjects: vi.fn().mockResolvedValue([]),
@@ -56,7 +57,9 @@ vi.mock('../lib/ipc', () => ({
   getMcpServers: vi.fn().mockResolvedValue([]),
   getDbConnections: vi.fn().mockResolvedValue([]),
   listBobSlashCommands: vi.fn().mockResolvedValue([]),
-  allowComposerAttachments: vi.fn(async (paths: string[]) => paths),
+  allowComposerAttachments: vi.fn(async (paths: string[]) =>
+    paths.map(path => ({ path, isDirectory: false })),
+  ),
   getCodeGraphSuggestion: mocks.getCodeGraphSuggestion,
   installExternalRuntime: mocks.installExternalRuntime,
 }))
@@ -83,6 +86,45 @@ describe('Chat prompt queue', () => {
     mocks.sendMessage.mockReset()
       .mockResolvedValueOnce({ sessionId: 'session-1', taskId: 'task-1' })
       .mockResolvedValueOnce({ sessionId: 'session-2', taskId: 'task-2' })
+  })
+
+  it('loads a queued prompt into the composer and updates it in place on send', async () => {
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const input = await screen.findByPlaceholderText('Sur quoi travailler ?')
+    fireEvent.change(input, { target: { value: 'Premier prompt' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Envoyer le prompt' }))
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(input, { target: { value: 'Deuxième prompt' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Ajouter le prompt à la file' }))
+    fireEvent.change(input, { target: { value: 'Troisième prompt' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Ajouter le prompt à la file' }))
+
+    expect(screen.getByText('Deuxième prompt')).toBeVisible()
+    expect(screen.getByText('Troisième prompt')).toBeVisible()
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Modifier le prompt 1' }))
+    expect(input).toHaveValue('Deuxième prompt')
+    expect(screen.getByRole('button', { name: 'Mettre à jour le prompt en file' })).toBeVisible()
+
+    fireEvent.change(input, { target: { value: 'Deuxième prompt modifié' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Mettre à jour le prompt en file' }))
+
+    expect(screen.getByText('Deuxième prompt modifié')).toBeVisible()
+    expect(screen.getByText('Troisième prompt')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Modifier le prompt 1' })).toBeVisible()
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1)
+    const queueItems = screen.getAllByRole('article')
+    expect(queueItems[0]).toHaveTextContent('1')
+    expect(queueItems[0]).toHaveTextContent('Deuxième prompt modifié')
+    expect(queueItems[1]).toHaveTextContent('2')
+    expect(queueItems[1]).toHaveTextContent('Troisième prompt')
   })
 
   it('waits for the active Shell session before dispatching the next prompt', async () => {
@@ -223,6 +265,32 @@ describe('Chat prompt queue', () => {
 
     await waitFor(() => expect(mocks.updateConversation).toHaveBeenCalledWith('conv-1', { title: 'Brief Q3' }))
     expect(screen.getByRole('button', { name: 'Renommer la conversation' })).toHaveTextContent('Brief Q3')
+  })
+
+  it('restores and persists the Bob mode owned by the open conversation', async () => {
+    mocks.getConversation.mockResolvedValue({
+      id: 'conv-1',
+      title: 'Présentation IBM',
+      pinned: false,
+      bobMode: 'ibm-ppt-designer',
+    })
+
+    render(
+      <MemoryRouter initialEntries={['/chat/conv-1']}>
+        <Routes><Route path="/chat/:id" element={<ChatView />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    const modeButton = await screen.findByRole('button', { name: 'Mode Bob : IBM PPT' })
+    fireEvent.click(modeButton)
+    const agentLabel = await screen.findByText('Agent', { selector: 'strong' })
+    fireEvent.click(agentLabel.closest('button')!)
+
+    await waitFor(() => expect(mocks.updateConversation).toHaveBeenCalledWith(
+      'conv-1',
+      { bobMode: 'agent' },
+    ))
+    expect(screen.getByRole('button', { name: 'Mode Bob : Agent' })).toBeVisible()
   })
 
   it('persists the skill builder title on the first prompt', async () => {

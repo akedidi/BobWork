@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   connectIntegrationToken: vi.fn(),
   disconnectIntegration: vi.fn(),
   saveMcpServer: vi.fn(),
+  saveApiConnection: vi.fn(),
   setMcpServerEnabled: vi.fn(),
   deleteMcpServer: vi.fn(),
   testMcpServer: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock('../lib/ipc', () => ({
   connectIntegrationToken: mocks.connectIntegrationToken,
   disconnectIntegration: mocks.disconnectIntegration,
   saveMcpServer: mocks.saveMcpServer,
+  saveApiConnection: mocks.saveApiConnection,
   setMcpServerEnabled: mocks.setMcpServerEnabled,
   deleteMcpServer: mocks.deleteMcpServer,
   testMcpServer: mocks.testMcpServer,
@@ -79,7 +81,14 @@ describe('IntegrationsView', () => {
   it('affiche le catalogue après chargement', async () => {
     renderView()
     expect(await screen.findByText('GitHub')).toBeVisible()
-    expect(screen.getByText('Calendrier Outlook')).toBeVisible()
+    expect(screen.getByText('Monday.com')).toBeVisible()
+    expect(screen.queryByText('Slack')).not.toBeInTheDocument()
+    expect(screen.queryByText('Outlook')).not.toBeInTheDocument()
+    expect(screen.queryByText('Calendrier Outlook')).not.toBeInTheDocument()
+    expect(screen.queryByText('Microsoft Teams')).not.toBeInTheDocument()
+    expect(screen.queryByText('OneDrive')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Catalogue OAuth Bob Work/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Client Entra requis/)).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -95,18 +104,6 @@ describe('IntegrationsView', () => {
     await waitFor(() => {
       expect(screen.getByText('GitHub')).toBeVisible()
     })
-  })
-
-  it('explique qu’un client Entra est requis si Microsoft n’est pas configuré', async () => {
-    mocks.getIntegrationStatuses.mockResolvedValue([
-      { integrationId: 'outlook-mail', connected: false, oauthClientConfigured: false, lastTest: null },
-      { integrationId: 'teams', connected: false, oauthClientConfigured: false, lastTest: null },
-      { integrationId: 'outlook-calendar', connected: false, oauthClientConfigured: false, lastTest: null },
-      { integrationId: 'onedrive', connected: false, oauthClientConfigured: false, lastTest: null },
-      { integrationId: 'onenote', connected: false, oauthClientConfigured: false, lastTest: null },
-    ])
-    renderView()
-    expect(await screen.findByRole('status')).toHaveTextContent(/Client Entra requis/)
   })
 
   it('colore le badge de test MCP en vert si réussi et en rouge si échec', async () => {
@@ -138,7 +135,7 @@ describe('IntegrationsView', () => {
     expect(failBadge.querySelector('.status-dot.red')).toBeTruthy()
   })
 
-  it('place les MCP personnels en premier et protège les connecteurs intégrés', async () => {
+  it('masque les MCP gérés par les plugins intégrés dans l’onglet MCP', async () => {
     mocks.getMcpServers.mockResolvedValue([
       {
         name: 'bob-work-computer-use', transport: 'stdio', commandOrUrl: 'python3',
@@ -152,17 +149,9 @@ describe('IntegrationsView', () => {
     renderView()
     fireEvent.click(await screen.findByRole('button', { name: 'Serveurs MCP' }))
 
-    const personal = await screen.findByTestId('mcp-server-airline-operations')
-    const builtin = screen.getByTestId('mcp-server-bob-work-computer-use')
-    expect(personal.compareDocumentPosition(builtin) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(within(builtin).getByText('Intégré')).toBeVisible()
-    expect(within(builtin).getByText('Géré par Bob Work')).toBeVisible()
-    expect(within(builtin).queryByRole('button', { name: 'Modifier' })).not.toBeInTheDocument()
-    expect(within(builtin).queryByRole('button', { name: 'Supprimer' })).not.toBeInTheDocument()
-    expect(within(builtin).queryByRole('checkbox')).not.toBeInTheDocument()
-    expect(within(personal).getByRole('button', { name: 'Modifier' })).toBeVisible()
-    expect(within(personal).getByRole('button', { name: 'Supprimer' })).toBeVisible()
-    expect(within(personal).getByRole('checkbox')).toBeVisible()
+    expect(await screen.findByTestId('mcp-server-airline-operations')).toBeVisible()
+    expect(screen.queryByTestId('mcp-server-bob-work-computer-use')).not.toBeInTheDocument()
+    expect(within(screen.getByTestId('mcp-server-airline-operations')).getByRole('button', { name: 'Modifier' })).toBeVisible()
   })
 
   it('affiche une pastille verte sur une intégration dont le test a réussi', async () => {
@@ -192,6 +181,25 @@ describe('IntegrationsView', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'APIs' }))
     expect((await screen.findAllByTestId('connection-test-ok')).length).toBeGreaterThan(0)
     expect(screen.getAllByText('open-meteo').length).toBeGreaterThan(0)
+  })
+
+  it('permet de supprimer une API configurée après confirmation', async () => {
+    mocks.getMcpServers.mockResolvedValue([{
+      name: 'tmdb',
+      transport: 'http',
+      commandOrUrl: 'https://api.themoviedb.org/3/configuration?api_key=%3Credacted%3E',
+      enabled: true,
+      raw: { env: { API_KEY: '<redacted>' } },
+    }])
+    mocks.deleteMcpServer.mockResolvedValue(undefined)
+    renderView()
+    fireEvent.click(await screen.findByRole('button', { name: 'APIs' }))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Supprimer l’API tmdb' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Supprimer' }))
+
+    await waitFor(() => expect(mocks.deleteMcpServer).toHaveBeenCalledWith('tmdb'))
+    expect(mocks.getMcpServers).toHaveBeenCalledTimes(2)
   })
 
   it('préremplit le formulaire API depuis la navigation plugin', async () => {

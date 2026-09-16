@@ -272,6 +272,12 @@ const FAVICON_RULES: Array<{ keys: string[]; domain: string }> = [
 
 /** Built-in skills (top-level and nested profession skills) → local icon. */
 const BUILTIN_SKILL_ICONS: Record<string, PluginIconId> = {
+  'skill-creator': 'plugin',
+  'plugin-creator': 'plugin',
+  'agent-review': 'codegraph',
+  'computer-use': 'computer',
+  'orca-cli': 'plugin',
+  'orchestration': 'plugin',
   'bob-work-meeting-minutes': 'meeting',
   'bob-work-computer-use': 'computer',
   'bob-work-chrome-control': 'chrome',

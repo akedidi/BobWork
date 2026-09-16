@@ -7,7 +7,7 @@ import { AppContext } from '../context/AppContext'
 import { modeLabel, taskStateLabel } from '../labels'
 import { ArtifactPreview } from './FilesScreen'
 import { colors, commonStyles } from '../theme'
-import type { Catalog, Conversation, ModeOption, Project, ProjectMutationInput, RemoteArtifact } from '../types'
+import type { Conversation, ModeOption, Project, ProjectMutationInput, RemoteArtifact } from '../types'
 
 interface Props {
   project: Project
@@ -17,7 +17,6 @@ interface Props {
 
 export function ProjectScreen({ project, onBack, onOpenConversation }: Props) {
   const { api, history, refreshHistory, t } = useContext(AppContext)
-  const [catalog, setCatalog] = useState<Catalog>({ plugins: [], skills: [], integrations: [], mcpServers: [], dbConnections: [] })
   const [modes, setModes] = useState<ModeOption[]>([])
   const [loading, setLoading] = useState(false)
   const [editorVisible, setEditorVisible] = useState(false)
@@ -31,11 +30,9 @@ export function ProjectScreen({ project, onBack, onOpenConversation }: Props) {
   useEffect(() => {
     if (!api) return
     void Promise.all([
-      api.catalog(),
       api.modes(),
       api.artifacts({ projectId: project.id, limit: 5 })
-    ]).then(([nextCatalog, nextModes, artifactsPage]) => {
-      setCatalog({ plugins: nextCatalog.plugins.filter(item => item.enabled), skills: nextCatalog.skills.filter(item => item.enabled), integrations: nextCatalog.integrations, mcpServers: nextCatalog.mcpServers, dbConnections: nextCatalog.dbConnections })
+    ]).then(([nextModes, artifactsPage]) => {
       setModes(nextModes)
       setArtifacts(artifactsPage.artifacts)
     }).catch(console.error)
@@ -144,24 +141,15 @@ export function ProjectScreen({ project, onBack, onOpenConversation }: Props) {
         ))
       }
 
-      <Text style={styles.sectionTitle}>{t('allowedResources')}</Text>
-      <View style={styles.infoBox}>
-        <PermissionLine label={t('plugins')} values={project.allowedPlugins.filter(value => !value.startsWith('skill:')).map(id => catalog.plugins.find(item => item.id === id)?.name ?? id)} fallback={t('allAllowed')} />
-        <PermissionLine label={t('skills')} values={project.allowedPlugins.filter(value => value.startsWith('skill:')).map(value => value.slice(6)).map(slug => catalog.skills.find(item => item.slug === slug)?.name ?? slug)} fallback={t('allAllowed')} />
-        <PermissionLine label={t('integrations')} values={project.allowedIntegrations.filter(id => !id.startsWith('mcp:')).map(id => catalog.integrations.find(item => item.id === id)?.name ?? id)} fallback={t(project.allowedIntegrations.length === 0 ? 'allAllowed' : 'noneSelected')} />
-        <PermissionLine label={t('mcpAndApis')} values={project.allowedIntegrations.filter(id => id.startsWith('mcp:')).map(id => id.slice(4))} fallback={t(project.allowedIntegrations.length === 0 ? 'allAllowed' : 'noneSelected')} />
-      </View>
-
     </ScrollView>
-    <ProjectEditorModal 
-      visible={editorVisible} 
-      project={project} 
-      catalog={catalog} 
-      modes={modes} 
-      busy={saving} 
-      t={t} 
-      onClose={() => setEditorVisible(false)} 
-      onSubmit={update} 
+    <ProjectEditorModal
+      visible={editorVisible}
+      project={project}
+      modes={modes}
+      busy={saving}
+      t={t}
+      onClose={() => setEditorVisible(false)}
+      onSubmit={update}
     />
     <ArtifactPreview artifact={selectedArtifact} onClose={() => setSelectedArtifact(null)} onDelete={artifact => {
       void api?.deleteArtifact(artifact.id).then(() => {
@@ -170,10 +158,6 @@ export function ProjectScreen({ project, onBack, onOpenConversation }: Props) {
       }).catch(() => Alert.alert(t('error'), t('fileDeleteFailed')))
     }} />
   </View>
-}
-
-function PermissionLine({ label, values, fallback }: { label: string; values: string[]; fallback: string }) {
-  return <View><Text style={styles.permissionLabel}>{label}</Text><Text style={styles.value}>{values.length ? values.join(' · ') : fallback}</Text></View>
 }
 
 const styles = StyleSheet.create({
@@ -191,5 +175,4 @@ const styles = StyleSheet.create({
   card: { backgroundColor: colors.surface, padding: 12, borderRadius: 12, marginBottom: 8 },
   cardTitle: { color: colors.text, fontSize: 14, fontWeight: 'bold' },
   cardMeta: { color: colors.textMuted, fontSize: 11, marginTop: 5 },
-  permissionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '800', marginBottom: 3 },
 })

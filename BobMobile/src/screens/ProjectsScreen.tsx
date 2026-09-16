@@ -6,11 +6,10 @@ import { ConnectionStatusBar } from '../components/ConnectionStatusBar'
 import { AppContext } from '../context/AppContext'
 import { modeLabel } from '../labels'
 import { colors, commonStyles } from '../theme'
-import type { Catalog, ModeOption, ProjectMutationInput } from '../types'
+import type { ModeOption, ProjectMutationInput } from '../types'
 
 export function ProjectsScreen({ onOpen }: { onOpen: (projectId: string) => void }) {
   const { api, connected, history, historyError, historyLoading, refreshHistory, t } = useContext(AppContext)
-  const [catalog, setCatalog] = useState<Catalog>({ plugins: [], skills: [], integrations: [], mcpServers: [], dbConnections: [] })
   const [modes, setModes] = useState<ModeOption[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -21,9 +20,7 @@ export function ProjectsScreen({ onOpen }: { onOpen: (projectId: string) => void
     if (!api) return
     refresh ? setRefreshing(true) : setLoading(true)
     try {
-      const [nextCatalog, nextModes] = await Promise.all([api.catalog(), api.modes()])
-      setCatalog({ plugins: nextCatalog.plugins.filter(item => item.enabled), skills: nextCatalog.skills.filter(item => item.enabled), integrations: nextCatalog.integrations, mcpServers: nextCatalog.mcpServers, dbConnections: nextCatalog.dbConnections })
-      setModes(nextModes)
+      setModes(await api.modes())
     } catch {
       // The synchronized project list remains usable while the live Mac
       // connection is recovering. Avoid surfacing a technical promise error.
@@ -67,7 +64,7 @@ export function ProjectsScreen({ onOpen }: { onOpen: (projectId: string) => void
       ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
       ListEmptyComponent={<View style={commonStyles.empty}><Ionicons name={historyError ? 'cloud-offline-outline' : 'folder-open-outline'} size={48} color={colors.textMuted} /><Text style={commonStyles.emptyTitle}>{t(historyError ? 'syncRequiredTitle' : 'noProjects')}</Text><Text style={commonStyles.emptyText}>{t(historyError ? 'syncRequiredDesc' : 'noProjectsDesc')}</Text></View>}
     />}
-    <ProjectEditorModal visible={editorVisible} catalog={catalog} modes={modes} busy={creating} t={t} onClose={() => setEditorVisible(false)} onSubmit={input => void create(input)} />
+    <ProjectEditorModal visible={editorVisible} modes={modes} busy={creating} t={t} onClose={() => setEditorVisible(false)} onSubmit={input => void create(input)} />
   </View>
 }
 

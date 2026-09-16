@@ -12,16 +12,28 @@ import { LoadErrorBanner } from '../../components/LoadErrorBanner'
 import ModesView from '../ModesView'
 import { useAppDialog } from '../../components/AppDialog'
 import { errorMessage } from '../../lib/errorMessage'
+import { useUpdateStore } from '../../stores/updateStore'
 import { Heading, Card, SectionLoader, SettingsFields, ToggleRow, SelectRow, NumberRow, StatusRow, authenticationLabel, chromeAutomationLabel, computerUseAccessibilityLabel } from './SettingsShared'
 
 const BobalyticsPanel = lazy(() => import('../BobalyticsPanel'))
+
+function firstNonEmpty(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (trimmed) return trimmed
+  }
+  return '—'
+}
   
 
 export default function GeneralSettingsTab(props: any) {
-  const { t, settings, change, settingsError, updateInfo, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
+  const { t, settings, change, settingsError, updateInfo, appVersion, appName, updateBusy, checkUpdate, installUpdate, notificationBundleHint, usageLoading, usage, profileLoading, installationFound, installationLabel, authReady, authMethod, profile, authSnapshot, sessionKeyStatus, install, refreshProfile, apiKey, setApiKey, saveKey, bobExtrasReady, grantsLoading, grants, grantsError, revokeGrant, mcpEnabled, subagentsEnabled, computerUseEnabled, chromeControlEnabled, sandboxMode, chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools, computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools, exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus } = props
+  const storeCurrentVersion = useUpdateStore(state => state.currentVersion)
+  const displayedVersion = firstNonEmpty(appVersion, updateInfo?.currentVersion, storeCurrentVersion)
   const dialog = useAppDialog()
   const navigate = useNavigate()
   const loadingLabel = t('common.loading')
+  const app = appName || 'Bob Work'
   const [locationBusy, setLocationBusy] = useState(false)
 
   const captureLocation = () => {
@@ -61,7 +73,7 @@ export default function GeneralSettingsTab(props: any) {
             <SettingsFields settings={settings} error={null} loadingLabel={loadingLabel}>
               {s => <>
                 <SelectRow title={t('settings.defaultMode')} description={t('settings.defaultModeDesc')} value={s.defaultMode} onChange={value => change('defaultMode', value)}>
-                  <option value="agent">Agent</option><option value="plan">Plan</option><option value="ask">Ask</option>
+                  <option value="agent">{t('settings.modeAgent')}</option><option value="plan">{t('settings.modePlan')}</option><option value="ask">{t('settings.modeAsk')}</option>
                   {profile?.modes.filter((mode: any) => !['agent', 'plan', 'ask'].includes(mode.slug)).map((mode: any) => <option key={mode.slug} value={mode.slug}>{mode.name}</option>)}
                 </SelectRow>
                 <ToggleRow title={t('settings.launchAtLogin')} description={t('settings.launchAtLoginDesc')} value={s.launchAtLogin} onChange={value => change('launchAtLogin', value)} />
@@ -90,13 +102,11 @@ export default function GeneralSettingsTab(props: any) {
           </Card>
           <Heading title={t('settings.updatesHeading')} description={t('settings.updatesDesc')} />
           <Card>
-            {updateInfo && (
-              <StatusRow
-                title={t('settings.currentVersion')}
-                value={updateInfo.currentVersion}
-                ok={!updateInfo.available}
-              />
-            )}
+            <StatusRow
+              title={t('settings.currentVersion')}
+              value={displayedVersion}
+              ok={!updateInfo?.available}
+            />
             {updateInfo?.available && (
               <>
                 <StatusRow title={t('settings.availableVersion')} value={updateInfo.version ?? '—'} ok />
@@ -131,7 +141,7 @@ export default function GeneralSettingsTab(props: any) {
                   onChange={value => change('notifyTaskComplete', value)}
                   disabled={!s.notificationsEnabled}
                 />
-                <p className="settings-note">{t('settings.notificationsHint')}</p>
+                <p className="settings-note">{t('settings.notificationsHint', { appName: app })}</p>
                 {notificationBundleHint && <p className="settings-note" role="status">{notificationBundleHint}</p>}
               </>}
             </SettingsFields>

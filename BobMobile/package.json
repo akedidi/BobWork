@@ -10,10 +10,13 @@
     "ios:release:prepare": "bash scripts/release-ios.sh prepare",
     "ios:release:simulator": "bash scripts/release-ios.sh simulator",
     "ios:release:archive": "bash scripts/release-ios.sh archive",
+    "ios:release:unsigned-ipa": "bash scripts/release-ios.sh unsigned-ipa",
     "ios:release:verify": "bash scripts/release-ios.sh verify",
     "android": "expo run:android",
     "web": "expo start --web",
-    "test:markdown": "node --experimental-strip-types --test src/markdown.test.mjs",
+    "test:markdown": "node --experimental-strip-types --test ../BobDesktop/packages/chat-display/src/normalizeAssistantMarkdown.test.ts",
+    "test:timestamps": "node --experimental-strip-types --test ../BobDesktop/packages/chat-display/src/formatMessageTimestamp.test.ts",
+    "test:permissions": "node --experimental-strip-types --test src/taskPermissions.test.mjs",
     "test:i18n": "node --experimental-strip-types --test src/i18n.test.mjs",
     "test:visualization": "node --experimental-strip-types --test src/visualizationSizing.test.mjs src/visualizationHtml.test.mjs",
     "test:maps": "node --experimental-strip-types --test src/mapSpec.test.mjs",
@@ -21,6 +24,7 @@
     "doctor": "npx --yes expo-doctor"
   },
   "dependencies": {
+    "@bob-work/chat-display": "file:../BobDesktop/packages/chat-display",
     "@expo/metro-runtime": "~57.0.8",
     "@expo/vector-icons": "^15.0.2",
     "expo": "~57.0.18",

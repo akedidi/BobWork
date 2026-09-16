@@ -140,6 +140,7 @@ BobMobile/
 ```bash
 npm run ios:release:simulator  # unsigned Release binary for local validation
 npm run ios:release:archive    # signed device archive for distribution
+npm run ios:release:unsigned-ipa # unsigned device IPA for inspection/testing
 ```
 
 The release routine removes project-local Expo and Xcode outputs, completely regenerates `ios/` with `expo prebuild --clean`, and builds into isolated DerivedData under `.release/`. Final certification validates the version and bundle identifier, rejects Dev Client, Metro, development-screen markers, source maps, and preview libraries, and confirms that required native modules such as `ExpoLocation` are linked into the binary. This prevents an outdated iOS project or CocoaPod from surviving after JavaScript dependencies change.
@@ -150,10 +151,15 @@ The release routine removes project-local Expo and Xcode outputs, completely reg
 npm run typecheck
 npm run test:i18n
 npm run test:markdown
+npm run test:timestamps
 npm run test:visualization
 npm run test:maps
 npm run doctor
 ```
+
+Chat display rules (assistant Markdown repairs and message timestamps) live in
+`@bob-work/chat-display` under `BobDesktop/packages/chat-display`. BobMobile must
+not fork those helpers — Desktop remains the source of truth.
 
 Before shipping, validate at minimum a real Mac connection, prompt submission, an approval, opening an artifact, and enabling/disabling location on a simulator or physical device.
 

@@ -189,6 +189,84 @@ pub async fn prepare_fitted_html_preview(
     Ok(output.to_string_lossy().to_string())
 }
 
+/// Opens an HTML visualization in the default browser with the same packaged
+/// rendering runtime used by the embedded preview. The copy lives in Bob
+/// Work's cache and keeps relative artifact assets anchored to their source.
+#[tauri::command]
+pub async fn open_external_html_preview(
+    source_path: String,
+    html: String,
+    app: AppHandle,
+) -> Result<(), AppError> {
+    const MAX_EXTERNAL_HTML_BYTES: usize = 8 * 1024 * 1024;
+    if html.len() > MAX_EXTERNAL_HTML_BYTES {
+        return Err(AppError::ValidationFailed(
+            "Cette visualisation HTML est trop volumineuse pour être ouverte.".into(),
+        ));
+    }
+
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| AppError::Io(error.to_string()))?
+        .join("previews")
+        .join("external-html");
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        let source = PathBuf::from(source_path)
+            .canonicalize()
+            .map_err(|_| AppError::NotFound("Visualisation HTML introuvable".into()))?;
+        if is_sensitive_path(&source) {
+            return Err(AppError::Security(
+                "L’ouverture externe bloque les dossiers de clés et d’identifiants sensibles."
+                    .into(),
+            ));
+        }
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(extension.as_str(), "html" | "htm") {
+            return Err(AppError::ValidationFailed(
+                "Seules les visualisations HTML peuvent utiliser le rendu externe autonome.".into(),
+            ));
+        }
+
+        let parent = source.parent().unwrap_or_else(|| Path::new("."));
+        let base_url = url::Url::from_directory_path(parent).map_err(|_| {
+            AppError::ValidationFailed("Chemin de visualisation HTML invalide".into())
+        })?;
+        let html = with_external_document_base(&html, base_url.as_str());
+        std::fs::create_dir_all(&cache_dir)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        html.hash(&mut hasher);
+        let output = cache_dir.join(format!("{:x}.html", hasher.finish()));
+        if !output.is_file() {
+            std::fs::write(&output, html)?;
+        }
+        Ok::<PathBuf, AppError>(output)
+    })
+    .await
+    .map_err(|error| AppError::Io(format!("Préparation du navigateur interrompue : {error}")))??;
+
+    open::that(output).map_err(|error| AppError::Io(error.to_string()))
+}
+
+fn with_external_document_base(html: &str, base_url: &str) -> String {
+    if html.to_ascii_lowercase().contains("<base") {
+        return html.to_string();
+    }
+    let base = format!("<base href=\"{}\">", base_url.replace('"', "&quot;"));
+    if let Some(start) = html.to_ascii_lowercase().find("<head") {
+        if let Some(relative_end) = html[start..].find('>') {
+            let end = start + relative_end + 1;
+            return format!("{}{}{}", &html[..end], base, &html[end..]);
+        }
+    }
+    format!("<!doctype html><html><head>{base}</head><body>{html}</body></html>")
+}
+
 #[tauri::command]
 pub async fn get_live_preview_revision(path: String) -> Result<String, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -366,11 +444,18 @@ fn copy_canvas_tree(source: &Path, destination: &Path, depth: usize) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerAttachmentGrant {
+    pub path: String,
+    pub is_directory: bool,
+}
+
 #[tauri::command]
 pub async fn allow_composer_attachments(
     paths: Vec<String>,
     app: AppHandle,
-) -> Result<Vec<String>, AppError> {
+) -> Result<Vec<ComposerAttachmentGrant>, AppError> {
     let mut allowed = Vec::new();
     for path in paths {
         let input = PathBuf::from(&path);
@@ -391,9 +476,29 @@ pub async fn allow_composer_attachments(
         app.asset_protocol_scope()
             .allow_file(canonical.to_string_lossy().as_ref())
             .map_err(|error| AppError::Security(format!("Pièce jointe refusée : {error}")))?;
-        allowed.push(canonical.to_string_lossy().to_string());
+        allowed.push(ComposerAttachmentGrant {
+            path: canonical.to_string_lossy().to_string(),
+            is_directory: metadata.is_dir(),
+        });
     }
     Ok(allowed)
+}
+
+#[tauri::command]
+pub async fn read_clipboard_attachment_paths() -> Result<Vec<String>, AppError> {
+    Ok(crate::macos_clipboard::read_clipboard_file_paths())
+}
+
+#[tauri::command]
+pub async fn write_clipboard_attachment_image(
+    bytes: Vec<u8>,
+    mime: String,
+    app: AppHandle,
+) -> Result<String, AppError> {
+    crate::macos_clipboard::write_clipboard_image(
+        &app,
+        crate::macos_clipboard::ClipboardImageInput { bytes, mime },
+    )
 }
 
 #[tauri::command]
@@ -724,6 +829,7 @@ fn classify_extension(extension: &str) -> (&'static str, &'static str) {
         "svg" => ("html", "image/svg+xml"),
         "heic" => ("image", "image/heic"),
         "pdf" => ("pdf", "application/pdf"),
+        "tex" | "bib" | "sty" | "cls" => ("text", "text/plain"),
         "mp4" | "mov" | "m4v" | "webm" => ("video", "video/mp4"),
         "mp3" | "m4a" | "wav" | "aac" | "ogg" => ("audio", "audio/mpeg"),
         "md" | "markdown" => ("markdown", "text/markdown"),
@@ -751,6 +857,21 @@ mod tests {
         assert_eq!(classify_extension("pdf").0, "pdf");
         assert_eq!(classify_extension("svg").0, "html");
         assert_eq!(classify_extension("mmd").0, "html");
+    }
+
+    #[test]
+    fn external_html_copy_keeps_relative_assets_at_the_source_directory() {
+        let html = "<!doctype html><html><head><title>3D</title></head><body><img src='assets/grid.png'></body></html>";
+        let result = with_external_document_base(html, "file:///Users/bob/Visuals/");
+
+        assert!(result.contains("<head><base href=\"file:///Users/bob/Visuals/\">"));
+        assert!(result.contains("assets/grid.png"));
+
+        let existing = "<html><head><base href=\"https://example.test/\"></head></html>";
+        assert_eq!(
+            with_external_document_base(existing, "file:///ignored/"),
+            existing
+        );
     }
 
     #[test]

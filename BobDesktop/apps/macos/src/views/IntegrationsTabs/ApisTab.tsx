@@ -1,12 +1,15 @@
 import { ConnectionOkPastille, ConnectionTestBadge } from '../../components/Integrations/ConnectionTestBadge'
 import { AddPublicApiForm, AddApiKeyForm } from '../../components/Integrations/ConnectorForms'
-import { hasAuthHeaders, hasEnvSecrets } from '../../hooks/useMcpServers'
+import { apiServerHasSecret, hasAuthHeaders, hasEnvSecrets, isApiServer } from '../../hooks/useMcpServers'
 import { useT } from '../../i18n'
+import { deleteMcpServer } from '../../lib/ipc'
+import { useAppDialog } from '../../components/AppDialog'
 
 export function ApisTab({
   classified,
   mcpTestBusy,
   testServerMcp,
+  loadMcp,
   publicApiForm,
   setPublicApiForm,
   persistPublicApi,
@@ -21,6 +24,17 @@ export function ApisTab({
   cancelKeyedApiEdit,
 }: any) {
   const t = useT()
+  const dialog = useAppDialog()
+  const removeApi = async (name: string) => {
+    const confirmed = await dialog.confirm({
+      message: t('integrations.deleteApiConfirm', { name }),
+      confirmLabel: t('common.delete'),
+      destructive: true,
+    })
+    if (!confirmed) return
+    await deleteMcpServer(name)
+    await loadMcp()
+  }
   return (
     <div className="extension-grid integrations-mcp-grid connector-apis-grid">
       {(classified.publicApis.length > 0 || classified.keyedApis.length > 0) && (
@@ -42,10 +56,11 @@ export function ApisTab({
                   >
                     {mcpTestBusy === server.name ? '…' : t('common.test')}
                   </button>
-                  <button className="link-btn" onClick={() => hasAuthHeaders(server) || hasEnvSecrets(server) ? editKeyedApi(server) : editPublicApi(server)}>
+                  <button className="link-btn" onClick={() => (isApiServer(server) ? apiServerHasSecret(server) : hasAuthHeaders(server) || hasEnvSecrets(server)) ? editKeyedApi(server) : editPublicApi(server)}>
                     {t('common.edit')}
                   </button>
-                  <code>{server.transport}{(hasAuthHeaders(server) || hasEnvSecrets(server)) ? ' · auth' : ''}</code>
+                  <button className="danger-link" aria-label={t('integrations.deleteApiLabel', { name: server.name })} onClick={() => void removeApi(server.name)}>{t('common.delete')}</button>
+                  <code>{isApiServer(server) ? 'REST API' : server.transport}{(isApiServer(server) ? apiServerHasSecret(server) : hasAuthHeaders(server) || hasEnvSecrets(server)) ? ' · auth' : ''}</code>
                 </div>
               </div>
             ))}
@@ -78,6 +93,7 @@ export function ApisTab({
                     {mcpTestBusy === server.name ? '…' : t('common.test')}
                   </button>
                   <button className="link-btn" onClick={() => editPublicApi(server)}>{t('common.edit')}</button>
+                  <button className="danger-link" aria-label={t('integrations.deleteApiLabel', { name: server.name })} onClick={() => void removeApi(server.name)}>{t('common.delete')}</button>
                   <code>{server.transport}</code>
                 </div>
               </div>

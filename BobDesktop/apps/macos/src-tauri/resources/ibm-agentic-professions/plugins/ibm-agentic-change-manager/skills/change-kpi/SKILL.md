@@ -1,44 +1,52 @@
 ---
 name: change-kpi
-description: "Mesurer préparation, adoption, maîtrise et résultats du changement."
+description: "Measure change readiness, adoption, proficiency, and outcomes."
 icon: change
 ---
 
 # change-kpi
 
-Utiliser ce skill pour mesurer préparation, adoption, maîtrise et résultats du changement.
+Use this skill to measure change readiness, adoption, proficiency, and outcomes.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly labeled assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Construire une chaîne activité → compréhension → comportement → résultat.
-2. Définir formules, segments, baseline, cible et sources.
-3. Ajouter guardrails sur charge, équité, qualité et contournements.
-4. Fixer cadence, propriétaire et décision associée à chaque seuil.
+1. Build a chain: activity → understanding → behavior → outcome.
+2. Define formulas, segments, baseline, target, and sources.
+3. Add guardrails on workload, equity, quality, and workarounds.
+4. Set cadence, owner, and decision tied to each threshold.
 
-## Livrable
+## Deliverable
 
-Scorecard changement et dictionnaire KPI.
+Change scorecard and KPI dictionary.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Séparer leading et lagging indicators.
-- Les métriques ne pénalisent pas la remontée de problèmes.
-- Les bénéfices métier restent reliés à l’adoption.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- Separate leading and lagging indicators.
+- Metrics do not penalize reporting problems.
+- Business benefits remain linked to adoption.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the skill file in English.
+- Write the entire output in the same language as the user's prompt.
+- When ambiguous, use the prompt's main request sentence language.
+- Never mix languages unless user requests bilingual output.
+- Keep official framework names; add brief translation in parentheses when helpful.
+
+## References
+
+See ../../references/sources.md for official sources and ../../references/deliverable-contract.md for the shared deliverable contract. Proprietary frameworks cited serve as references; do not reproduce protected materials.

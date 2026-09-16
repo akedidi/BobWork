@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useContextDraftStore } from '../../stores/contextDraftStore'
 import { useNavigate } from 'react-router-dom'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   allowComposerAttachments,
@@ -17,18 +19,21 @@ import {
   getSkills,
   listBobSlashCommands,
   openMacosPrivacyPane,
+  readClipboardAttachmentPaths,
   requestVoiceDictationPermission,
   startNativeAudioRecording,
   stopNativeAudioRecording,
+  writeClipboardAttachmentImage,
   type IntegrationConnectionStatus,
 } from '../../lib/ipc'
 import type { BobMode, BobSlashCommand, DbConnection, McpServer, Plugin, Project, WorkspaceSkill } from '@bob-work/shared-types'
 import { isBuiltinPlugin, isBuiltinSkill, sortPluginsForDisplay, sortSkillsForDisplay } from '../../lib/builtinCatalog'
+import { pluginMentionId } from '../../lib/pluginUtils'
 import { engineMeta } from '../../lib/dbEngines'
-import { CATALOG } from '../../views/IntegrationsTabs/catalogData'
+import { CATALOG, isIntegrationVisibleById } from '../../views/IntegrationsTabs/catalogData'
 import { PluginIcon, resolveSkillIcon, resolveIntegrationIcon, resolvePluginIcon } from '../PluginIcon'
 import AttachmentPreview from './AttachmentPreview'
-import { mergeAttachmentPaths, getSuggestedBuiltinPluginId, getActiveComposerMentions, removeComposerMention } from './composerAttachments'
+import { mergeAttachmentPaths, getActiveComposerMentions, normalizeComposerCapabilityMentions, removeComposerMention, clipboardLooksLikeAttachments, collectPasteAttachmentPaths, type ComposerAttachment, type ComposerMentionCatalog } from './composerAttachments'
 import { errorMessage } from '../../lib/errorMessage'
 import {
   applyAutocompleteInsert,
@@ -40,6 +45,12 @@ import {
 } from '../../lib/promptAutocomplete'
 import { useT } from '../../i18n'
 import { useAppDialog } from '../AppDialog'
+import { isApiServer } from '../../hooks/useMcpServers'
+import { isPluginManagedMcp } from '../../lib/mcpVisibility'
+import ComposerPermissionsMenu from './ComposerPermissionsMenu'
+import { forbiddenTaskPermissionIds, getVisibleTaskPermissions } from '../../lib/taskPermissions'
+import { useTaskPermissionStore } from '../../stores/taskPermissionStore'
+import { useAppStore } from '../../stores/appStore'
 
 type SpeechRecognitionLike = {
   lang: string
@@ -64,7 +75,11 @@ const INTEGRATION_PICKER = [
   { id: 'outlook-calendar', skillSlug: 'bob-work-outlook-calendar', mcpName: 'bob-work-microsoft' },
   { id: 'onedrive', skillSlug: 'bob-work-onedrive', mcpName: 'bob-work-microsoft' },
   { id: 'onenote', skillSlug: 'bob-work-microsoft-onenote', mcpName: 'bob-work-microsoft' },
-] as const
+].filter(integration => isIntegrationVisibleById(integration.id)) as Array<{
+  id: string
+  skillSlug: string
+  mcpName: string
+}>
 
 const COMPOSER_MIN_TEXTAREA_HEIGHT = 52
 const COMPOSER_MAX_TEXTAREA_HEIGHT = 240
@@ -107,37 +122,58 @@ type McpPickerItem = {
   description: string
   icon: string
   insert: string
-  kind: 'integration' | 'mcp'
+  kind: 'integration' | 'api' | 'mcp'
+}
+
+export interface ComposerDraftRequest {
+  key: string
+  text: string
+  mode?: string
+  attachmentPaths?: string[]
+  projectId?: string
 }
 
 interface Props {
   placeholder?: string
   showProjectPill?: boolean
   showModePill?: boolean
+  showPermissionsPill?: boolean
   onSend?: (text: string, mode: string, attachmentPaths: string[], projectId?: string) => void
   onStop?: () => void
   disabled?: boolean
   busy?: boolean
   queueCount?: number
+  /** When true, Enter/Send updates a queued prompt instead of enqueueing/sending. */
+  queueEditActive?: boolean
+  /** Bump to force a clean remount of the right toolbar (WKWebView paint bugs). */
+  toolbarEpoch?: string | number
+  draftRequest?: ComposerDraftRequest | null
   initialProjectId?: string
+  initialMode?: string
+  onProjectChange?: (projectId?: string) => void
+  onModeChange?: (mode: string) => void
   focusRequestKey?: string
 }
 
 const BUILTIN_MODES: BobMode[] = [
-  { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: [], builtin: true, source: 'fallback' },
+  { slug: 'agent', name: 'Agent', description: 'Exécuter une tâche', groups: ['read', 'edit', 'execute', 'mcp', 'skill', 'todo', 'subtask', 'subagent', 'mode'], builtin: true, source: 'fallback' },
   { slug: 'plan', name: 'Plan', description: 'Préparer un plan', groups: [], builtin: true, source: 'fallback' },
   { slug: 'ask', name: 'Ask', description: 'Répondre sans modifier', groups: [], builtin: true, source: 'fallback' },
 ]
 
 async function registerAttachmentPaths(
   incoming: string[],
-  setAttachments: React.Dispatch<React.SetStateAction<string[]>>,
+  setAttachments: React.Dispatch<React.SetStateAction<ComposerAttachment[]>>,
 ) {
   if (incoming.length === 0) return
   try {
     const allowed = await allowComposerAttachments(incoming)
     if (allowed.length === 0) return
-    setAttachments(prev => mergeAttachmentPaths(prev, allowed))
+    const items: ComposerAttachment[] = allowed.map(grant => ({
+      path: grant.path,
+      isDirectory: grant.isDirectory,
+    }))
+    setAttachments(prev => mergeAttachmentPaths(prev, items))
   } catch {
     // Ignore rejected paths (sensitive locations, missing files, etc.)
   }
@@ -153,14 +189,19 @@ function formatRecordingDuration(totalSeconds: number) {
 }
 
 export default function Composer({
-  placeholder, showProjectPill, showModePill,
-  onSend, onStop, disabled, busy = false, queueCount = 0, initialProjectId, focusRequestKey,
+  placeholder, showProjectPill, showModePill, showPermissionsPill = true,
+  onSend, onStop, disabled, busy = false, queueCount = 0, queueEditActive = false,
+  toolbarEpoch, draftRequest, initialProjectId, initialMode, onProjectChange, onModeChange, focusRequestKey,
 }: Props) {
   const t = useT()
   const dialog = useAppDialog()
   const resolvedPlaceholder = placeholder ?? t('composer.placeholder')
   const [text, setText] = useState('')
-  const [mode, setMode] = useState('agent')
+  useEffect(() => {
+    useContextDraftStore.setState({ text })
+    return () => { useContextDraftStore.setState({ text: '' }) }
+  }, [text])
+  const [mode, setMode] = useState(initialMode ?? 'agent')
   const [modes, setModes] = useState<BobMode[]>(BUILTIN_MODES)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setProjectId] = useState<string | undefined>(initialProjectId)
@@ -173,12 +214,15 @@ export default function Composer({
   const [slashCommands, setSlashCommands] = useState<BobSlashCommand[]>([])
   const [autocompleteIndex, setAutocompleteIndex] = useState(0)
   const [autocompleteDismissed, setAutocompleteDismissed] = useState<string | null>(null)
-  const [attachments, setAttachments] = useState<string[]>([])
+  const [caretIndex, setCaretIndex] = useState(0)
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [attachMenu, setAttachMenu] = useState(false)
   const [attachSearch, setAttachSearch] = useState('')
   const [modeMenu, setModeMenu] = useState(false)
   const [modeSearch, setModeSearch] = useState('')
+  const [permissionsMenu, setPermissionsMenu] = useState(false)
   const [projectMenu, setProjectMenu] = useState(false)
+  const [runtimeSettings, setRuntimeSettings] = useState({ mcpEnabled: true, subagentsEnabled: true })
   const [listening, setListening] = useState(false)
   const [dictationBusy, setDictationBusy] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -191,12 +235,16 @@ export default function Composer({
   const attachSearchRef = useRef<HTMLInputElement>(null)
   const projectButtonRef = useRef<HTMLButtonElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
+  const permissionsButtonRef = useRef<HTMLButtonElement>(null)
+  const applyVisiblePermissions = useTaskPermissionStore(state => state.applyVisiblePermissions)
   const recordingRef = useRef(false)
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const recordingActionRef = useRef(false)
   const recordingStartedAtRef = useRef(0)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const navigate = useNavigate()
+  const bobStatus = useAppStore(state => state.bobStatus)
+  const apiKeyRequired = bobStatus === 'unauthenticated'
   const [isDragging, setIsDragging] = useState(false)
   const dragDepthRef = useRef(0)
 
@@ -205,9 +253,47 @@ export default function Composer({
   }, [initialProjectId])
 
   useEffect(() => {
+    setMode(initialMode ?? 'agent')
+    setModeMenu(false)
+    setModeSearch('')
+  }, [initialMode])
+
+  useEffect(() => {
     if (!focusRequestKey || disabled) return
     taRef.current?.focus()
   }, [disabled, focusRequestKey])
+
+  useEffect(() => {
+    if (!draftRequest) return
+    setText(draftRequest.text)
+    if (draftRequest.mode) {
+      setMode(draftRequest.mode)
+      onModeChange?.(draftRequest.mode)
+    }
+    if (draftRequest.projectId !== undefined) {
+      setProjectId(draftRequest.projectId)
+      onProjectChange?.(draftRequest.projectId)
+    }
+    setAttachments([])
+    setAttachMenu(false)
+    setProjectMenu(false)
+    setModeMenu(false)
+    setPermissionsMenu(false)
+    setAttachSearch('')
+    setModeSearch('')
+    if (draftRequest.attachmentPaths?.length) {
+      void registerAttachmentPaths(draftRequest.attachmentPaths, setAttachments)
+    }
+    window.requestAnimationFrame(() => {
+      const ta = taRef.current
+      if (!ta) return
+      ta.focus()
+      const end = draftRequest.text.length
+      ta.setSelectionRange(end, end)
+    })
+  // Intentionally keyed by draftRequest.key only — callers bump key to reload.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftRequest?.key])
 
   useLayoutEffect(() => {
     if (!attachMenu) return
@@ -301,20 +387,19 @@ export default function Composer({
     })
   }, [])
 
-  const suggestPluginForPaths = useCallback((paths: string[]) => {
-    const pluginIds = Array.from(new Set(
-      paths.map(getSuggestedBuiltinPluginId).filter((id): id is string => Boolean(id)),
-    ))
-    if (pluginIds.length !== 1) return
-    const pluginId = pluginIds[0]
-    if (!plugins.some(item => item.id === pluginId)) return
-    insertPluginMention(pluginId)
-  }, [insertPluginMention, plugins])
-
   const addAttachmentPaths = useCallback((paths: string[]) => {
+    // Attachments stay plain files — never auto-insert @plugin mentions.
     void registerAttachmentPaths(paths, setAttachments)
-    suggestPluginForPaths(paths)
-  }, [suggestPluginForPaths])
+  }, [])
+
+  const pasteClipboardAttachments = useCallback(async (clipboardData: DataTransfer | null) => {
+    const unique = await collectPasteAttachmentPaths(clipboardData, {
+      readClipboardPaths: readClipboardAttachmentPaths,
+      writeImage: writeClipboardAttachmentImage,
+    })
+    if (unique.length > 0) addAttachmentPaths(unique)
+    return unique.length > 0
+  }, [addAttachmentPaths])
 
   useEffect(() => {
     let cancelled = false
@@ -329,7 +414,9 @@ export default function Composer({
         } else if (payload.type === 'drop') {
           setIsDragging(false)
           dragDepthRef.current = 0
-          addAttachmentPaths(payload.paths)
+          // Window-level Tauri drops only attach when this composer is mounted
+          // (home / chat). Ignore empty path lists from cancelled OS drops.
+          if (payload.paths.length > 0) addAttachmentPaths(payload.paths)
         } else {
           setIsDragging(false)
           dragDepthRef.current = 0
@@ -362,7 +449,15 @@ export default function Composer({
       ]).then(([detectedModes, detectedProjects, settings, skillsResult, pluginsResult]) => {
         if (detectedModes.length) setModes(detectedModes)
         setProjects(detectedProjects.filter(project => !project.archived))
-        if (settings?.defaultMode) setMode(current => current === 'agent' ? settings.defaultMode : current)
+        if (settings?.defaultMode && initialMode === undefined) {
+          setMode(current => current === 'agent' ? settings.defaultMode : current)
+        }
+        if (settings) {
+          setRuntimeSettings({
+            mcpEnabled: settings.mcpEnabled,
+            subagentsEnabled: settings.subagentsEnabled,
+          })
+        }
         const errors: string[] = []
         if (skillsResult.ok) {
           setSkills(skillsResult.items.filter(skill => skill.enabled))
@@ -383,7 +478,16 @@ export default function Composer({
     refreshMcpIntegrations()
     const onModes = () => { void getBobModes().then(items => { if (items.length) setModes(items) }).catch(() => {}) }
     window.addEventListener('bob-modes-updated', onModes)
-    return () => window.removeEventListener('bob-modes-updated', onModes)
+    let unlistenPlugins: (() => void) | undefined
+    void listen<number>('plugins-refreshed', () => {
+      void getPlugins()
+        .then(items => setPlugins(items.filter(plugin => plugin.installState === 'installed')))
+        .catch(() => {})
+    }).then(fn => { unlistenPlugins = fn }).catch(() => {})
+    return () => {
+      window.removeEventListener('bob-modes-updated', onModes)
+      unlistenPlugins?.()
+    }
   }, [refreshMcpIntegrations])
 
   useEffect(() => {
@@ -421,6 +525,7 @@ export default function Composer({
     setProjectMenu(false)
     setModeMenu(false)
     setModeSearch('')
+    setPermissionsMenu(false)
   }, [])
 
   useEffect(() => {
@@ -441,22 +546,30 @@ export default function Composer({
     }
   }, [closeMenus])
 
-  const toggleMenu = (target: 'attach' | 'project' | 'mode') => {
-    const shouldOpen = target === 'attach' ? !attachMenu : target === 'project' ? !projectMenu : !modeMenu
+  const toggleMenu = (target: 'attach' | 'project' | 'mode' | 'permissions') => {
+    const shouldOpen = target === 'attach'
+      ? !attachMenu
+      : target === 'project'
+        ? !projectMenu
+        : target === 'permissions'
+          ? !permissionsMenu
+          : !modeMenu
     setAttachMenu(target === 'attach' && shouldOpen)
     setProjectMenu(target === 'project' && shouldOpen)
     setModeMenu(target === 'mode' && shouldOpen)
+    setPermissionsMenu(target === 'permissions' && shouldOpen)
     if (target !== 'mode' || !shouldOpen) setModeSearch('')
     if (target !== 'attach' || !shouldOpen) setAttachSearch('')
     if (target === 'attach' && shouldOpen) refreshMcpIntegrations()
   }
 
   const handleSend = () => {
-    if (!text.trim() || disabled || recording || recordingBusy) return
+    if (!text.trim() || disabled || recording || recordingBusy || apiKeyRequired) return
+    const prompt = normalizeComposerCapabilityMentions(text, mentionCatalog)
     if (onSend) {
-      onSend(text.trim(), mode, attachments, projectId)
+      onSend(prompt, mode, attachments.map(item => item.path), projectId)
     } else {
-      navigate('/chat', { state: { initialPrompt: text.trim(), mode, attachmentPaths: attachments, projectId } })
+      navigate('/chat', { state: { initialPrompt: prompt, mode, attachmentPaths: attachments.map(item => item.path), projectId } })
     }
     setText('')
     setAttachments([])
@@ -523,7 +636,13 @@ export default function Composer({
     try {
       const availability = await getVoiceDictationAvailability()
       if (!availability.available) {
-        await dialog.alert({ message: availability.reason === 'requires_app_bundle' ? t('composer.dictationRequiresApp') : t('composer.dictationUnavailable') })
+        await dialog.alert({
+          message: availability.reason === 'requires_app_bundle'
+            ? t('composer.dictationRequiresApp')
+            : availability.reason === 'missing_usage_description'
+              ? t('composer.dictationMissingUsageDescription')
+              : t('composer.dictationUnavailable'),
+        })
         return
       }
       const permission = await requestVoiceDictationPermission()
@@ -576,6 +695,13 @@ export default function Composer({
       : plugins.filter(plugin => filter.includes(plugin.id))
     return sortPluginsForDisplay(filtered)
   }, [plugins, selectedProject?.allowedPlugins])
+  const mentionCatalog = useMemo<ComposerMentionCatalog>(() => ({
+    pluginIds: plugins.flatMap(plugin => {
+      const mentionId = pluginMentionId(plugin)
+      return mentionId === plugin.id ? [mentionId] : [mentionId, plugin.id]
+    }),
+    skillSlugs: skills.map(skill => skill.slug),
+  }), [plugins, skills])
   const mcpPickerItems = useMemo(() => {
     const connectedIds = new Set(
       integrationStatuses.filter(status => status.connected).map(status => status.integrationId),
@@ -590,7 +716,7 @@ export default function Composer({
         name: integration.id === 'outlook-calendar' ? t('integrations.outlookCalendar') : (catalog?.name ?? integration.id),
         description: catalog ? t(catalog.shortKey) : '',
         icon: resolveIntegrationIcon(integration.id),
-        insert: `@skill:${integration.skillSlug}`,
+        insert: `@integration:${integration.id}`,
         kind: 'integration',
       })
     }
@@ -600,28 +726,34 @@ export default function Composer({
         .map(integration => integration.mcpName),
     )
     for (const server of mcpServers) {
+      if (isPluginManagedMcp(server)) continue
       if (coveredMcp.has(server.name)) continue
       if (integrationFilter.length > 0 && !integrationFilter.includes(`mcp:${server.name}`)) continue
+      if ((server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_CREDENTIAL_ONLY === '1') continue
+      const api = isApiServer(server)
       items.push({
-        id: `mcp:${server.name}`,
+        id: `${api ? 'api' : 'mcp'}:${server.name}`,
         name: server.name,
-        description: `${server.transport} · ${server.commandOrUrl || t('composer.mcpServerFallback')}`,
+        description: api
+          ? `REST · ${String((server.raw?.env as Record<string, unknown> | undefined)?.BOB_WORK_API_BASE_URL || '')}`
+          : `${server.transport} · ${server.commandOrUrl || t('composer.mcpServerFallback')}`,
         icon: 'plugin',
-        insert: `@mcp:${server.name}`,
-        kind: 'mcp',
+        insert: `@${api ? 'api' : 'mcp'}:${server.name}`,
+        kind: api ? 'api' : 'mcp',
       })
     }
     return items
   }, [integrationFilter, integrationStatuses, mcpServers, t])
-  const mention = text.match(/(?:^|\s)@([\w-]*)$/)?.[1]?.toLowerCase()
+
+  const autocompleteQuery = detectAutocompleteQuery(text, caretIndex)
+  const mention = autocompleteQuery?.trigger === '@' ? autocompleteQuery.query.toLowerCase() : undefined
   const mentionItems = mention === undefined ? [] : [
-    ...allowedPlugins.map(plugin => ({ id: `plugin:${plugin.id}`, label: plugin.name, subtitle: 'Plugin', insert: `@plugin:${plugin.id} ` })),
+    ...allowedPlugins.map(plugin => ({ id: `plugin:${pluginMentionId(plugin)}`, label: plugin.name, subtitle: 'Plugin', insert: `@plugin:${pluginMentionId(plugin)} ` })),
     ...allowedSkills.map(skill => ({ id: `skill:${skill.slug}`, label: skill.name, subtitle: 'Skill', insert: `@skill:${skill.slug} ` })),
-    ...mcpPickerItems.map(item => ({ id: item.id, label: item.name, subtitle: item.kind === 'integration' ? t('composer.mcpIntegrationKind') : t('composer.mcpKind'), insert: `${item.insert} ` })),
+    ...mcpPickerItems.map(item => ({ id: item.id, label: item.name, subtitle: item.kind === 'integration' ? t('composer.integrationKind') : item.kind === 'api' ? t('composer.apiKind') : t('composer.mcpKind'), insert: `${item.insert} ` })),
     ...dbConnections.map(item => ({ id: `db:${item.name}`, label: item.name, subtitle: 'DB', insert: `@db:${item.name} ` })),
   ].filter(item => item.label.toLowerCase().includes(mention) || item.id.toLowerCase().includes(mention)).slice(0, 8)
 
-  const autocompleteQuery = detectAutocompleteQuery(text)
   const autocompleteItems: PromptAutocompleteItem[] = useMemo(() => {
     if (!autocompleteQuery) return []
     if (autocompleteQuery.trigger === '/') {
@@ -640,18 +772,22 @@ export default function Composer({
     setAutocompleteIndex(0)
   }, [autocompleteQuery?.trigger, autocompleteQuery?.query, autocompleteItems.length])
 
-  const visibleAutocompleteItems = autocompleteDismissed === text ? [] : autocompleteItems
+  const visibleAutocompleteItems = autocompleteDismissed === `${text}:${caretIndex}` ? [] : autocompleteItems
 
   const insertAutocomplete = (item: PromptAutocompleteItem) => {
-    const query = detectAutocompleteQuery(text)
+    const query = detectAutocompleteQuery(text, caretIndex)
     if (!query) return
+    const nextCaretIndex = query.startIndex + item.insert.length
     setAutocompleteDismissed(null)
     setText(applyAutocompleteInsert(text, query, item.insert))
-    taRef.current?.focus()
+    setCaretIndex(nextCaretIndex)
+    window.requestAnimationFrame(() => {
+      taRef.current?.focus()
+      taRef.current?.setSelectionRange(nextCaretIndex, nextCaretIndex)
+    })
   }
-
   const selectPlugin = (plugin: Plugin) => {
-    insertPluginMention(plugin.id)
+    insertPluginMention(pluginMentionId(plugin))
     setAttachMenu(false)
     setAttachSearch('')
   }
@@ -684,12 +820,28 @@ export default function Composer({
     return allowedPlugins.filter(plugin => `${plugin.name} ${plugin.description ?? ''}`.toLocaleLowerCase().includes(attachQuery))
   }, [allowedPlugins, attachQuery])
 
+  const apiPickerItems = useMemo(
+    () => mcpPickerItems.filter(item => item.kind === 'api'),
+    [mcpPickerItems],
+  )
+  const integrationMcpPickerItems = useMemo(
+    () => mcpPickerItems.filter(item => item.kind !== 'api'),
+    [mcpPickerItems],
+  )
+
   const visibleMcpItems = useMemo(() => {
-    if (!attachQuery) return mcpPickerItems
-    return mcpPickerItems.filter(item =>
+    if (!attachQuery) return integrationMcpPickerItems
+    return integrationMcpPickerItems.filter(item =>
       `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(attachQuery),
     )
-  }, [attachQuery, mcpPickerItems])
+  }, [attachQuery, integrationMcpPickerItems])
+
+  const visibleApiItems = useMemo(() => {
+    if (!attachQuery) return apiPickerItems
+    return apiPickerItems.filter(item =>
+      `${item.name} ${item.description} ${item.insert}`.toLocaleLowerCase().includes(attachQuery),
+    )
+  }, [apiPickerItems, attachQuery])
 
   const visibleDbItems = useMemo(() => {
     if (!attachQuery) return dbConnections
@@ -704,24 +856,37 @@ export default function Composer({
     return modes.filter(item => item.name.toLowerCase().includes(query) || item.slug.includes(query) || item.description?.toLowerCase().includes(query))
   }, [modeSearch, modes])
   const selectedMode = modes.find(item => item.slug === mode) ?? BUILTIN_MODES[0]
+  const visiblePermissionIds = useMemo(
+    () => getVisibleTaskPermissions(
+      selectedMode,
+      forbiddenTaskPermissionIds(runtimeSettings),
+    ).map(permission => permission.id),
+    [runtimeSettings, selectedMode],
+  )
+
+  useEffect(() => {
+    applyVisiblePermissions(visiblePermissionIds)
+  }, [applyVisiblePermissions, visiblePermissionIds])
+
   const mentionChips = useMemo(() => {
     type Chip = {
       key: string
-      kind: 'plugin' | 'skill' | 'mcp' | 'db'
+      kind: 'plugin' | 'skill' | 'integration' | 'api' | 'mcp' | 'db'
       id: string
       name: string
       subtitle: string
       icon: string
     }
     const chips: Chip[] = []
-    for (const mention of getActiveComposerMentions(text)) {
+    for (const mention of getActiveComposerMentions(text, mentionCatalog)) {
       if (mention.kind === 'plugin') {
-        const plugin = plugins.find(item => item.id === mention.id)
+        const plugin = plugins.find(item => item.id === mention.id || pluginMentionId(item) === mention.id)
         if (!plugin) continue
+        const mentionId = pluginMentionId(plugin)
         chips.push({
           key: `plugin:${plugin.id}`,
           kind: 'plugin',
-          id: plugin.id,
+          id: mentionId,
           name: plugin.name,
           subtitle: plugin.manifest && typeof plugin.manifest === 'object' && 'specializedMode' in (plugin.manifest as object)
             ? t('composer.workMode')
@@ -755,6 +920,31 @@ export default function Composer({
         })
         continue
       }
+      if (mention.kind === 'integration') {
+        const integration = mcpPickerItems.find(item => item.id === `integration:${mention.id}`)
+        if (!integration) continue
+        chips.push({
+          key: `integration:${mention.id}`,
+          kind: 'integration',
+          id: mention.id,
+          name: integration.name,
+          subtitle: t('composer.integrationKind'),
+          icon: integration.icon,
+        })
+        continue
+      }
+      if (mention.kind === 'api') {
+        const api = mcpPickerItems.find(item => item.id === `api:${mention.id}`)
+        chips.push({
+          key: `api:${mention.id}`,
+          kind: 'api',
+          id: mention.id,
+          name: api?.name ?? mention.id,
+          subtitle: t('composer.apiKind'),
+          icon: api?.icon ?? 'plugin',
+        })
+        continue
+      }
       if (mention.kind === 'db') {
         const connection = dbConnections.find(item => item.name === mention.id)
         chips.push({
@@ -778,9 +968,9 @@ export default function Composer({
       })
     }
     return chips
-  }, [dbConnections, mcpPickerItems, plugins, skills, text])
+  }, [dbConnections, mcpPickerItems, mentionCatalog, plugins, skills, t, text])
 
-  const removeMentionChip = (kind: 'plugin' | 'skill' | 'mcp' | 'db', id: string) => {
+  const removeMentionChip = (kind: 'plugin' | 'skill' | 'integration' | 'api' | 'mcp' | 'db', id: string) => {
     setText(current => removeComposerMention(current, kind, id))
     taRef.current?.focus()
   }
@@ -863,11 +1053,18 @@ export default function Composer({
           </div>
         )}
         {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map(path => (
-              <AttachmentPreview key={path} path={path} onRemove={() => setAttachments(items => items.filter(item => item !== path))} />
-            ))}
-          </div>
+          <>
+            <div className="composer-attachments">
+              {attachments.map(item => (
+                <AttachmentPreview
+                  key={item.path}
+                  path={item.path}
+                  isDirectory={item.isDirectory}
+                  onRemove={() => setAttachments(items => items.filter(entry => entry.path !== item.path))}
+                />
+              ))}
+            </div>
+          </>
         )}
         {recordingError && <p className="composer-recording-error" role="alert">{recordingError}</p>}
 
@@ -878,9 +1075,27 @@ export default function Composer({
           value={text}
           rows={1}
           disabled={disabled}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
           onChange={event => {
             setAutocompleteDismissed(null)
             setText(event.target.value)
+            setCaretIndex(event.target.selectionStart ?? event.target.value.length)
+          }}
+          onSelect={event => setCaretIndex(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
+          onPaste={event => {
+            const data = event.clipboardData
+            if (clipboardLooksLikeAttachments(data)) {
+              event.preventDefault()
+              void pasteClipboardAttachments(data)
+              return
+            }
+            // Finder copies may omit web MIME types — attach without blocking text paste.
+            void readClipboardAttachmentPaths()
+              .then(paths => { if (paths.length) addAttachmentPaths(paths) })
+              .catch(() => undefined)
           }}
           onKeyDown={event => {
             if (visibleAutocompleteItems.length > 0) {
@@ -903,7 +1118,7 @@ export default function Composer({
               if (event.key === 'Escape') {
                 event.preventDefault()
                 event.stopPropagation()
-                setAutocompleteDismissed(text)
+                setAutocompleteDismissed(`${text}:${caretIndex}`)
                 return
               }
             }
@@ -915,6 +1130,7 @@ export default function Composer({
         />
 
         <div className="composer-toolbar">
+          <div className="composer-toolbar-start">
           <div>
             <button ref={attachButtonRef} className="icon-btn" title={t('composer.attachFileOrFolder')} aria-haspopup="menu" aria-expanded={attachMenu} onClick={() => toggleMenu('attach')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -1003,7 +1219,7 @@ export default function Composer({
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/skills') }}>{t('composer.manageSkills')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.mcpIntegrations')}</div>
-                  {mcpPickerItems.length > 0 ? (
+                  {integrationMcpPickerItems.length > 0 ? (
                     <div className="attach-plugin-list">
                       {visibleMcpItems.length > 0 ? visibleMcpItems.map(item => (
                         <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
@@ -1012,6 +1228,9 @@ export default function Composer({
                           </span>
                           <span className="attach-plugin-copy">
                             <span className="attach-plugin-title">
+                              <span className={`catalog-kind-badge catalog-kind-badge--${item.kind}`}>
+                                {item.kind === 'integration' ? t('composer.integrationKind') : t('composer.mcpKind')}
+                              </span>
                               <strong>{item.name}</strong>
                             </span>
                             <small>{item.kind === 'integration' ? t('composer.connectorLine', { description: item.description }) : item.description}</small>
@@ -1022,6 +1241,25 @@ export default function Composer({
                     </div>
                   ) : <p className="composer-popover-empty">{selectedProject ? t('composer.noMcpConnectedForProject') : t('composer.noMcpConnected')}</p>}
                   <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations') }}>{t('composer.manageIntegrations')}</button>
+                  <div className="composer-popover-separator" />
+                  <div className="composer-popover-title">{t('composer.apis')}</div>
+                  {apiPickerItems.length > 0 ? (
+                    <div className="attach-plugin-list">
+                      {visibleApiItems.length > 0 ? visibleApiItems.map(item => (
+                        <button type="button" className="composer-popover-row attach-plugin-row" key={item.id} onClick={() => selectMcpItem(item)}>
+                          <span className="attach-row-icon">
+                            <PluginIcon icon={item.icon} size="sm" className="attach-plugin-icon" />
+                          </span>
+                          <span className="attach-plugin-copy">
+                            <span className="attach-plugin-title"><strong>{item.name}</strong></span>
+                            <small>{item.description}</small>
+                          </span>
+                          <span className="attach-row-action" aria-hidden="true">+</span>
+                        </button>
+                      )) : <p className="composer-popover-empty">{t('composer.noApiMatch')}</p>}
+                    </div>
+                  ) : <p className="composer-popover-empty">{t('composer.noApis')}</p>}
+                  <button className="composer-popover-manage" onClick={() => { setAttachMenu(false); navigate('/integrations', { state: { tab: 'apis' } }) }}>{t('composer.manageApis')}</button>
                   <div className="composer-popover-separator" />
                   <div className="composer-popover-title">{t('composer.databases')}</div>
                   {dbConnections.length > 0 ? (
@@ -1092,19 +1330,52 @@ export default function Composer({
               </button>
               {projectMenu && (
                 <ComposerPopover anchorRef={projectButtonRef} ariaLabel="Choisir un projet" className="project-popover">
-                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); setProjectMenu(false) }}>
+                  <button className="composer-popover-row" onClick={() => { setProjectId(undefined); onProjectChange?.(undefined); setProjectMenu(false) }}>
                     <span className="composer-project-option"><NoProjectIcon />{t('composer.noProject')}</span>
                   </button>
-                  {projects.map(project => <button className="composer-popover-row" key={project.id} onClick={() => { setProjectId(project.id); if (project.defaultMode) setMode(project.defaultMode); setProjectMenu(false) }}>{project.name}</button>)}
+                  {projects.map(project => <button className="composer-popover-row" key={project.id} onClick={() => { setProjectId(project.id); onProjectChange?.(project.id); if (project.defaultMode) { setMode(project.defaultMode); onModeChange?.(project.defaultMode) } setProjectMenu(false) }}>{project.name}</button>)}
+                </ComposerPopover>
+              )}
+            </div>
+          )}
+          </div>
+
+          <div className="composer-toolbar-end" key={toolbarEpoch ?? 'composer-toolbar-end'}>
+          {showPermissionsPill && showModePill && (
+            <div className="composer-toolbar-control">
+              <button
+                ref={permissionsButtonRef}
+                className="composer-pill composer-permissions-pill"
+                aria-haspopup="menu"
+                aria-expanded={permissionsMenu}
+                aria-label={t('composer.permissions.title')}
+                onClick={() => toggleMenu('permissions')}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                  <path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z" />
+                </svg>
+                {t('composer.permissions.pill')}
+                <span aria-hidden="true">⌄</span>
+              </button>
+              {permissionsMenu && (
+                <ComposerPopover
+                  anchorRef={permissionsButtonRef}
+                  align="end"
+                  ariaLabel={t('composer.permissions.title')}
+                  className="permissions-popover-shell"
+                >
+                  <ComposerPermissionsMenu
+                    selectedMode={selectedMode}
+                    mcpEnabled={runtimeSettings.mcpEnabled}
+                    subagentsEnabled={runtimeSettings.subagentsEnabled}
+                  />
                 </ComposerPopover>
               )}
             </div>
           )}
 
-          <div style={{ flex: 1 }} />
-
           {showModePill && (
-            <div>
+            <div className="composer-toolbar-control">
               <button ref={modeButtonRef} className="composer-pill" aria-label={`Mode Bob : ${selectedMode.name}`} aria-haspopup="menu" aria-expanded={modeMenu} onClick={() => toggleMenu('mode')}>{selectedMode.name}<span aria-hidden="true">⌄</span></button>
               {modeMenu && (
                 <ComposerPopover anchorRef={modeButtonRef} align="end" ariaLabel="Modes Bob" className="mode-popover">
@@ -1112,7 +1383,7 @@ export default function Composer({
                   <input autoFocus value={modeSearch} onChange={event => setModeSearch(event.target.value)} placeholder={t('composer.searchMode')} className="popover-search" />
                   <div className="mode-popover-list">
                     {filteredModes.map(item => (
-                      <button className={`composer-popover-row mode-row ${item.slug === mode ? 'selected' : ''}`} key={item.slug} onClick={() => { setMode(item.slug); setModeMenu(false); setModeSearch('') }}>
+                      <button className={`composer-popover-row mode-row ${item.slug === mode ? 'selected' : ''}`} key={item.slug} onClick={() => { setMode(item.slug); onModeChange?.(item.slug); setModeMenu(false); setModeSearch('') }}>
                         <span><strong>{item.name}</strong><small>{item.description ?? item.slug}</small></span>
                         {item.slug === mode && <span>✓</span>}
                       </button>
@@ -1127,20 +1398,47 @@ export default function Composer({
             <button className="composer-stop-btn" onClick={onStop} title={t('composer.stopActive')} aria-label={t('composer.stopActive')}><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
           )}
           <button
-            className={`send-btn ${busy ? 'queue-send-btn' : ''}`}
-            disabled={!text.trim() || !!disabled || recording || recordingBusy}
+            className={`send-btn ${busy && !queueEditActive ? 'queue-send-btn' : ''}`}
+            disabled={!text.trim() || !!disabled || recording || recordingBusy || apiKeyRequired}
             onClick={handleSend}
-            title={busy ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}` : 'Envoyer'}
-            aria-label={busy ? 'Ajouter le prompt à la file' : t('composer.send')}
+            title={
+              queueEditActive
+                ? t('composer.updateQueuedPrompt')
+                : busy
+                  ? `Ajouter à la file${queueCount ? ` (${queueCount} en attente)` : ''}`
+                  : 'Envoyer'
+            }
+            aria-label={
+              queueEditActive
+                ? t('composer.updateQueuedPrompt')
+                : busy
+                  ? 'Ajouter le prompt à la file'
+                  : t('composer.send')
+            }
           >
-            {busy ? (
+            {queueEditActive ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            ) : busy ? (
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M4 6h10M4 12h7M4 18h5"/><path d="M17 11v8M13 15h8"/></svg>
             ) : (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             )}
           </button>
+          </div>
         </div>
       </div>
+      {apiKeyRequired && (
+        <p className="composer-auth-hint" role="alert">
+          {t('composer.apiKeyRequired')}{' '}
+          <button
+            type="button"
+            className="composer-auth-hint-link"
+            onClick={() => navigate('/settings', { state: { tab: 'bob' } })}
+          >
+            {t('composer.apiKeyRequiredLink')}
+          </button>
+        </p>
+      )}
     </div>
   )
 }

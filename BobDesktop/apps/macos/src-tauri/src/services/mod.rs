@@ -2,6 +2,7 @@
 // Bob Work - Services Module
 // ============================================================
 
+pub mod agent_locale;
 pub mod artifact;
 pub mod artifact_generator;
 pub mod artifact_runtime;
@@ -10,11 +11,14 @@ pub mod audit;
 pub mod bob;
 pub mod bob_analytics;
 pub mod bob_context;
+pub mod bob_inference;
 pub mod bob_slash_commands;
 pub mod bob_usage;
 pub mod chrome_mcp;
+pub mod cli_runtime_catalog;
 pub mod codegraph_mcp;
 pub mod computer_use_mcp;
+pub mod orca_cli;
 pub mod connection_test;
 pub mod conversation;
 pub mod data_analytics;
@@ -23,11 +27,13 @@ pub mod db_prompt;
 pub mod designer;
 pub mod integration_catalog;
 pub mod integration_mcp;
+pub mod github_ssh;
 pub mod integration_oauth;
 pub mod keychain;
 pub mod local_audio_transcription;
 pub mod map_mcp;
 pub mod mcp_gateway;
+pub mod mcp_lazy;
 pub mod meeting_recording;
 pub mod memory;
 pub mod mode;
@@ -42,6 +48,7 @@ pub mod plugin_extensions;
 pub mod plugin_local_runtime;
 pub mod plugin_mcp;
 pub mod plugin_user_resources;
+pub mod prompt_mentions;
 pub mod pptx_preview;
 pub mod project;
 pub mod qiskit;
@@ -52,3 +59,6 @@ pub mod settings;
 pub mod ssh;
 pub mod task;
 pub mod workspace;
+
+pub mod document_runtime;
+pub mod office_runtime;

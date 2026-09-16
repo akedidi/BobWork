@@ -2,7 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Bob Work uses Automation to control Google Chrome when you enable Chrome control (tabs, navigation, and page actions).</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>Bob Work utilise votre position uniquement lorsque vous l’autorisez pour rechercher des lieux proches ou calculer un itinéraire.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Bob Work utilise le microphone pour la dictée Apple et l’enregistrement vocal dans le composeur.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Bob Work utilise la reconnaissance vocale d’Apple pour transcrire votre dictée localement dans le composeur.</string>
 </dict>
 </plist>

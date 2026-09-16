@@ -2,8 +2,8 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::analytics::{BobalyticsQuery, BobalyticsReport};
 use crate::models::workspace::{
-    CreatePermissionGrantInput, McpServer, PermissionGrant, SaveMcpServerInput, SaveSkillInput,
-    SearchResult, Skill, UsageStatus,
+    CreatePermissionGrantInput, McpServer, PermissionGrant, SaveApiConnectionInput,
+    SaveMcpServerInput, SaveSkillInput, SearchResult, Skill, UsageStatus,
 };
 use crate::services::bob::BobService;
 use crate::services::bob_analytics::BobAnalyticsService;
@@ -74,6 +74,7 @@ pub async fn get_mcp_servers(db: State<'_, Database>) -> Result<Vec<McpServer>, 
 pub async fn test_mcp_server(
     name: String,
     db: State<'_, Database>,
+    bob_service: State<'_, BobService>,
 ) -> Result<crate::models::plugin::PluginMcpTestResult, AppError> {
     let workspace = WorkspaceService::new();
     let mut server = workspace
@@ -85,7 +86,109 @@ pub async fn test_mcp_server(
     if let Some(raw) = workspace.read_mcp_server_config(&name) {
         server.raw = raw;
     }
-    let mut result = crate::services::plugin_mcp::test_workspace_server(&server);
+    let integration_probe = match name.as_str() {
+        crate::services::integration_mcp::GITHUB_MCP_NAME => Some((
+            "github",
+            "github",
+            "github_list_repos",
+            serde_json::json!({ "limit": 1 }),
+        )),
+        crate::services::integration_mcp::SLACK_MCP_NAME => Some((
+            "slack",
+            "slack",
+            "slack_list_channels",
+            serde_json::json!({ "limit": 1 }),
+        )),
+        crate::services::integration_mcp::MONDAY_MCP_NAME => Some((
+            "monday",
+            "monday",
+            "monday_list_boards",
+            serde_json::json!({ "limit": 1 }),
+        )),
+        crate::services::integration_mcp::MICROSOFT_MCP_NAME => Some((
+            "microsoft",
+            "outlook-mail",
+            "graph_get_profile",
+            serde_json::json!({}),
+        )),
+        _ => None,
+    };
+    let mut result = if let Some((provider, integration_id, tool, arguments)) = integration_probe {
+        let oauth_token = crate::services::integration_oauth::IntegrationOAuthService::new()
+            .access_token_for_provider(provider);
+        let token = match oauth_token {
+            Ok(Some(token)) => Some(zeroize::Zeroizing::new(token)),
+            Ok(None) if provider != "microsoft" => {
+                bob_service.integration_access_token(integration_id)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                let message = if provider == "microsoft" {
+                    format!(
+                        "La connexion Microsoft a expiré et son renouvellement a échoué. Reconnectez le compte dans Intégrations. Détail : {error}"
+                    )
+                } else {
+                    format!("Impossible de lire ou renouveler le jeton {provider} : {error}")
+                };
+                let mut failed = crate::models::plugin::PluginMcpTestResult {
+                    id: name.clone(),
+                    name: name.clone(),
+                    ok: false,
+                    message,
+                    tools: vec![],
+                    tested_at: None,
+                };
+                failed.message = crate::security::secret_redaction::redact_config_secrets(
+                    &failed.message,
+                    &server.raw,
+                );
+                let record = crate::services::connection_test::ConnectionTestService::new()
+                    .save_mcp_test(&db, &failed)?;
+                failed.tested_at = Some(record.tested_at);
+                return Ok(failed);
+            }
+        };
+        if let Some(token) = token {
+            let object = server.raw.as_object_mut().ok_or_else(|| {
+                AppError::ValidationFailed(format!("Configuration MCP {provider} invalide."))
+            })?;
+            let env = match provider {
+                "github" => serde_json::json!({
+                    "GITHUB_TOKEN": token.as_str(),
+                    "GH_TOKEN": token.as_str(),
+                }),
+                "slack" => serde_json::json!({
+                    "SLACK_BOT_TOKEN": token.as_str(),
+                    "SLACK_ACCESS_TOKEN": token.as_str(),
+                    "SLACK_USER_TOKEN": token.as_str(),
+                }),
+                "monday" => serde_json::json!({
+                    "MONDAY_API_TOKEN": token.as_str(),
+                }),
+                "microsoft" => serde_json::json!({
+                    "MICROSOFT_GRAPH_ACCESS_TOKEN": token.as_str(),
+                }),
+                _ => serde_json::json!({}),
+            };
+            object.insert("env".into(), env);
+            crate::services::plugin_mcp::test_workspace_server_with_probe(&server, tool, &arguments)
+        } else {
+            crate::models::plugin::PluginMcpTestResult {
+                id: name.clone(),
+                name: name.clone(),
+                ok: false,
+                message: format!(
+                    "{provider} est configuré, mais aucun jeton utilisable n’est disponible dans le coffre Bob Work. Reconnectez le compte dans Intégrations."
+                ),
+                tools: vec![],
+                tested_at: None,
+            }
+        }
+    } else {
+        crate::services::plugin_mcp::test_workspace_server(&server)
+    };
+    result.message =
+        crate::security::secret_redaction::redact_config_secrets(&result.message, &server.raw);
     let record = crate::services::connection_test::ConnectionTestService::new()
         .save_mcp_test(&db, &result)?;
     result.tested_at = Some(record.tested_at);
@@ -105,6 +208,15 @@ pub async fn save_mcp_server(
     bob_service: State<'_, BobService>,
 ) -> Result<(), AppError> {
     WorkspaceService::new().save_mcp_server(&bob_path(&bob_service)?, input)
+}
+
+#[tauri::command]
+pub async fn save_api_connection(
+    input: SaveApiConnectionInput,
+    bob_service: State<'_, BobService>,
+) -> Result<(), AppError> {
+    crate::services::integration_mcp::IntegrationMcpService::new()
+        .save_api_connection(&bob_path(&bob_service)?, input)
 }
 
 #[tauri::command]

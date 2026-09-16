@@ -12,8 +12,9 @@ import { usePluginsData, usePluginFilter, usePluginEditor } from '../hooks/usePl
 import { useTransientStatus } from '../hooks/useTransientStatus'
 import { PluginEditorModal } from '../components/Plugins/PluginEditorModal'
 import PluginDetail from '../components/Plugins/PluginDetail'
+import { useAppDialog } from '../components/AppDialog'
 
-type PluginsLocationState = { selectPluginId?: string; openCommissioning?: boolean }
+type PluginsLocationState = { selectPluginId?: string }
 type OpenIntegrationsOpts = { tab?: string; highlight?: string; provider?: string }
 
 function Empty({ text }: { text: string }) {
@@ -43,7 +44,6 @@ function PluginListRow({
         <PluginIcon icon={resolvePluginIcon(plugin)} size="md" className="skill-row-icon" />
         <span className="skill-row-copy"><strong>{plugin.name}</strong><small>{plugin.description || 'Aucune description'}</small></span>
         <span className="skill-row-badges">
-          {plugin.availableVersion && <span className="plugin-update-badge">Mise à jour</span>}
           <span className="skill-scope-badge">{pluginKindLabel(plugin)}</span>
         </span>
       </button>
@@ -71,6 +71,7 @@ function PluginListRow({
 
 export default function PluginsView() {
   const t = useT()
+  const dialog = useAppDialog()
   const navigate = useNavigate()
   const location = useLocation()
   const locationState = (location.state ?? null) as PluginsLocationState | null
@@ -82,7 +83,7 @@ export default function PluginsView() {
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Plugin | null>(null)
-  const [status, setStatus] = useTransientStatus(3500)
+  const [status, setStatus] = useTransientStatus(3000)
   
   const { form, setForm, resetForm, startPluginChat, startPluginWizard } = usePluginEditor(setFormOpen, setEditing, setStatus)
 
@@ -167,6 +168,11 @@ export default function PluginsView() {
   }
 
   const removePlugin = async (plugin: Plugin) => {
+    if (!await dialog.confirm({
+      message: t('plugins.deleteConfirm', { name: plugin.name }),
+      confirmLabel: t('common.delete'),
+      destructive: true,
+    })) return
     try {
       await deletePlugin(plugin.id)
       setSelectedId(null)
@@ -255,7 +261,6 @@ export default function PluginsView() {
               plugin={selected}
               mcpRevision={mcpRevision}
               toggling={togglingId === selected.id}
-              openCommissioning={Boolean(locationState?.openCommissioning && locationState.selectPluginId === selected.id)}
               onClose={() => setSelectedId(null)}
               onToggle={enabled => void changeEnabled(selected, enabled)}
               onEdit={() => openEditor(selected)}
@@ -263,16 +268,6 @@ export default function PluginsView() {
               onStatus={setStatus}
               onOpenIntegrations={(opts?: OpenIntegrationsOpts) => navigate('/integrations', { state: { tab: opts?.tab ?? 'integrations', highlight: opts?.highlight ?? opts?.provider } })}
               onUseSchedule={(template: any) => navigate('/schedules', { state: { pluginTemplate: { ...template, pluginId: selected.id, pluginName: selected.name } } })}
-              onVersionChanged={async (message: string, expectedVersion?: string) => {
-                const next = await reload()
-                incrementMcpRevision()
-                const refreshed = next.find((item: Plugin) => item.id === selected.id)
-                if (expectedVersion && refreshed && refreshed.version !== expectedVersion) {
-                  setStatus(`${refreshed.name} est resté en version ${refreshed.version} (retour à ${expectedVersion} non appliqué).`)
-                  return
-                }
-                setStatus(message)
-              }}
             />
           )}
         </div>

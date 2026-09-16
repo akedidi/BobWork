@@ -1,44 +1,52 @@
 ---
 name: cloud
-description: "Choisir et structurer les services cloud selon les drivers et garde-fous."
+description: "Choose and structure cloud services according to drivers and guardrails."
 icon: architecture
 ---
 
 # cloud
 
-Utiliser ce skill pour choisir et structurer les services cloud selon les drivers et garde-fous.
+Use this skill to choose and structure cloud services according to drivers and guardrails.
 
-## Entrées minimales
+## Required inputs
 
-- objectif ou décision attendue ;
-- périmètre, audience, échéance et contraintes ;
-- sources disponibles, hypothèses et niveau de confiance ;
-- format de sortie et critères d’acceptation.
+- goal or expected decision;
+- scope, audience, deadline, and constraints;
+- available sources, assumptions, and confidence level;
+- output format and acceptance criteria.
 
-Ne bloque pas sur une information secondaire : avance avec une hypothèse explicitement marquée. Demande une clarification lorsque l’hypothèse changerait matériellement la décision, le risque ou le périmètre.
+Do not block on secondary information: proceed with an explicitly marked assumption. Ask for clarification when the assumption would materially change the decision, risk, or scope.
 
-## Méthode
+## Method
 
-1. Confirmer modèle de responsabilité, régions, contraintes et compétences.
-2. Comparer services gérés, portabilité, dépendance et exploitation.
-3. Concevoir comptes/subscriptions, réseau, identité, données et observabilité.
-4. Vérifier capacités, limites et tarifs dans les sources fournisseur actuelles.
+1. Confirm responsibility model, regions, constraints, and skills.
+2. Compare managed services, portability, dependency, and operability.
+3. Design accounts/subscriptions, network, identity, data, and observability.
+4. Verify capacity, limits, and pricing in current provider sources.
 
-## Livrable
+## Deliverable
 
-Landing-zone view, service map, décisions cloud et garde-fous.
+Landing-zone view, service map, cloud decisions, and guardrails.
 
-Inclure systématiquement : synthèse décisionnelle, faits et sources, hypothèses, limites, actions, responsables et prochaines validations lorsque ces éléments s’appliquent.
+Always include: decision summary, facts and sources, assumptions, limits, actions, owners, and next validation steps when applicable.
 
-## Contrôles qualité
+## Quality checks
 
-- Aucun service supposé disponible sans vérification récente.
-- Les limites régionales et quotas sont considérés.
-- Le choix minimise la charge opérationnelle totale.
-- Distinguer clairement fait, estimation, hypothèse et recommandation.
-- Ne jamais inventer une donnée, une référence client, une conformité ou une validation.
-- Pour une information susceptible d’avoir changé, vérifier une source primaire actuelle et noter la date de consultation.
+- No service assumed available without recent verification.
+- Regional limits and quotas are considered.
+- Choice minimizes total operational burden.
+- Distinguish clearly between fact, estimate, assumption, and recommendation.
+- Never invent data, client references, compliance claims, or validation.
+- For information that may have changed, verify a current primary source and note the consultation date.
 
-## Ressources
+## Language
 
-Consulter `../../references/sources.md` pour les sources officielles et `../../references/deliverable-contract.md` pour le protocole commun de livraison. Les cadres propriétaires cités servent de repères : ne pas reproduire leurs supports protégés.
+- Write the **skill file** in English.
+- Write the **entire output** in the same language as the user's prompt (the message that invoked this skill), including titles, section headings, labels, and table headers.
+- When the prompt language is ambiguous, use the language of the prompt's main request sentence.
+- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.
+- Keep official framework and product names; add a brief translation in parentheses when helpful.
+
+## References
+
+See `../../references/sources.md` for official sources and `../../references/deliverable-contract.md` for the shared delivery protocol. Proprietary frameworks cited serve as reference points: do not reproduce their protected materials.
