@@ -117,6 +117,11 @@ export function useSettingsData() {
       .then(info => {
         const version = info.appVersion?.trim() || null
         setAppVersion(version)
+        if (version) {
+          useUpdateStore.setState(state => (
+            state.currentVersion?.trim() ? {} : { currentVersion: version }
+          ))
+        }
         if (info.appName.trim()) setAppName(info.appName.trim())
       })
       .catch(() => setAppVersion(null))
@@ -146,11 +151,13 @@ export function useSettingsData() {
   }, [t, appName])
 
   useEffect(() => {
-    if (tab !== 'extensions' && tab !== 'permissions') return
+    if (tab !== 'permissions' && tab !== 'extensions') return
     setChromeLoading(true)
     setComputerUseLoading(true)
     setChromeError(null)
     setComputerUseError(null)
+    setOrcaCliLoading(true)
+    setOrcaCliError(null)
 
     getChromeControlStatus()
       .then(status => {
@@ -173,15 +180,6 @@ export function useSettingsData() {
         setComputerUseError(error)
       })
       .finally(() => setComputerUseLoading(false))
-
-    if (tab !== 'extensions') {
-      setComputerUseTools(null)
-      setChromeTools(null)
-      return
-    }
-
-    setOrcaCliLoading(true)
-    setOrcaCliError(null)
 
     getOrcaCliStatus()
       .then(status => {

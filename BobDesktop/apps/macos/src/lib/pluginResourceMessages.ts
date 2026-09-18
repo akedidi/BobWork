@@ -86,7 +86,9 @@ export function localizePluginResourceSetupHint(
   const map: Record<string, MessageKey> = {
     'Installez Python 3 (python.org ou `brew install python`).': 'plugins.resourceHint.installPython',
     'Install Python 3 (python.org or `brew install python`).': 'plugins.resourceHint.installPython',
+    'Activez Accès web dans Réglages → Accès & permissions.': 'plugins.resourceHint.enableWebAccess',
     'Activez Accès web dans Réglages → Accès et contrôle.': 'plugins.resourceHint.enableWebAccess',
+    'Enable Web access in Settings → Access & permissions.': 'plugins.resourceHint.enableWebAccess',
     'Enable Web access in Settings → Access & control.': 'plugins.resourceHint.enableWebAccess',
   }
   const key = map[hint.trim()]

@@ -482,7 +482,7 @@ export async function openIntegrationsCategory(category?: string) {
 }
 
 export async function prepareMacosAutomationStepForE2e() {
-  await openSettingsTab('Accès et contrôle')
+  await openSettingsTab('Accès & permissions')
   await $('button=Ouvrir Automatisation (Réglages Système)').waitForDisplayed({ timeout: 8_000 })
   await invokeTauri('open_macos_privacy_pane', { pane: 'automation' })
   await invokeTauri('e2e_ack_macos_automation')

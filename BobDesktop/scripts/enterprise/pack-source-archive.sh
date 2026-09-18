@@ -104,6 +104,12 @@ Bob Work ${VERSION} — one-click install
 The installer signs with the bundled Apple Development identity
 (kedidi.anis@gmail.com) so notifications and TCC permissions behave like
 your local builds. If Gatekeeper blocks the first launch: right-click → Open.
+
+Notes
+-----
+- The installer installs Rust with --no-modify-path (it does not edit
+  ~/.bash_profile / ~/.zshrc). That avoids Permission denied failures on
+  Macs where those files are locked by IT/MDM.
 EOF
 
 rm -rf "$STAGE"

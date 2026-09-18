@@ -259,6 +259,140 @@ impl PluginExtensionService {
             }
         }
 
+        if let Some(value) = manifest.get("workflows") {
+            let Some(workflows) = value.as_array() else {
+                errors.push("workflows must be a JSON array".into());
+                return errors;
+            };
+            if workflows.len() > 32 {
+                errors.push("A plugin cannot declare more than 32 workflows".into());
+            }
+            let mut seen_ids = std::collections::HashSet::new();
+            for workflow in workflows {
+                // Open Workflow Specification / Serverless Workflow 1.0
+                // https://open-workflow-specification.org/
+                let Some(document) = workflow.get("document").and_then(Value::as_object) else {
+                    errors.push(
+                        "Each workflow must be an Open Workflow Specification document with a `document` object".into(),
+                    );
+                    continue;
+                };
+                let id = document
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !valid_ows_name(id) {
+                    errors.push(format!("Invalid Open Workflow document.name: {}", id));
+                } else if !seen_ids.insert(id.to_string()) {
+                    errors.push(format!("Duplicate workflow document.name: {}", id));
+                }
+                let dsl = document
+                    .get("dsl")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !dsl.starts_with("1.") {
+                    errors.push(format!(
+                        "Workflow {} must use Open Workflow DSL 1.x (document.dsl), got `{}`",
+                        id, dsl
+                    ));
+                }
+                for field in ["namespace", "version"] {
+                    if document
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .is_none_or(|value| value.trim().is_empty())
+                    {
+                        errors.push(format!(
+                            "Workflow {} document needs `{}` (Open Workflow Specification)",
+                            id, field
+                        ));
+                    }
+                }
+                if let Some(namespace) = document.get("namespace").and_then(Value::as_str) {
+                    if !valid_ows_name(namespace) {
+                        errors.push(format!(
+                            "Workflow {} has an invalid document.namespace",
+                            id
+                        ));
+                    }
+                }
+                let Some(tasks) = workflow.get("do").and_then(Value::as_array) else {
+                    errors.push(format!(
+                        "Workflow {} needs a `do` task list (Open Workflow Specification)",
+                        id
+                    ));
+                    continue;
+                };
+                if tasks.is_empty() {
+                    errors.push(format!("Workflow {} `do` needs at least one task", id));
+                }
+                if tasks.len() > 32 {
+                    errors.push(format!("Workflow {} cannot declare more than 32 tasks", id));
+                }
+                let mut seen_tasks = std::collections::HashSet::new();
+                for task_item in tasks {
+                    let Some(map) = task_item.as_object() else {
+                        errors.push(format!(
+                            "Workflow {} tasks must be single-key objects",
+                            id
+                        ));
+                        continue;
+                    };
+                    if map.len() != 1 {
+                        errors.push(format!(
+                            "Workflow {} each `do` item must have exactly one task name key",
+                            id
+                        ));
+                        continue;
+                    }
+                    let (task_name, task_body) = map.iter().next().unwrap();
+                    if !valid_ows_name(task_name) {
+                        errors.push(format!(
+                            "Invalid task name `{}` in workflow {}",
+                            task_name, id
+                        ));
+                    } else if !seen_tasks.insert(task_name.clone()) {
+                        errors.push(format!(
+                            "Duplicate task name `{}` in workflow {}",
+                            task_name, id
+                        ));
+                    }
+                    if !task_body.is_object() {
+                        errors.push(format!(
+                            "Workflow {} task `{}` must be an object",
+                            id, task_name
+                        ));
+                    }
+                }
+                if let Some(schedule) = workflow.get("schedule") {
+                    let Some(schedule_obj) = schedule.as_object() else {
+                        errors.push(format!(
+                            "Workflow {} schedule must be an object (cron|every|after|on)",
+                            id
+                        ));
+                        continue;
+                    };
+                    let has_trigger = ["cron", "every", "after", "on"]
+                        .iter()
+                        .any(|key| schedule_obj.contains_key(*key));
+                    if !has_trigger {
+                        errors.push(format!(
+                            "Workflow {} schedule needs cron, every, after, or on",
+                            id
+                        ));
+                    }
+                    if let Some(cron) = schedule_obj.get("cron") {
+                        if cron.as_str().is_none_or(|value| value.trim().is_empty()) {
+                            errors.push(format!(
+                                "Workflow {} schedule.cron must be a non-empty string",
+                                id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         errors.sort();
         errors.dedup();
         errors
@@ -403,13 +537,13 @@ impl PluginExtensionService {
                         "disabled".into(),
                         match capability.as_str() {
                             "computer_use" => {
-                                "Réglages → Accès et contrôle : activez « Contrôle de l’ordinateur » (Contrôle bureau macOS) avant toute configuration MCP ou Accessibilité.".into()
+                                "Réglages → Accès & permissions : activez « Contrôle de l’ordinateur » (Contrôle bureau macOS) avant toute configuration MCP ou Accessibilité.".into()
                             }
                             "chrome" => {
-                                "Réglages → Accès et contrôle : activez « Contrôle Chrome » avant toute configuration MCP ou Automatisation.".into()
+                                "Réglages → Accès & permissions : activez « Contrôle Chrome » avant toute configuration MCP ou Automatisation.".into()
                             }
                             _ => {
-                                "Cette capacité est désactivée dans Réglages → Accès et contrôle.".into()
+                                "Cette capacité est désactivée dans Réglages → Accès & permissions.".into()
                             }
                         },
                     )
@@ -725,7 +859,7 @@ impl PluginExtensionService {
                         (
                             "inactive".into(),
                             "Web access disabled.".into(),
-                            Some("Enable Web access in Settings → Access & control.".into()),
+                            Some("Enable Web access in Settings → Access & permissions.".into()),
                         )
                     } else {
                         (
@@ -1186,6 +1320,20 @@ fn valid_slug(value: &str) -> bool {
         && !value.contains("--")
 }
 
+/// Open Workflow Specification document/task identifiers (namespace, name, task keys).
+fn valid_ows_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+        })
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+}
+
 fn friendly_name(provider: &str) -> String {
     provider
         .split('-')
@@ -1366,9 +1514,76 @@ mod tests {
             "integrations": [{"provider":"cloud-account","authType":"oauth","mcpServer":"cloud","scopes":["read"]}],
             "browserExtensions": [{"id":"cloud-console","displayName":"Console cloud","capability":"computer_use","mcpServer":"cloud"}],
             "hooks": [{"id":"prepare","displayName":"Préparer le contexte","event":"before_task","entrypoint":"prepare"}],
-            "scheduledTaskTemplates": [{"id":"weekly-review","name":"Revue cloud","instructions":"Analyse les changements.","cronOrEvent":"every week"}]
+            "scheduledTaskTemplates": [{"id":"weekly-review","name":"Revue cloud","instructions":"Analyse les changements.","cronOrEvent":"every week"}],
+            "workflows": [{
+                "document": {
+                    "dsl": "1.0.0",
+                    "namespace": "bob.work.plugins",
+                    "name": "weekly-cloud-review",
+                    "version": "1.0.0",
+                    "title": "Weekly cloud review",
+                    "summary": "Review architecture drift and prepare a summary."
+                },
+                "schedule": { "cron": "0 9 * * 1" },
+                "do": [
+                    {
+                        "collect": {
+                            "set": { "phase": "collect" },
+                            "metadata": { "description": "Collect signals" }
+                        }
+                    },
+                    {
+                        "summarize": {
+                            "call": "http",
+                            "with": {
+                                "method": "get",
+                                "endpoint": { "uri": "https://example.com/summary" }
+                            },
+                            "metadata": { "description": "Summarize findings" }
+                        }
+                    }
+                ]
+            }]
         });
         assert!(PluginExtensionService::validate_schema(&manifest).is_empty());
+    }
+
+    #[test]
+    fn refuses_invalid_workflows() {
+        let missing_document = serde_json::json!({
+            "workflows": [{"do": [{"only": {"set": {"ok": true}}}]}]
+        });
+        let errors = PluginExtensionService::validate_schema(&missing_document);
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("Open Workflow Specification document")));
+
+        let missing_do = serde_json::json!({
+            "workflows": [{
+                "document": {
+                    "dsl": "1.0.0",
+                    "namespace": "bob.work",
+                    "name": "broken",
+                    "version": "1.0.0"
+                }
+            }]
+        });
+        let errors = PluginExtensionService::validate_schema(&missing_do);
+        assert!(errors.iter().any(|error| error.contains("`do` task list")));
+
+        let bad_dsl = serde_json::json!({
+            "workflows": [{
+                "document": {
+                    "dsl": "0.8",
+                    "namespace": "bob.work",
+                    "name": "legacy",
+                    "version": "1.0.0"
+                },
+                "do": [{"only": {"set": {"ok": true}}}]
+            }]
+        });
+        let errors = PluginExtensionService::validate_schema(&bad_dsl);
+        assert!(errors.iter().any(|error| error.contains("DSL 1.x")));
     }
 
     fn temp_db() -> crate::db::Database {

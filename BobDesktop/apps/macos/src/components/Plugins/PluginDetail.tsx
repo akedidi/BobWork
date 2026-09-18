@@ -6,7 +6,7 @@ import { exportPluginZip, getPluginExtensionStatus, getPluginMcpStatus, getPlugi
 import { errorMessage } from '../../lib/errorMessage';
 import { useAppStore } from '../../stores/appStore';
 import type { Plugin, PluginCategory, PluginExtensionStatus, PluginMcpStatus, PluginMcpTestResult, PluginResourceStatus, PluginScheduleTemplate, WorkspaceSkill } from '@bob-work/shared-types';
-import { metadataOf, isEnabled, isProtectedBuiltin, pluginKindLabel, permissionLabel, friendlyCapabilities, pluginSkillsOf, catalogSlugForPluginSkill, PluginMetadata } from '../../lib/pluginUtils';
+import { metadataOf, isEnabled, isProtectedBuiltin, pluginKindLabel, permissionLabel, friendlyCapabilities, pluginSkillsOf, pluginWorkflowsOf, catalogSlugForPluginSkill, PluginMetadata } from '../../lib/pluginUtils';
 import { localizePluginResourceMessage, localizePluginResourceSetupHint } from '../../lib/pluginResourceMessages';
 import { useAppDialog } from '../AppDialog';
 import { LoadErrorBanner } from '../LoadErrorBanner';
@@ -72,7 +72,7 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
             type="button"
             className="secondary-btn"
             onClick={() => {
-              const brief = `Mets à jour le plugin agentique « ${plugin.name} » (id ${plugin.id}). Demande-moi les changements souhaités. Si un CLI, shell ou binaire open source est utile, choisis-le, télécharge une release épinglée et embarque-le toi-même (pas Homebrew, pas le wizard). Conserve ou corrige la description pour qu’elle reste fonctionnelle (bénéfice utilisateur, pas jargon MCP/CLI). Puis régénère/ajuste le bundle local et vérifie-le.`
+              const brief = `Mets à jour le plugin agentique « ${plugin.name} » (id ${plugin.id}). Demande-moi les changements souhaités. Si l’utilisateur décrit des workflows (enchaînements métier), ajoute ou mets à jour le tableau \`workflows\` au format Open Workflow Specification (Serverless Workflow) 1.0 (\`document\` + \`do\`) même si le plugin n’en avait pas. Si un CLI, shell ou binaire open source est utile, choisis-le, télécharge une release épinglée et embarque-le toi-même (pas Homebrew, pas le wizard). Conserve ou corrige la description pour qu’elle reste fonctionnelle (bénéfice utilisateur, pas jargon MCP/CLI). Puis régénère/ajuste le bundle local et vérifie-le.`
               useAppStore.getState().setBuilderSession({ kind: 'plugin_builder', brief, guided: false })
               navigate('/chat', { state: { mode: 'plugin_builder', initialPrompt: brief } })
             }}
@@ -86,6 +86,7 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
       {protectedBuiltin && <p className="settings-note" style={{ margin: 0 }}>Plugin intégré : désactivation possible, suppression impossible.</p>}
     </div>
     <section className="skill-detail-section"><h3>Description</h3><p>{plugin.description || 'Aucune description.'}</p></section>
+    <PluginWorkflowsSection manifest={manifest} />
     {(plugin.createdAt || plugin.updatedAt || plugin.author) ? (
       <section className="skill-detail-section">
         <h3>{t('plugins.metadata')}</h3>
@@ -141,6 +142,54 @@ export default function PluginDetail({ plugin, mcpRevision, toggling, onClose, o
     <ManifestReadOnlySection plugin={plugin} />
     {manifest.requiresIntegration && <section className="skill-detail-section"><h3>Connexion</h3><p>Ce plugin nécessite un compte ou un service connecté.</p><button className="link-btn" onClick={() => onOpenIntegrations({ tab: 'integrations' })}>Gérer les connexions</button></section>}
   </aside>
+}
+
+function PluginWorkflowsSection({ manifest }: { manifest: PluginMetadata }) {
+  const t = useT()
+  const workflows = pluginWorkflowsOf(manifest)
+  if (workflows.length === 0) return null
+
+  const triggerLabel = (trigger?: string) => {
+    switch (trigger) {
+      case 'manual': return t('plugins.workflowTriggerManual')
+      case 'chat': return t('plugins.workflowTriggerChat')
+      case 'schedule': return t('plugins.workflowTriggerSchedule')
+      case 'event': return t('plugins.workflowTriggerEvent')
+      default: return trigger || t('plugins.workflowTriggerChat')
+    }
+  }
+
+  return (
+    <section className="skill-detail-section" aria-label={t('plugins.workflows')}>
+      <h3>{t('plugins.workflows')}</h3>
+      <p className="settings-note" style={{ marginTop: 0 }}>{t('plugins.workflowsNote')}</p>
+      <div className="plugin-mcp-list">
+        {workflows.map(workflow => (
+          <div className="plugin-mcp-card" key={workflow.id}>
+            <div className="plugin-mcp-heading">
+              <strong>{workflow.name}</strong>
+              <span className="plugin-mcp-state">{triggerLabel(workflow.trigger)}</span>
+            </div>
+            {workflow.description ? <p>{workflow.description}</p> : null}
+            <small>{t('plugins.workflowStandard', { dsl: workflow.dsl })}</small>
+            {workflow.schedule ? (
+              <small style={{ display: 'block' }}>{t('plugins.workflowSchedule', { schedule: workflow.schedule })}</small>
+            ) : null}
+            {workflow.steps.length > 0 ? (
+              <ol className="plugin-friendly-list" style={{ marginTop: 8 }}>
+                {workflow.steps.map(step => (
+                  <li key={step.id}>
+                    <strong>{step.name}</strong>
+                    {step.description ? ` — ${step.description}` : ''}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  )
 }
 
 function PluginBundledContentSection({ manifest }: { manifest: PluginMetadata }) {

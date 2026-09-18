@@ -427,18 +427,31 @@ describe('SettingsView progressive loading', () => {
     expect(mocks.getOrcaCliStatus).not.toHaveBeenCalled()
   })
 
-  it('detects the Orca CLI from the extensions tab without treating it as opening the app', async () => {
+  it('shows the current app version prominently in General settings', async () => {
+    renderSettings({ tab: 'general' })
+    expect(await screen.findByTestId('settings-app-version')).toHaveTextContent('0.1.9')
+    expect(screen.getByText('Version actuelle')).toBeVisible()
+  })
+
+  it('detects the Orca CLI from the permissions tab without treating it as opening the app', async () => {
     mocks.getOrcaCliStatus.mockResolvedValue({
       installed: true,
       path: '/opt/homebrew/bin/orca',
       supportsSkillsGet: true,
       message: 'Orca CLI detected.',
     })
-    renderSettings({ tab: 'extensions' })
+    renderSettings({ tab: 'permissions' })
 
     expect(await screen.findByText('/opt/homebrew/bin/orca')).toBeVisible()
     expect(screen.getByRole('heading', { name: 'Orca CLI (skills intégrés)' })).toBeVisible()
     expect(mocks.getOrcaCliStatus).toHaveBeenCalled()
+  })
+
+  it('redirects the legacy Access & control tab to Access & permissions', async () => {
+    renderSettings({ tab: 'extensions' })
+    expect(await screen.findByRole('heading', { name: 'Accès & permissions', level: 1 })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Accès & permissions' })).toHaveClass('active')
+    expect(screen.queryByRole('button', { name: 'Accès et contrôle' })).not.toBeInTheDocument()
   })
 
   it('shows the copyable Cloudflare link when remote control is enabled', async () => {
@@ -654,10 +667,12 @@ describe('SettingsView progressive loading', () => {
   it('demande explicitement les autorisations vocales depuis les permissions', async () => {
     renderSettings({ tab: 'permissions' })
 
-    expect(await screen.findByRole('heading', { name: 'Permissions de notifications' })).toBeVisible()
-    expect(screen.getByRole('heading', { name: 'Accessibilité' })).toBeVisible()
-    expect(screen.getByRole('heading', { name: 'Automatisation Chrome' })).toBeVisible()
-    expect((await screen.findAllByText('Accordée')).length).toBeGreaterThanOrEqual(4)
+    expect(await screen.findByRole('heading', { name: 'Accès & permissions', level: 1 })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Permissions de notifications' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Voix et enregistrement' })).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Accessibilité' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Automatisation Chrome' })).not.toBeInTheDocument()
+    expect((await screen.findAllByText('Accordée')).length).toBeGreaterThanOrEqual(2)
 
     const request = await screen.findByRole('button', { name: 'Autoriser microphone et dictée' })
     fireEvent.click(request)
@@ -677,7 +692,7 @@ describe('SettingsView progressive loading', () => {
     })))
     renderSettings({ tab: 'permissions' })
 
-    expect(await screen.findByText('Permissions de tâche')).toBeVisible()
+    expect(await screen.findByRole('heading', { name: 'Auto-approve', level: 2 })).toBeVisible()
     expect(screen.queryByText('Politique par défaut')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Réinitialiser les choix d’autorisation' })).not.toBeInTheDocument()
     expect(screen.queryByText('Autorisations mémorisées (5)')).not.toBeInTheDocument()

@@ -117,11 +117,11 @@ export function pluginBuilderPreview(draft: PluginBuilderDraft): {
 export const PLUGIN_CONVERSATION_PROMPT = [
   '@skill:plugin-creator Je veux créer un plugin agentique Bob Work, dans cette conversation (sans formulaire, sans wizard).',
   'Prends l’initiative : si le métier a besoin de convertir, rendre, packager, extraire ou diagrammer, choisis toi-même un outil open source éprouvé (Mermaid, D2, PlantUML, pandoc, ffmpeg, jq, Graphviz, ImageMagick…), télécharge une release GitHub épinglée dans `vendor/<outil>/<version>/bin/` (schéma Bob Work), écris le wrapper dans `scripts/`, déclare `entrypoints` + `command.execute`.',
-  'Ne me demande pas d’installer Homebrew ni de cocher une case dans le wizard. Pose-moi seulement les questions utiles si le bénéfice utilisateur est encore flou (objectif, déclencheur, OAuth).',
+  'Pose-moi seulement les questions utiles si le bénéfice utilisateur est encore flou (objectif, déclencheur, OAuth). Si je décris des enchaînements métier (workflows), capture-les dans `workflows` au format Open Workflow Specification (Serverless Workflow) 1.0 (`document` + `do`).',
   'Quand c’est assez clair, génère le bundle local, déploie-le, et confirme qu’il apparaît dans Plugins.',
   'Si je donne une URL de base de données (postgres://, mysql://, jdbc:db2://host:50000/SAMPLE, fichier SQLite…) ou hôte/port/base/identifiants, Bob Work crée la connexion (coffre) et la lie au plugin — visible dans le détail. Ne recopie pas le mot de passe dans les fichiers.',
-  'Livrables : `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic), code MCP/CLI/shell/binaires réellement embarqués, permissions honnêtes, aucun secret en clair.',
-  'La description doit rester fonctionnelle (1–2 phrases, bénéfice utilisateur, pas de jargon MCP/CLI).',
+  'Livrables : `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic), code MCP/CLI/shell/binaires réellement embarqués, permissions honnêtes, aucun secret en clair, `workflows` Open Workflow 1.0 si j’ai décrit des procédures.',
+  'La description doit rester fonctionnelle (1–2 phrases, bénéfice utilisateur, pas de jargon MCP/CLI). Les workflows s’affichent séparément dans le détail plugin.',
   'Icône : favicon web selon le métier.',
 ].join('\n')
 
@@ -143,6 +143,7 @@ export function buildPluginGenerationPrompt(draft: PluginBuilderDraft): string {
     '',
     'Livrables obligatoires :',
     '- `~/.bob/skills/<slug>/SKILL.md` + `.bob-work-plugin.json` (agentic, specializedMode, resources, connectorStrategy)',
+    '- si le cahier des charges décrit des procédures : tableau `workflows` Open Workflow Specification 1.0 (`document` + `do`) — distinct des skills',
     '- code MCP / CLI / shell / binaires embarqués si des outils ont été cochés — tu les places dans le schéma Bob Work (`vendor/<outil>/<version>/bin/` + `scripts/`), SHA-256, pas Homebrew, pas le wizard',
     '- modèle Cloud Architect : wrapper + binaire épinglé, permission command.execute',
     '- permissions honnêtes ; aucun secret en clair',

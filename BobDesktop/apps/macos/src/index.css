@@ -2108,6 +2108,85 @@
   .settings-heading { margin-bottom: 24px; }
   .settings-heading h1 { font-size: 22px; margin: 0 0 5px; }
   .settings-heading p, .settings-note { margin: 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.55; }
+  .settings-version-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 64px;
+    padding: 4px 0 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-version-banner strong { display: block; font-size: 12.5px; }
+  .settings-version-banner .settings-note { margin-top: 2px; }
+  .settings-version-value {
+    flex-shrink: 0;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-app));
+    color: var(--text-primary);
+    font: 600 15px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: 0.02em;
+  }
+  .settings-section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: -8px 0 22px;
+    padding: 8px 0 10px;
+    background: linear-gradient(to bottom, var(--bg-app) 70%, transparent);
+  }
+  .settings-section-nav-btn {
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 11.5px;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .settings-section-nav-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .settings-section {
+    margin-bottom: 28px;
+    scroll-margin-top: 52px;
+  }
+  .settings-section-header {
+    margin: 0 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-section-header h2 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  .settings-section-header p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .settings-no-results { padding-top: 80px; text-align: center; color: var(--text-muted); }
   .settings-no-results > span { font-size: 30px; }
   .settings-no-results h1 { margin: 12px 0 6px; color: var(--text-primary); font-size: 18px; }

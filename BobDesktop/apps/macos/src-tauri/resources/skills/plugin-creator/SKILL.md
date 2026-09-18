@@ -68,6 +68,87 @@ A skill alone is **not** a plugin. Minimum:
 2. At least one real surface: `entrypoints` CLI, bundle binary/shell, local MCP `mcp/`, or remote HTTPS MCP
 3. Honest `permissions` (objects `{ "type": "…" }`)
 4. Zero secrets in plain text (`${PLACEHOLDER}` or catalog OAuth)
+5. When the user describes **business workflows** (multi-step procedures, triggers, approvals), declare them in top-level `workflows` as **Open Workflow Specification (Serverless Workflow) 1.0** documents — do **not** put those into `skills` or only into `specializedMode.workflow` prose
+
+## User workflows (`workflows` — Open Workflow Specification)
+
+Workflows are **user-facing procedures** the plugin offers. They are **not** skills (instruction docs) and **not** `scheduledTaskTemplates` (Bob Work schedule presets).
+
+**Standard:** [Open Workflow Specification](https://open-workflow-specification.org/) (formerly CNCF Serverless Workflow), DSL **1.0.x**, JSON or YAML shape stored as JSON in the manifest.
+
+### When to add `workflows`
+
+| Situation | Action |
+|-----------|--------|
+| User describes one or more multi-step flows (fetch → analyze → draft → ask before send…) | Declare each as an Open Workflow document in `workflows[]` |
+| User only wants a tool/CLI with no procedure | Omit `workflows` (empty or absent is fine) |
+| Editing a plugin that has **no** workflows yet, and the user adds procedures | **Add** `workflows` in the bump — allowed and expected |
+| Editing to change steps / triggers | Update existing documents; keep stable `document.name` when possible |
+
+### Schema (Open Workflow DSL 1.0)
+
+Write in `.bob-work-plugin.json`:
+
+```json
+"workflows": [
+  {
+    "document": {
+      "dsl": "1.0.0",
+      "namespace": "bob.work.plugins",
+      "name": "weekly-sales-review",
+      "version": "1.0.0",
+      "title": "Weekly sales review",
+      "summary": "Detect anomalies in sales files and prepare a shareable deck."
+    },
+    "schedule": { "cron": "0 9 * * 1" },
+    "do": [
+      {
+        "collect": {
+          "run": { "shell": { "command": "python3", "arguments": ["scripts/collect.py"] } },
+          "metadata": { "description": "Collect sales files" }
+        }
+      },
+      {
+        "analyze": {
+          "set": { "phase": "analyze" },
+          "metadata": { "description": "Detect anomalies" }
+        }
+      },
+      {
+        "draft": {
+          "call": "http",
+          "with": { "method": "post", "endpoint": { "uri": "https://example.com/draft" } },
+          "metadata": { "description": "Draft presentation" }
+        }
+      },
+      {
+        "confirm": {
+          "set": { "awaitApproval": true },
+          "metadata": { "description": "Ask before sending" }
+        }
+      }
+    ]
+  }
+]
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `document.dsl` | yes | Must be `1.x` (prefer `1.0.0`) |
+| `document.namespace` | yes | e.g. `bob.work.plugins` or plugin slug namespace |
+| `document.name` | yes | Stable workflow id |
+| `document.version` | yes | SemVer of this workflow document |
+| `document.title` / `summary` | recommended | Shown in Plugins detail |
+| `do` | yes | ≥1 task; each item is `{ "<taskName>": { … } }` |
+| Task body | yes | OWS task: `call`, `run`, `set`, `switch`, `fork`, … |
+| `metadata.description` | recommended | Human step blurb in the UI |
+| `schedule.cron` / `every` / `on` | optional | OWS schedule; cron when the user asked for a recurring flow |
+
+Limits enforced by Bob Work: ≤32 workflows, ≤32 tasks each. Full schema: https://github.com/open-workflow-specification/specification
+
+Bob Work shows workflows in the plugin **Description** panel when present. Keep the top-level `description` string as 1–2 benefit sentences (no step dump there).
+
+Do **not** invent workflows the user did not ask for. Do **not** replace skills with workflows — a plugin can have both. Do **not** use the removed proprietary `bob-work.workflow/v1` shape.
 
 ## File layout (do not invent other folders)
 
@@ -101,6 +182,7 @@ A skill alone is **not** a plugin. Minimum:
 - `entrypoints`: `[{ "name": "…", "runtime": "python3|bash|sh|zsh|node|binary", "path": "scripts/…" }]`
 - Forbidden in entrypoints: keys `type`, `command`, `args`
 - `description`: user benefit — **not** the connector list (those go in `resources` + `connectorStrategy`)
+- `workflows` (optional): Open Workflow Specification 1.0 documents — see **User workflows** above. Omit when the user did not describe any.
 - `icon`: HTTPS favicon or Bob key (`plugin`, `word`, `github`, …) — never leave empty when a domain is identifiable
 - `skills`: prefer objects `[{ "name", "displayName", "description", "path": "skills/<id>/SKILL.md" }]`. String paths (`"skills/<id>/SKILL.md"`) or bare names are accepted and normalized on import. Always create nested files under `skills/<id>/SKILL.md`.
 - `resources`: array `{ "kind", "label", "optional", "notes", … }` — see **Resource kinds** below
@@ -160,6 +242,7 @@ If the user provides a DB URL or credentials: Bob Work registers them in Integra
 6. Run local entrypoints to verify before announcing success.
 7. When editing nested skills, ensure English authoring + `## Language` output section.
 8. Keep the authored `SKILL.md` as-is (no deploy policy jargon in the description/body).
+9. **Workflows**: if the user adds or changes procedures, create/update `workflows` as Open Workflow Specification 1.0 documents (`document` + `do`). A plugin without workflows may gain them in a later edit — that is a normal, supported modification.
 
 ## Success message
 

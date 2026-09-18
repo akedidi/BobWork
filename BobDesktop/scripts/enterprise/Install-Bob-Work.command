@@ -40,7 +40,7 @@ if [[ ! -f "$P12" || ! -f "$P12_PASS_FILE" ]]; then
 fi
 P12_PASS="$(tr -d '\r\n' <"$P12_PASS_FILE")"
 
-export PATH="$HOME/.local/bob-work-tools/node/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bob-work-tools/bin:$HOME/.local/bob-work-tools/node/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 step() { echo; echo "==> $*"; }
 
@@ -172,32 +172,90 @@ ensure_node() {
 
 ensure_pnpm() {
   step "pnpm ${PNPM_VERSION}"
+  local tools_bin="$HOME/.local/bob-work-tools/bin"
+  mkdir -p "$tools_bin"
+  export PATH="$tools_bin:$PATH"
+
   if need_cmd pnpm; then
-    echo "Using $(command -v pnpm) ($(pnpm -v))"
-    return 0
-  fi
-  if need_cmd corepack; then
-    corepack enable >/dev/null 2>&1 || true
-    corepack prepare "pnpm@${PNPM_VERSION}" --activate
+    local major
+    major="$(pnpm -v | cut -d. -f1)"
+    if [[ "$major" -ge 10 ]]; then
+      echo "Using $(command -v pnpm) ($(pnpm -v))"
+      return 0
+    fi
+    echo "Found pnpm $(pnpm -v); installing ${PNPM_VERSION} locally under $tools_bin…"
   else
-    npm install -g "pnpm@${PNPM_VERSION}"
+    echo "Installing pnpm ${PNPM_VERSION} locally under $tools_bin…"
   fi
+
+  # Prefer a user-local binary. Avoid `npm install -g` / `corepack enable` when they
+  # would write into a Homebrew or system Node prefix (Permission denied on managed Macs).
+  local npm_prefix=""
+  if need_cmd npm; then
+    npm_prefix="$(npm config get prefix 2>/dev/null || true)"
+  fi
+  local use_local=1
+  if [[ -n "$npm_prefix" && -w "$npm_prefix" && -w "$npm_prefix/bin" ]]; then
+    use_local=0
+  fi
+
+  if [[ "$use_local" -eq 0 ]] && need_cmd corepack; then
+    corepack enable >/dev/null 2>&1 || true
+    if corepack prepare "pnpm@${PNPM_VERSION}" --activate; then
+      hash -r
+      if need_cmd pnpm && [[ "$(pnpm -v | cut -d. -f1)" -ge 10 ]]; then
+        echo "Using $(command -v pnpm) ($(pnpm -v))"
+        return 0
+      fi
+    fi
+  fi
+
+  # Standalone pnpm (no global npm write): https://pnpm.io/installation
+  local arch="x64"
+  case "$(uname -m)" in
+    arm64|aarch64) arch="arm64" ;;
+  esac
+  local pnpm_url="https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/pnpm-macos-${arch}"
+  echo "Downloading $pnpm_url"
+  curl -fsSL "$pnpm_url" -o "$tools_bin/pnpm"
+  chmod +x "$tools_bin/pnpm"
+  export PATH="$tools_bin:$PATH"
   hash -r
-  pnpm -v
+  if ! need_cmd pnpm || [[ "$(pnpm -v | cut -d. -f1)" -lt 10 ]]; then
+    echo "Failed to install a usable pnpm ${PNPM_VERSION} under $tools_bin" >&2
+    exit 1
+  fi
+  echo "Using $(command -v pnpm) ($(pnpm -v))"
 }
 
 ensure_rust() {
   step "Rust (stable)"
+  export PATH="$HOME/.cargo/bin:$PATH"
   if need_cmd rustc && need_cmd cargo; then
     rustc --version
     cargo --version
     return 0
   fi
-  echo "Installing rustup (user install)…"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  echo "Installing rustup (user install, without editing shell profiles)…"
+  # --no-modify-path: never touch ~/.bash_profile / ~/.zshrc. Some managed Macs
+  # have those files root-owned or immutable; rustup would abort with EACCES.
+  # This installer already puts ~/.cargo/bin on PATH for the build session.
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
   # shellcheck disable=SC1091
-  source "$HOME/.cargo/env"
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.cargo/env"
+  fi
+  export PATH="$HOME/.cargo/bin:$PATH"
+  hash -r
+  if ! need_cmd rustc || ! need_cmd cargo; then
+    echo "Rust install finished but rustc/cargo are not on PATH." >&2
+    echo "Expected binaries under $HOME/.cargo/bin" >&2
+    exit 1
+  fi
   rustc --version
+  cargo --version
 }
 
 import_signing_identity() {

@@ -22,6 +22,19 @@ export type PluginMetadata = {
   browserExtensions?: Array<{ id?: string; displayName?: string; capability?: string; required?: boolean }>;
   hooks?: unknown[];
   scheduledTaskTemplates?: unknown[];
+  /** Open Workflow Specification (Serverless Workflow) 1.0 documents. */
+  workflows?: Array<{
+    document?: {
+      dsl?: string
+      namespace?: string
+      name?: string
+      version?: string
+      title?: string
+      summary?: string
+    }
+    do?: Array<Record<string, { metadata?: { description?: string }; call?: string; run?: unknown; set?: unknown } & Record<string, unknown>>>
+    schedule?: { cron?: string; every?: unknown; on?: unknown }
+  }>;
   releaseNotes?: string;
   connectorStrategy?: { tiers?: Array<{ id?: string; kind?: string; provider?: string; required?: boolean; auth?: string }>; explored?: string[]; fallback?: string };
   resources?: Array<{ kind?: string; label?: string; optional?: boolean; provider?: string; notes?: string; script?: string; runtimeId?: string; command?: string }>;
@@ -45,6 +58,112 @@ export type PluginSkillRef = {
   description: string
   path?: string
 };
+
+export type PluginWorkflowRef = {
+  id: string
+  name: string
+  description: string
+  trigger?: string
+  schedule?: string
+  steps: Array<{ id: string; name: string; description?: string; uses?: string }>
+  /** Open Workflow DSL version from `document.dsl`, e.g. `1.0.0`. */
+  dsl: string
+};
+
+/** Open Workflow Specification / Serverless Workflow 1.0. */
+export const PLUGIN_WORKFLOW_DSL = '1.0.0';
+
+function humanizeTaskName(id: string): string {
+  return id
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\w/, (char) => char.toLocaleUpperCase())
+}
+
+function taskUsesHint(task: Record<string, unknown> | undefined): string | undefined {
+  if (!task || typeof task !== 'object') return undefined
+  if (typeof task.call === 'string' && task.call.trim()) return `call:${task.call.trim()}`
+  if (task.run && typeof task.run === 'object') {
+    const run = task.run as Record<string, unknown>
+    if (run.shell) return 'run:shell'
+    if (run.script) return 'run:script'
+    if (run.container) return 'run:container'
+    if (run.workflow) return 'run:workflow'
+    return 'run'
+  }
+  if (task.set !== undefined) return 'set'
+  return undefined
+}
+
+/** Normalize Open Workflow Specification documents for the Plugins detail panel. */
+export function pluginWorkflowsOf(manifest: PluginMetadata): PluginWorkflowRef[] {
+  const raw = manifest.workflows
+  if (!Array.isArray(raw) || raw.length === 0) return []
+  const seen = new Set<string>()
+  const out: PluginWorkflowRef[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue
+    const document = entry.document
+    if (!document || typeof document !== 'object') continue
+    const id = typeof document.name === 'string' ? document.name.trim() : ''
+    if (!id) continue
+    const key = id.toLocaleLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const title = typeof document.title === 'string' ? document.title.trim() : ''
+    const summary = typeof document.summary === 'string' ? document.summary.trim() : ''
+    const dsl = typeof document.dsl === 'string' && document.dsl.trim()
+      ? document.dsl.trim()
+      : PLUGIN_WORKFLOW_DSL
+    const scheduleObj = entry.schedule && typeof entry.schedule === 'object' ? entry.schedule : undefined
+    const cron = typeof scheduleObj?.cron === 'string' ? scheduleObj.cron.trim() : ''
+    let trigger: string | undefined
+    let schedule: string | undefined
+    if (cron) {
+      trigger = 'schedule'
+      schedule = cron
+    } else if (scheduleObj?.every !== undefined) {
+      trigger = 'schedule'
+      schedule = typeof scheduleObj.every === 'string' ? scheduleObj.every : 'interval'
+    } else if (scheduleObj?.on !== undefined) {
+      trigger = 'event'
+    } else {
+      trigger = 'chat'
+    }
+    const steps = Array.isArray(entry.do)
+      ? entry.do.flatMap((item, index) => {
+          if (!item || typeof item !== 'object') return []
+          const keys = Object.keys(item)
+          if (keys.length !== 1) return []
+          const stepId = keys[0]
+          const task = item[stepId] as Record<string, unknown> | undefined
+          const metadata = task?.metadata && typeof task.metadata === 'object'
+            ? task.metadata as { description?: string }
+            : undefined
+          const description = typeof metadata?.description === 'string'
+            ? metadata.description.trim() || undefined
+            : undefined
+          return [{
+            id: stepId || `step-${index + 1}`,
+            name: humanizeTaskName(stepId || `step-${index + 1}`),
+            description,
+            uses: taskUsesHint(task),
+          }]
+        })
+      : []
+    out.push({
+      id,
+      name: title || id,
+      description: summary,
+      trigger,
+      schedule,
+      steps,
+      dsl,
+    })
+  }
+  return out
+}
 
 /** Derive a stable skill id from a relative path like `skills/foo/SKILL.md`. */
 export function skillNameFromPath(path: string): string {

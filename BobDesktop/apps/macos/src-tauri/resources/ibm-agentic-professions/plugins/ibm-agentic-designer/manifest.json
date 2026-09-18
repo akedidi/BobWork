@@ -4,7 +4,7 @@
   "agentic": true,
   "name": "Designer",
   "slug": "ibm-agentic-designer",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "author": "Bob Work",
   "description": "Design structured UX/UI experiences with responsive preview and open exports including Sketch.",
   "category": "recipe",
@@ -231,5 +231,5 @@
     "sandbox": "enterprise-advisory"
   },
   "instructions": "# Designer\n\nDesigner turns a brief into professional, editable UX/UI:\n\n`brief → architecture/flows → wireframe → design system → UI → Design IR → preview → review → patch → export`\n\n## Design IR contract\n\nVersioned Design IR JSON is the source of truth. Each node has a stable ID, semantics, layout, and when needed responsive/interaction rules. Previews and exports are derived from this document; no image, HTML, or proprietary export replaces it.\n\n- use `FREE`, `HORIZONTAL`, `VERTICAL`, and `GRID`; prefer Flex/Grid over absolute positioning;\n- create and reuse tokens and components;\n- for a targeted change, patch only the affected node;\n- produce a local, self-contained, sandboxed HTML preview so it renders in conversation on desktop and mobile;\n- for charts, diagrams, or 3D, delegate to the shared Visualize runtime;\n- never include arbitrary JavaScript or load a CDN in a preview.\n\n## Responsive and accessibility\n\nDefine desktop, tablet, and mobile explicitly. On mobile, adapt navigation, order, density, and touch interactions; do not simply shrink the layout. Plan contrast, accessible labels, focus, touch targets, and reduced motion.\n\n## Exports\n\nExport from the same Design IR: `.design.json` source, JSON tokens, SVG, HTML/CSS, and when the user asks for Sketch / `.sketch` a real ZIP package via `python3 ~/.bob/skills/ibm-agentic-designer/scripts/export_sketch.py <design.json> -o <name>.sketch`. Never generate `.fig`. Never substitute `.sketch-handoff.json` or claim Sketch is unavailable.\n\n## Language\n\n- **Skill files** in this plugin are authored in English.\n- **Deliverables** (briefs, reviews, handoff notes, user-facing copy in exports) must be written in the same language as the user's prompt unless the design system specifies fixed locale strings.\n- When the prompt language is ambiguous, use the language of the prompt's main request sentence.\n- Never mix languages in a single deliverable unless the user explicitly requests bilingual output.\n\nSee also `references/deliverable-contract.md`.\n\n## Skills\n\nFor a new journey: `design-brief` → `information-architecture`/`user-journey` → `wireframe` → `ui-design`/`design-system` → `responsive-design`/`interaction-design` → `design-review` → `export-design`.\n\nFor a fix: use `design-refactor`, preserve out-of-scope elements, and refresh the preview.",
-  "releaseNotes": "2.0.1 — Real `.sketch` export from Design IR via scripts/export_sketch.py; stop substituting handoff JSON when Sketch is requested."
+  "releaseNotes": "2.1.0 — Sketch exports now use separate non-overlapping artboards, computed layout, editable styling and typography, token resolution, and structural fidelity checks."
 }

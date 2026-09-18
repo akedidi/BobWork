@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -184,9 +186,15 @@ def normalize_node(node: Any, fallback_id: str) -> dict[str, Any] | None:
                         "text": action,
                     }
                 )
+            else:
+                normalized = normalize_node(action, f"{node_id}-action-{index}")
+                if normalized:
+                    if normalized["type"] in {"Group", "Custom"}:
+                        normalized["type"] = "Button"
+                    children.append(normalized)
 
     # Flatten content-style bags into text children when no nested nodes exist.
-    if kind == "Group" and not children:
+    if kind not in {"Text", "Button", "Input", "Textarea", "Select"} and not children:
         for key in ("eyebrow", "heading", "body"):
             value = node.get(key)
             if isinstance(value, str) and value.strip():
@@ -224,6 +232,15 @@ def normalize_node(node: Any, fallback_id: str) -> dict[str, Any] | None:
         out["text"] = text
     if layout_obj:
         out["layout"] = layout_obj
+    style = node.get("style")
+    if isinstance(style, dict):
+        out["style"] = dict(style)
+    token_refs = node.get("tokenRefs")
+    if isinstance(token_refs, dict):
+        out["tokenRefs"] = dict(token_refs)
+    for key in ("role", "accessibleName", "componentId"):
+        if isinstance(node.get(key), str):
+            out[key] = node[key]
     if children:
         out["children"] = children
     return out
@@ -306,74 +323,330 @@ def validate(node: Any, ids: set[str]) -> None:
         validate(child, ids)
 
 
-def frame_of(node: dict[str, Any], default_w: float = 375, default_h: float = 100) -> dict[str, Any]:
+def number(value: Any, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if math.isfinite(parsed) else fallback
+
+
+def padding_values(value: Any) -> tuple[float, float, float, float]:
+    if isinstance(value, (int, float)):
+        side = max(0.0, float(value))
+        return side, side, side, side
+    if isinstance(value, list):
+        values = [max(0.0, number(item, 0)) for item in value]
+        if len(values) == 2:
+            return values[0], values[1], values[0], values[1]
+        if len(values) == 4:
+            return values[0], values[1], values[2], values[3]
+    return 0.0, 0.0, 0.0, 0.0
+
+
+def color(value: Any, fallback: str = "#000000") -> dict[str, Any]:
+    raw = str(value or fallback).strip().lower()
+    named = {"white": "#ffffff", "black": "#000000", "transparent": "#00000000"}
+    raw = named.get(raw, raw)
+    red = green = blue = 0.0
+    alpha = 1.0
+    match = re.fullmatch(r"#([0-9a-f]{3,8})", raw)
+    if match:
+        digits = match.group(1)
+        if len(digits) in (3, 4):
+            digits = "".join(char * 2 for char in digits)
+        if len(digits) in (6, 8):
+            red, green, blue = (int(digits[index:index + 2], 16) / 255 for index in (0, 2, 4))
+            if len(digits) == 8:
+                alpha = int(digits[6:8], 16) / 255
+    else:
+        match = re.fullmatch(
+            r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)",
+            raw,
+        )
+        if match:
+            red, green, blue = (min(255.0, number(match.group(index), 0)) / 255 for index in (1, 2, 3))
+            alpha = min(1.0, max(0.0, number(match.group(4), 1)))
+    return {
+        "_class": "color",
+        "alpha": alpha,
+        "blue": blue,
+        "colorSpace": 0,
+        "green": green,
+        "red": red,
+    }
+
+
+def resolve_token(value: Any, tokens: dict[str, Any]) -> Any:
+    if not isinstance(value, str):
+        return value
+    key = value.strip()
+    for wrapper in (("{", "}"), ("$", "")):
+        if key.startswith(wrapper[0]) and (not wrapper[1] or key.endswith(wrapper[1])):
+            candidate = key[len(wrapper[0]):len(key) - len(wrapper[1]) if wrapper[1] else None]
+            token = tokens.get(candidate)
+            if isinstance(token, dict) and "value" in token:
+                return token["value"]
+    return value
+
+
+def resolved_style(node: dict[str, Any], tokens: dict[str, Any]) -> dict[str, Any]:
+    source = node.get("style") if isinstance(node.get("style"), dict) else {}
+    result = {key: resolve_token(value, tokens) for key, value in source.items()}
+    refs = node.get("tokenRefs") if isinstance(node.get("tokenRefs"), dict) else {}
+    for property_name, token_name in refs.items():
+        token = tokens.get(str(token_name))
+        if isinstance(token, dict) and "value" in token:
+            result[property_name] = token["value"]
+    return result
+
+
+def frame(x: float, y: float, width: float, height: float) -> dict[str, Any]:
+    return {
+        "_class": "rect",
+        "x": round(x, 3),
+        "y": round(y, 3),
+        "width": round(max(0.0, width), 3),
+        "height": round(max(0.0, height), 3),
+    }
+
+
+def measure(node: dict[str, Any], available_width: float | None = None, available_height: float | None = None) -> tuple[float, float]:
     layout = node.get("layout") if isinstance(node.get("layout"), dict) else {}
-    width = layout.get("width", default_w)
-    height = layout.get("height", default_h)
-    if width in ("fill", "hug", None):
-        width = default_w
-    if height in ("fill", "hug", None):
-        height = default_h
-    try:
-        width = float(width)
-    except (TypeError, ValueError):
-        width = default_w
-    try:
-        height = float(height)
-    except (TypeError, ValueError):
-        height = default_h
-    return {"_class": "rect", "x": 0, "y": 0, "width": width, "height": height}
+    kind = str(node.get("type") or "Group")
+    width_value = layout.get("width")
+    height_value = layout.get("height")
+    if kind == "Page":
+        default_width, default_height = 390.0, 844.0
+    elif kind == "Text":
+        font_size = number((node.get("style") or {}).get("fontSize") if isinstance(node.get("style"), dict) else None, 16)
+        text = str(node.get("text") or "")
+        default_width = min(max(40.0, len(text) * font_size * 0.56), available_width or 280.0)
+        default_height = number((node.get("style") or {}).get("lineHeight") if isinstance(node.get("style"), dict) else None, font_size * 1.35)
+    elif kind in {"Button", "Input", "Select"}:
+        default_width, default_height = 180.0, 44.0
+    elif kind == "Textarea":
+        default_width, default_height = 280.0, 120.0
+    elif kind in {"Icon", "Avatar"}:
+        default_width, default_height = 40.0, 40.0
+    else:
+        default_width, default_height = available_width or 375.0, 100.0
+
+    width = available_width if width_value == "fill" and available_width is not None else number(width_value, default_width)
+    height = available_height if height_value == "fill" and available_height is not None else number(height_value, default_height)
+    children = [child for child in node.get("children", []) if isinstance(child, dict)]
+    if children and (width_value in (None, "hug") or height_value in (None, "hug")) and kind != "Page":
+        top, right, bottom, left = padding_values(layout.get("padding"))
+        gap = max(0.0, number(layout.get("gap"), 0))
+        child_sizes = [measure(child, max(0.0, width - left - right)) for child in children]
+        mode = str(layout.get("mode") or "VERTICAL").upper()
+        if mode == "HORIZONTAL":
+            content_width = sum(size[0] for size in child_sizes) + gap * max(0, len(child_sizes) - 1)
+            content_height = max((size[1] for size in child_sizes), default=0)
+        elif mode == "GRID":
+            columns = max(1, int(number(layout.get("columns"), 2)))
+            rows = math.ceil(len(child_sizes) / columns)
+            content_width = max((size[0] for size in child_sizes), default=0) * columns + gap * (columns - 1)
+            content_height = max((size[1] for size in child_sizes), default=0) * rows + gap * max(0, rows - 1)
+        else:
+            content_width = max((size[0] for size in child_sizes), default=0)
+            content_height = sum(size[1] for size in child_sizes) + gap * max(0, len(child_sizes) - 1)
+        if width_value in (None, "hug"):
+            width = max(default_width if width_value is None else 0, content_width + left + right)
+        if height_value in (None, "hug"):
+            height = max(default_height if height_value is None else 0, content_height + top + bottom)
+    return max(1.0, width), max(1.0, height)
 
 
-def sketch_layer(node: dict[str, Any]) -> dict[str, Any]:
+def child_frames(node: dict[str, Any], width: float, height: float) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    children = [child for child in node.get("children", []) if isinstance(child, dict)]
+    if not children:
+        return []
+    layout = node.get("layout") if isinstance(node.get("layout"), dict) else {}
+    mode = str(layout.get("mode") or "VERTICAL").upper()
+    top, right, bottom, left = padding_values(layout.get("padding"))
+    gap = max(0.0, number(layout.get("gap"), 0))
+    inner_width = max(1.0, width - left - right)
+    inner_height = max(1.0, height - top - bottom)
+    sizes = [measure(child, inner_width, inner_height) for child in children]
+    result: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    if mode == "HORIZONTAL":
+        cursor = left
+        for child, (child_width, child_height) in zip(children, sizes):
+            align = layout.get("align")
+            child_y = top if align in (None, "start", "stretch") else top + (inner_height - child_height) / (2 if align == "center" else 1)
+            result.append((child, frame(cursor, child_y, child_width, child_height)))
+            cursor += child_width + gap
+    elif mode == "GRID":
+        columns = max(1, int(number(layout.get("columns"), 2)))
+        column_width = max(1.0, (inner_width - gap * (columns - 1)) / columns)
+        row_heights: list[float] = []
+        for row_start in range(0, len(children), columns):
+            row_heights.append(max(size[1] for size in sizes[row_start:row_start + columns]))
+        for index, (child, (_, child_height)) in enumerate(zip(children, sizes)):
+            column_index, row_index = index % columns, index // columns
+            child_x = left + column_index * (column_width + gap)
+            child_y = top + sum(row_heights[:row_index]) + row_index * gap
+            result.append((child, frame(child_x, child_y, column_width, child_height)))
+    elif mode == "FREE":
+        for child, (child_width, child_height) in zip(children, sizes):
+            child_layout = child.get("layout") if isinstance(child.get("layout"), dict) else {}
+            result.append((child, frame(number(child_layout.get("x"), left), number(child_layout.get("y"), top), child_width, child_height)))
+    else:
+        cursor = top
+        for child, (child_width, child_height) in zip(children, sizes):
+            align = layout.get("align")
+            child_x = left if align in (None, "start", "stretch") else left + (inner_width - child_width) / (2 if align == "center" else 1)
+            result.append((child, frame(child_x, cursor, child_width, child_height)))
+            cursor += child_height + gap
+    return result
+
+
+def sketch_style(style: dict[str, Any]) -> dict[str, Any]:
+    background = style.get("background", style.get("backgroundColor"))
+    fills = []
+    if background is not None:
+        fills.append({"_class": "fill", "isEnabled": True, "fillType": 0, "color": color(background)})
+    border_color = style.get("borderColor")
+    border_width = number(style.get("borderWidth"), 1)
+    border = style.get("border")
+    if isinstance(border, str):
+        match = re.search(r"([\d.]+)px(?:\s+\w+)?\s+(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|\w+)", border)
+        if match:
+            border_width = number(match.group(1), 1)
+            border_color = match.group(2)
+    borders = []
+    if border_color is not None:
+        borders.append({"_class": "border", "isEnabled": True, "fillType": 0, "position": 1, "thickness": border_width, "color": color(border_color)})
+    return {
+        "_class": "style",
+        "endDecorationType": 0,
+        "miterLimit": 10,
+        "startDecorationType": 0,
+        "fills": fills,
+        "borders": borders,
+        "shadows": [],
+        "innerShadows": [],
+        "contextSettings": {"_class": "graphicsContextSettings", "blendMode": 0, "opacity": min(1.0, max(0.0, number(style.get("opacity"), 1)))},
+    }
+
+
+def shape_layer(node_id: str, name: str, layer_frame: dict[str, Any], style: dict[str, Any], kind: str = "Rectangle") -> dict[str, Any]:
+    width, height = layer_frame["width"], layer_frame["height"]
+    radius = max(0.0, number(style.get("radius", style.get("borderRadius")), 0))
+    shape_class = "MSImmutableOvalShape" if kind == "Ellipse" else "MSImmutableRectangleShape"
+    shape: dict[str, Any] = {
+        "_class": shape_class,
+        "do_objectID": f"{node_id}-path",
+        "name": f"{name} path",
+        "frame": frame(0, 0, width, height),
+    }
+    if shape_class == "MSImmutableRectangleShape":
+        shape["cornerRadiusString"] = str(radius)
+        shape["fixedRadius"] = radius
+    return {
+        "_class": "MSImmutableShapeGroup",
+        "do_objectID": node_id,
+        "name": name,
+        "frame": layer_frame,
+        "layers": [shape],
+        "style": sketch_style(style),
+        "hasClickThrough": False,
+    }
+
+
+def text_layer(node: dict[str, Any], layer_frame: dict[str, Any], tokens: dict[str, Any], *, identifier: str | None = None) -> dict[str, Any]:
+    node_id = identifier or str(node.get("id") or "text")
+    name = str(node.get("name") or node.get("text") or node_id)
+    text = str(node.get("text") or "")
+    style = resolved_style(node, tokens)
+    font_size = max(1.0, number(style.get("fontSize"), 16))
+    font_name = str(style.get("fontFamily") or "Inter")
+    font_weight = number(style.get("fontWeight"), 400)
+    if font_weight >= 700 and "bold" not in font_name.lower():
+        font_name += "-Bold"
+    attributes = {
+        "MSAttributedStringFontAttribute": {
+            "_class": "fontDescriptor",
+            "attributes": {"name": font_name, "size": font_size},
+        },
+        "MSAttributedStringColorAttribute": color(style.get("color", "#161616")),
+        "paragraphStyle": {
+            "_class": "paragraphStyle",
+            "alignment": {"center": 2, "right": 1}.get(str(style.get("textAlign")), 0),
+            "maximumLineHeight": number(style.get("lineHeight"), font_size * 1.35),
+            "minimumLineHeight": number(style.get("lineHeight"), font_size * 1.35),
+        },
+    }
+    return {
+        "_class": "MSImmutableTextLayer",
+        "do_objectID": node_id,
+        "name": name,
+        "attributedString": {
+            "_class": "attributedString",
+            "string": text,
+            "attributes": [{"_class": "stringAttribute", "location": 0, "length": len(text), "attributes": attributes}],
+        },
+        "frame": layer_frame,
+        "style": sketch_style({"opacity": style.get("opacity", 1)}),
+        "textBehaviour": 1,
+    }
+
+
+def sketch_layer(node: dict[str, Any], layer_frame: dict[str, Any], tokens: dict[str, Any]) -> dict[str, Any]:
     node_id = str(node.get("id") or "node")
     name = str(node.get("name") or node.get("text") or node_id)
     kind = str(node.get("type") or "Group")
-    children = [
-        sketch_layer(child)
-        for child in (node.get("children") or [])
-        if isinstance(child, dict)
-    ]
+    style = resolved_style(node, tokens)
     if kind == "Text":
-        return {
-            "_class": "MSImmutableTextLayer",
-            "do_objectID": node_id,
-            "name": name,
-            "attributedString": {
-                "_class": "attributedString",
-                "string": str(node.get("text") or ""),
-                "attributes": [],
-            },
-            "frame": frame_of(node, 200, 28),
-        }
-    if kind == "Button":
-        return {
-            "_class": "MSImmutableGroup",
-            "do_objectID": node_id,
-            "name": name,
-            "layers": [
-                {
-                    "_class": "MSImmutableTextLayer",
-                    "do_objectID": f"{node_id}-label",
-                    "name": f"{name} label",
-                    "attributedString": {
-                        "_class": "attributedString",
-                        "string": str(node.get("text") or name),
-                        "attributes": [],
-                    },
-                    "frame": frame_of(node, 160, 24),
-                }
-            ],
-            "frame": frame_of(node, 180, 44),
-            "hasClickThrough": False,
-        }
+        return text_layer(node, layer_frame, tokens)
+    if kind in {"Rectangle", "Ellipse", "Line", "Vector"}:
+        return shape_layer(node_id, name, layer_frame, style, kind)
+
+    width, height = layer_frame["width"], layer_frame["height"]
+    layers: list[dict[str, Any]] = []
+    if style.get("background", style.get("backgroundColor")) is not None or style.get("border") is not None or style.get("borderColor") is not None:
+        layers.append(shape_layer(f"{node_id}-background", f"{name} background", frame(0, 0, width, height), style))
+    if kind == "Button" and not node.get("children"):
+        label_node = {**node, "type": "Text", "style": {**style, "textAlign": "center"}}
+        font_size = number(style.get("fontSize"), 16)
+        label_height = number(style.get("lineHeight"), font_size * 1.35)
+        layers.append(text_layer(label_node, frame(12, max(0, (height - label_height) / 2), max(1, width - 24), label_height), tokens, identifier=f"{node_id}-label"))
+    elif node.get("text") and not node.get("children"):
+        label_node = {**node, "type": "Text"}
+        inset = 12 if kind in {"Input", "Textarea", "Select", "Badge"} else 0
+        layers.append(text_layer(label_node, frame(inset, inset, max(1, width - inset * 2), max(1, height - inset * 2)), tokens, identifier=f"{node_id}-content"))
+    else:
+        for child, child_frame in child_frames(node, width, height):
+            layers.append(sketch_layer(child, child_frame, tokens))
     return {
         "_class": "MSImmutableGroup",
         "do_objectID": node_id,
         "name": name,
-        "layers": children,
-        "frame": frame_of(node),
+        "layers": layers,
+        "frame": layer_frame,
         "hasClickThrough": False,
+    }
+
+
+def artboard_layer(page: dict[str, Any], x: float, tokens: dict[str, Any]) -> dict[str, Any]:
+    width, height = measure(page)
+    page_id = str(page.get("id") or "artboard")
+    name = str(page.get("name") or page_id)
+    style = resolved_style(page, tokens)
+    background = style.get("background", style.get("backgroundColor", "#ffffff"))
+    layers = [sketch_layer(child, child_frame, tokens) for child, child_frame in child_frames(page, width, height)]
+    return {
+        "_class": "MSImmutableArtboardGroup",
+        "do_objectID": page_id,
+        "name": name,
+        "frame": frame(x, 0, width, height),
+        "layers": layers,
+        "backgroundColor": color(background, "#ffffff"),
+        "hasBackgroundColor": True,
+        "includeBackgroundColorInExport": True,
+        "resizesContent": False,
     }
 
 
@@ -384,7 +657,15 @@ def build_package(document: dict[str, Any]) -> dict[str, Any]:
     for page in pages:
         validate(page, ids)
     title = canonical["metadata"]["title"]
-    layers = [sketch_layer(page) for page in pages if isinstance(page, dict)]
+    tokens = canonical.get("tokens") if isinstance(canonical.get("tokens"), dict) else {}
+    layers = []
+    canvas_x = 0.0
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        artboard = artboard_layer(page, canvas_x, tokens)
+        layers.append(artboard)
+        canvas_x += artboard["frame"]["width"] + 80
     return {
         "title": str(title),
         "page": {
@@ -419,6 +700,32 @@ def build_package(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_sketch_layers(layers: list[dict[str, Any]], expected_artboards: int) -> None:
+    artboards = [layer for layer in layers if layer.get("_class") == "MSImmutableArtboardGroup"]
+    if len(artboards) != expected_artboards:
+        fail(f"Sketch export expected {expected_artboards} artboards, produced {len(artboards)}")
+    positions = {(layer.get("frame") or {}).get("x") for layer in artboards}
+    if len(artboards) > 1 and len(positions) != len(artboards):
+        fail("Sketch artboards overlap; each screen requires a distinct canvas position")
+
+    def visit(layer: dict[str, Any]) -> None:
+        layer_frame = layer.get("frame")
+        if not isinstance(layer_frame, dict):
+            fail(f"Sketch layer {layer.get('name', layer.get('do_objectID'))!r} has no frame")
+        if number(layer_frame.get("width"), 0) <= 0 or number(layer_frame.get("height"), 0) <= 0:
+            fail(f"Sketch layer {layer.get('name', layer.get('do_objectID'))!r} has an empty frame")
+        if layer.get("_class") == "MSImmutableTextLayer":
+            attributed = layer.get("attributedString")
+            if not isinstance(attributed, dict) or not isinstance(attributed.get("attributes"), list) or not attributed["attributes"]:
+                fail(f"Sketch text layer {layer.get('name')!r} has no typography attributes")
+        for child in layer.get("layers", []):
+            if isinstance(child, dict):
+                visit(child)
+
+    for artboard in artboards:
+        visit(artboard)
+
+
 def write_sketch(ir_path: Path, out_path: Path) -> None:
     try:
         document = json.loads(ir_path.read_text(encoding="utf-8"))
@@ -427,6 +734,8 @@ def write_sketch(ir_path: Path, out_path: Path) -> None:
     if not isinstance(document, dict):
         fail("Design IR root must be an object")
     package = build_package(document)
+    normalized = normalize_design_ir(document)
+    validate_sketch_layers(package["page"]["layers"], len(normalized["document"]["pages"]))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -446,6 +755,13 @@ def write_sketch(ir_path: Path, out_path: Path) -> None:
         )
         archive.writestr("user.json", "{}")
         archive.writestr("workspace.json", "{}")
+    if out_path.read_bytes()[:2] != b"PK":
+        fail(f"generated file is not a ZIP-compatible Sketch package: {out_path}")
+    with zipfile.ZipFile(out_path) as archive:
+        required = {"document.json", "pages/bobwork-page-1.json", "meta.json"}
+        missing = required.difference(archive.namelist())
+        if missing:
+            fail(f"generated Sketch package is incomplete: missing {', '.join(sorted(missing))}")
     print(out_path.resolve())
 
 

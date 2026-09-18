@@ -102,11 +102,13 @@ export default function GeneralSettingsTab(props: any) {
           </Card>
           <Heading title={t('settings.updatesHeading')} description={t('settings.updatesDesc')} />
           <Card>
-            <StatusRow
-              title={t('settings.currentVersion')}
-              value={displayedVersion}
-              ok={!updateInfo?.available}
-            />
+            <div className="settings-version-banner" role="group" aria-label={t('settings.currentVersion')}>
+              <div>
+                <strong>{t('settings.currentVersion')}</strong>
+                <p className="settings-note">{app}</p>
+              </div>
+              <span className="settings-version-value" data-testid="settings-app-version">{displayedVersion}</span>
+            </div>
             {updateInfo?.available && (
               <>
                 <StatusRow title={t('settings.availableVersion')} value={updateInfo.version ?? '—'} ok />

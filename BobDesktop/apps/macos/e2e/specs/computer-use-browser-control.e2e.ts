@@ -28,7 +28,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('expose les réglages computer use, Chrome et accès web', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await expect($('strong=Contrôle de l’ordinateur')).toBeDisplayed()
     await expect($('strong=Contrôle de Chrome')).toBeDisplayed()
     await expect($('strong=Accès web')).toBeDisplayed()
@@ -37,7 +37,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('active computer use, Chrome et accès web puis persiste l’état', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Contrôle de l’ordinateur', true)
     await ensureSettingEnabled('Contrôle de Chrome', true)
     await ensureSettingEnabled('Accès web', true)
@@ -54,7 +54,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('bloque la capacité browser (Accès web) quand le réglage est désactivé', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Accès web', false)
 
     const status = await invokeTauri<PluginExtensionStatus>('get_plugin_extension_status', {
@@ -67,7 +67,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('bloque la capacité chrome quand le réglage Contrôle de Chrome est désactivé', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Accès web', true)
     await ensureSettingEnabled('Contrôle de Chrome', false)
 
@@ -80,7 +80,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('autorise browser et chrome quand les réglages et le MCP sont actifs', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Accès web', true)
     await ensureSettingEnabled('Contrôle de Chrome', true)
 
@@ -103,7 +103,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('simule une session Bob avec computer use (list_apps + desktop_click)', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Contrôle de l’ordinateur', true)
 
     await sendHomePrompt('USE_COMPUTER_USE_E2E @plugin:agentic-cloud-architect-agent Liste les apps ouvertes puis clique sur le bouton Envoyer.')
@@ -112,7 +112,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('simule une session Bob avec contrôle Chrome (browser_snapshot + browser_click)', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Contrôle de Chrome', true)
 
     await sendHomePrompt('USE_CHROME_CONTROL_E2E @plugin:agentic-cloud-architect-agent Capture la page Chrome active sur example.com puis clique sur #submit.')
@@ -121,7 +121,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('parcours intégré contrôle Chrome : réglages, MCP réel, Automatisation macOS et ouverture example.com', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Contrôle de Chrome', true)
 
     const settings = await invokeTauri<AppSettings>('get_settings')
@@ -146,7 +146,7 @@ describe('Bob Work — contrôle navigateur, Chrome et accès web', () => {
   })
 
   it('simule une session Bob avec accès web classique (browser)', async () => {
-    await openSettingsTab('Accès et contrôle')
+    await openSettingsTab('Accès & permissions')
     await ensureSettingEnabled('Accès web', true)
 
     await sendHomePrompt('USE_BROWSER_WEB_E2E @plugin:agentic-cloud-architect-agent Lis le contenu de docs.example.com via le navigateur autorisé.')

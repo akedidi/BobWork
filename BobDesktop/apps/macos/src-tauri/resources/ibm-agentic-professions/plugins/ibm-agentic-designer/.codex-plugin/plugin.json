@@ -1,6 +1,6 @@
 {
   "name": "ibm-agentic-designer",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Conçoit des interfaces structurées avec Design IR, aperçu interactif responsive et exports ouverts incluant Sketch.",
   "author": {
     "name": "Bob Work"

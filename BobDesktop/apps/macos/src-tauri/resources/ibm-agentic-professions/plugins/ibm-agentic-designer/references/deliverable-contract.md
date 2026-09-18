@@ -61,6 +61,8 @@ Node `type` values must be PascalCase (`Page`, `Section`, `Text`, `Button`, …)
 
 When the user asks for Sketch / `.sketch`, produce a real ZIP `.sketch` via `scripts/export_sketch.py` (or `generate_artifact` type `sketch` / `create_designer_preview`). Never claim Sketch is unavailable and never substitute `.sketch-handoff.json`.
 
+The Sketch package must contain one non-overlapping artboard per requested screen. It must preserve all visible text and map Design IR layout and supported styles (colors, typography, borders, opacity, and corner radii) into editable Sketch layers. A ZIP signature alone is not sufficient validation.
+
 ## Pre-delivery review
 
 Check accuracy, completeness, consistency, confidentiality, accessibility, readability, and absence of fabricated content. Explicitly flag what was not verified. For a generated file, verify it opens and provide its path or download link.

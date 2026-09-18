@@ -70,7 +70,7 @@ pub async fn update_settings(
             ChromeMcpService::new().sync(&bob_path, settings.chrome_control_enabled)?;
         }
         // Do not prompt Automation here — status stays silent until the user
-        // clicks « Demander Automatisation » in Access & control / Permissions.
+        // clicks « Demander Automatisation » in Access & permissions.
     }
     if previous.computer_use_enabled != settings.computer_use_enabled {
         if let Some(bob_path) = bob.get_binary_path() {

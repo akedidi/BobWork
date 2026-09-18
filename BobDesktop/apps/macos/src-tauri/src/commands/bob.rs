@@ -316,7 +316,7 @@ fn missing_browser_capability_error(
         .filter(|extension| extension.state == "disabled")
         .collect::<Vec<_>>();
     // Settings toggle first — never jump to MCP / OS permissions while the
-    // Accès & contrôle switch is still off.
+    // Accès & permissions switch is still off.
     if !setting_disabled.is_empty() {
         let mut parts = vec![format!(
             "Le plugin {plugin_name} nécessite : {names}."
@@ -324,15 +324,15 @@ fn missing_browser_capability_error(
         for extension in &setting_disabled {
             match extension.capability.as_str() {
                 "computer_use" => parts.push(
-                    "Étape 1 : dans Réglages → Accès et contrôle, activez « Contrôle de l’ordinateur » (Contrôle bureau macOS). Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP et ne demande pas Accessibilité."
+                    "Étape 1 : dans Réglages → Accès & permissions, activez « Contrôle de l’ordinateur » (Contrôle bureau macOS). Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP et ne demande pas Accessibilité."
                         .into(),
                 ),
                 "chrome" => parts.push(
-                    "Étape 1 : dans Réglages → Accès et contrôle, activez « Contrôle Chrome ». Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP Chrome et ne demande pas Automatisation."
+                    "Étape 1 : dans Réglages → Accès & permissions, activez « Contrôle Chrome ». Tant que ce réglage est désactivé, Bob Work n’installe pas le MCP Chrome et ne demande pas Automatisation."
                         .into(),
                 ),
                 _ => parts.push(format!(
-                    "Étape 1 : activez « {} » dans Réglages → Accès et contrôle.",
+                    "Étape 1 : activez « {} » dans Réglages → Accès & permissions.",
                     extension.name
                 )),
             }
@@ -362,7 +362,7 @@ fn missing_browser_capability_error(
                 .contains("accessibilité")
     });
     let mut parts = vec![format!(
-        "Le plugin {plugin_name} nécessite une capacité déjà activée dans Accès et contrôle : {names}."
+        "Le plugin {plugin_name} nécessite une capacité déjà activée dans Accès & permissions : {names}."
     )];
     if needs_automation {
         parts.push(format!(
@@ -379,15 +379,15 @@ fn missing_browser_capability_error(
             );
         }
         parts.push(format!(
-            "Dans Réglages → Permissions, cliquez « Demander Automatisation Chrome » pour faire apparaître {app_name} dans la liste, puis Revérifier."
+            "Dans Réglages → Accès & permissions, cliquez « Demander Automatisation Chrome » pour faire apparaître {app_name} dans la liste, puis Revérifier."
         ));
     } else if needs_accessibility {
         parts.push(format!(
-            "Le réglage est activé, mais Accessibilité macOS manque pour {app_name}. Réglages Système → Confidentialité et sécurité → Accessibilité : autorisez {app_name}, puis Revérifier dans Permissions."
+            "Le réglage est activé, mais Accessibilité macOS manque pour {app_name}. Réglages Système → Confidentialité et sécurité → Accessibilité : autorisez {app_name}, puis Revérifier dans Accès & permissions."
         ));
     } else {
         parts.push(
-            "Le réglage Accès et contrôle est activé, mais l’outil MCP compatible n’est pas prêt. Ouvrez Accès et contrôle, Revérifier, puis relancez."
+            "Le réglage Accès & permissions est activé, mais l’outil MCP compatible n’est pas prêt. Ouvrez Accès & permissions, Revérifier, puis relancez."
                 .into(),
         );
     }
@@ -2926,7 +2926,7 @@ mod plugin_creation_protocol_tests {
         assert!(prompt.contains("→ Google Chrome"));
         assert!(prompt.contains("Bob Work-test"));
         assert!(prompt.contains("Automatisation"));
-        assert!(prompt.contains("Accès et contrôle"));
+        assert!(prompt.contains("Accès & permissions"));
         assert!(prompt.contains("osascript"));
     }
 
@@ -3254,7 +3254,7 @@ mod chrome_automation_error_tests {
         assert!(message.contains("Bob Work-test → Google Chrome"));
         assert!(message.contains("Automatisation"));
         assert!(message.contains("Une case déjà cochée pour Bob Work ne suffit pas"));
-        assert!(message.contains("Accès et contrôle"));
+        assert!(message.contains("Accès & permissions"));
         assert!(message.contains("Demander Automatisation Chrome"));
         assert!(!message.contains("Permission denied"));
     }
@@ -3287,11 +3287,11 @@ mod chrome_automation_error_tests {
             "Computer Use",
             &[computer_use_extension(
                 "disabled",
-                "Réglages → Accès et contrôle : activez « Contrôle de l’ordinateur ».",
+                "Réglages → Accès & permissions : activez « Contrôle de l’ordinateur ».",
             )],
             "Bob Work-test",
         );
-        assert!(message.contains("Accès et contrôle"));
+        assert!(message.contains("Accès & permissions"));
         assert!(message.contains("Contrôle de l’ordinateur") || message.contains("Contrôle bureau"));
         assert!(message.contains("Étape 1"));
         assert!(message.contains("n’installe pas le MCP"));

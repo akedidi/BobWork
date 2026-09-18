@@ -552,6 +552,8 @@ export interface PluginManifest {
   browserExtensions?: PluginBrowserExtension[];
   hooks?: PluginHookDefinition[];
   scheduledTaskTemplates?: PluginScheduleTemplate[];
+  /** Open Workflow Specification (Serverless Workflow) 1.0 documents. Distinct from skills and schedule templates. */
+  workflows?: PluginWorkflowDefinition[];
   permissions: PluginPermission[];
   triggers?: PluginTrigger[];
   runtime?: RuntimeRequirements;
@@ -685,6 +687,41 @@ export interface PluginScheduleTemplate {
   pluginOrMode?: string;
   offlineBehavior: OfflineBehavior;
   overlapPolicy: OverlapPolicy;
+}
+
+/** Open Workflow Specification / Serverless Workflow 1.0 document stored in `.bob-work-plugin.json`. */
+export interface PluginWorkflowDocument {
+  /** DSL version, e.g. `1.0.0`. */
+  dsl: string;
+  namespace: string;
+  name: string;
+  version: string;
+  title?: string;
+  summary?: string;
+  tags?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PluginWorkflowSchedule {
+  every?: unknown;
+  cron?: string;
+  after?: unknown;
+  on?: unknown;
+  read?: "data" | "envelope" | "raw" | string;
+}
+
+/**
+ * One workflow entry = one Open Workflow Specification document
+ * (`document` + `do`, optional `schedule`). See https://open-workflow-specification.org/
+ */
+export interface PluginWorkflowDefinition {
+  document: PluginWorkflowDocument;
+  do: Array<Record<string, Record<string, unknown>>>;
+  schedule?: PluginWorkflowSchedule;
+  input?: unknown;
+  output?: unknown;
+  use?: unknown;
+  [key: string]: unknown;
 }
 
 export interface PluginExtensionStatus {

@@ -10,7 +10,6 @@ import BobSettingsTab from './SettingsTabs/BobSettingsTab'
 import InstructionsSettingsTab from './SettingsTabs/InstructionsSettingsTab'
 import PermissionsSettingsTab from './SettingsTabs/PermissionsSettingsTab'
 import TasksSettingsTab from './SettingsTabs/TasksSettingsTab'
-import ExtensionsSettingsTab from './SettingsTabs/ExtensionsSettingsTab'
 import RuntimesSettingsTab from './SettingsTabs/RuntimesSettingsTab'
 import RemoteSettingsTab from './SettingsTabs/RemoteSettingsTab'
 import ModesSettingsTab from './SettingsTabs/ModesSettingsTab'
@@ -18,8 +17,8 @@ import AppearanceSettingsTab from './SettingsTabs/AppearanceSettingsTab'
 import DataSettingsTab from './SettingsTabs/DataSettingsTab'
 import MemorySettingsTab from './SettingsTabs/MemorySettingsTab'
 
-/** Hidden from Settings until these surfaces are ready to ship. */
-const HIDDEN_SETTINGS_TABS = new Set(['ssh'])
+/** Hidden from Settings until these surfaces are ready to ship, or folded into another tab. */
+const HIDDEN_SETTINGS_TABS = new Set(['ssh', 'extensions'])
 
 export default function SettingsView() {
   const t = useT()
@@ -54,7 +53,7 @@ export default function SettingsView() {
     { id: 'bob' as const, label: t('settings.tabBob'), keywords: 'clé api inférence session temporaire consommation crédits installation authentification bobalytics bobcoins adoption' },
     { id: 'instructions' as const, label: t('settings.tabInstructions'), keywords: 'prompt défaut personnalisées consignes projet réponse contexte conversations mémoire cross chatgpt' },
     { id: 'memory' as const, label: t('settings.tabMemory'), keywords: 'mémoire persistante souvenir continuité sessions recall projet utilisateur hindsight everos mnemon' },
-    { id: 'permissions' as const, label: t('settings.tabPermissions'), keywords: 'autorisations approbation fichiers terminal réseau applications révoquer sandbox bac à sable' },
+    { id: 'permissions' as const, label: t('settings.tabPermissions'), keywords: 'autorisations approbation fichiers terminal réseau applications révoquer sandbox bac à sable accès contrôle mcp sous-agents web ordinateur chrome accessibilité automatisation orca' },
     { id: 'tasks' as const, label: t('settings.tabTasks'), keywords: 'planification historique coût limites rétention réveil' },
     { id: 'extensions' as const, label: t('settings.tabExtensions'), keywords: 'extensions accès contrôle mcp intégrations plugins skills sous-agents subagents orchestrateur web ordinateur chrome accessibilité automatisation' },
     { id: 'runtimes' as const, label: t('settings.tabRuntimes'), keywords: 'runtimes environnements dépendances externes installation suppression stockage python qiskit plugins' },
@@ -94,6 +93,7 @@ export default function SettingsView() {
 
   useEffect(() => {
     if (tab === 'ssh') setTab('general')
+    else if (tab === 'extensions') setTab('permissions')
   }, [tab, setTab])
 
   const tabProps = {
@@ -104,6 +104,7 @@ export default function SettingsView() {
     chromeLoading, chromeStatus, chromeError, refreshChromeStatus, chromeTools,
     computerUseLoading, computerUseStatus, computerUseError, refreshComputerUseStatus, computerUseTools,
     orcaCliStatus, orcaCliLoading, orcaCliError, refreshOrcaCliStatus,
+    mcpEnabled: settings?.mcpEnabled, subagentsEnabled: settings?.subagentsEnabled,
     exportFormat, setExportFormat, databaseBackups, setStatus, setDatabaseBackups, showTransientStatus
   }
 
@@ -132,9 +133,8 @@ export default function SettingsView() {
           {tab === 'bob' && <BobSettingsTab {...tabProps} />}
           {tab === 'instructions' && <InstructionsSettingsTab {...tabProps} />}
           {tab === 'memory' && <MemorySettingsTab {...tabProps} />}
-          {tab === 'permissions' && <PermissionsSettingsTab {...tabProps} />}
+          {(tab === 'permissions' || tab === 'extensions') && <PermissionsSettingsTab {...tabProps} />}
           {tab === 'tasks' && <TasksSettingsTab {...tabProps} />}
-          {tab === 'extensions' && <ExtensionsSettingsTab {...tabProps} />}
           {tab === 'runtimes' && <RuntimesSettingsTab setStatus={setStatus} />}
           {tab === 'remote' && <RemoteSettingsTab {...tabProps} />}
           {tab === 'modes' && <ModesSettingsTab {...tabProps} />}

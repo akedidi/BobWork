@@ -33,6 +33,8 @@ Export from the same Design IR:
 - HTML/CSS preview, JSON tokens, SVG when useful;
 - **`.sketch`** — when the user asks for Sketch / `.sketch`, run `scripts/export_sketch.py` on the Design IR and deliver a real ZIP package ending in `.sketch`.
 
+A Sketch export is complete only when every requested screen is a separate, non-overlapping artboard and the package preserves visible text, layout, colors, typography, borders, and corner radii from the Design IR. The exporter validates these invariants before writing the file.
+
 Never generate `.fig`. Never substitute `.sketch-handoff.json` or claim Sketch is unavailable.
 
 ## Language

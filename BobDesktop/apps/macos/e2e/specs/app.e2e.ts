@@ -588,7 +588,7 @@ describe('Bob Work — parcours macOS natifs de bout en bout', () => {
     await $('button=Tâches et planifié').click()
     await labelled('Conserver l’historique').setValue('45')
 
-    await $('button=Accès et contrôle').click()
+    await $('button=Accès & permissions').click()
     await toggleSetting('Accès web', true)
     await toggleSetting('Sous-agents / orchestrateur', true)
 

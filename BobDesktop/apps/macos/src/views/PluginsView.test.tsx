@@ -75,7 +75,22 @@ const plugins = [{
   ], specializedMode: { allowedSkills: ['architecture-review', 'tradeoff-analysis'] }, resources: [
     { kind: 'api-public', label: 'Stooq', optional: false, notes: 'Sans clé' },
     { kind: 'api-key', label: 'Finnhub', optional: true, notes: 'FINNHUB_API_KEY' },
-  ] },
+  ], workflows: [{
+    document: {
+      dsl: '1.0.0',
+      namespace: 'bob.work.plugins',
+      name: 'weekly-cloud-review',
+      version: '1.0.0',
+      title: 'Revue cloud hebdomadaire',
+      summary: 'Collecter les signaux, analyser l’architecture, préparer un résumé.',
+    },
+    schedule: { cron: '0 9 * * 1' },
+    do: [
+      { collect: { set: { phase: 'collect' }, metadata: { description: 'Collecter les signaux' } } },
+      { analyze: { set: { phase: 'analyze' }, metadata: { description: 'Analyser l’architecture' } } },
+      { summarize: { set: { phase: 'summarize' }, metadata: { description: 'Préparer le résumé' } } },
+    ],
+  }] },
 }, {
   id: 'builtin-ibm-qiskit', name: 'Qiskit', version: '2.0.0', description: 'Concevoir et simuler des circuits quantiques.', scope: 'system', category: 'executable', installState: 'installed', validationState: 'valid', createdAt: '', updatedAt: '',
   manifest: { builtin: true, icon: 'qiskit', slug: 'ibm-qiskit', capabilities: ['qiskit.circuit.create', 'qiskit.circuit.validate', 'qiskit.local.simulate', 'qiskit.visualize'] },
@@ -268,6 +283,22 @@ describe('PluginsView', () => {
     expect(screen.queryByText(/· optionnel/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Configurer dans APIs' })).toBeVisible()
     expect(screen.getByText(/Configurez FINNHUB_API_KEY dans Intégrations → APIs/)).toBeVisible()
+  })
+
+  it('shows declared workflows next to the plugin description', async () => {
+    render(<MemoryRouter><PluginsView /></MemoryRouter>)
+    fireEvent.click(await screen.findByRole('button', { name: /Cloud Architect Analyser une architecture cloud/ }))
+
+    expect(await screen.findByText('Workflows')).toBeVisible()
+    expect(screen.getByText('Revue cloud hebdomadaire')).toBeVisible()
+    expect(screen.getByText(/Collecter les signaux, analyser/)).toBeVisible()
+    expect(screen.getByText('Planifié')).toBeVisible()
+    expect(screen.getByText(/Planification : 0 9 \* \* 1/)).toBeVisible()
+    expect(screen.getByText(/Open Workflow DSL 1\.0\.0/)).toBeVisible()
+    expect(screen.getAllByText(/Collecter les signaux/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Analyser l’architecture/).length).toBeGreaterThan(0)
+    expect(screen.getByText('Collect')).toBeVisible()
+    expect(screen.getByText('Analyze')).toBeVisible()
   })
 
   it('shows authenticated connections, browser capability, hooks and schedule templates together', async () => {

@@ -27,7 +27,8 @@ python3 ~/.bob/skills/ibm-agentic-designer/scripts/export_sketch.py path/to/desi
 If the skill is still under the packaged tree before deploy, use the plugin bundle path that contains `scripts/export_sketch.py`.
 
 4. Verify the file exists, starts with a ZIP signature (`PK`), and report the absolute path.
-5. Optionally also export HTML/CSS preview, tokens JSON, or SVG from the same IR.
+5. Inspect the generated package before delivery: each requested screen must be a distinct, non-overlapping artboard; visible text must be present; child frames must reflect the Design IR layout rather than all starting at `(0,0)`; and colors, typography, borders, and corner radii must be preserved when supplied.
+6. Optionally also export HTML/CSS preview, tokens JSON, or SVG from the same IR.
 
 ## Forbidden substitutes
 
@@ -38,7 +39,7 @@ If the skill is still under the packaged tree before deploy, use the plugin bund
 
 ## Fidelity note
 
-The `.sketch` file is Bob Work’s structured interchange package (ZIP + `document.json` / `pages/*.json`) derived from Design IR. Import fidelity can vary across Sketch-compatible apps — state that briefly after delivering the file.
+The `.sketch` file is Bob Work’s structured interchange package (ZIP + `document.json` / `pages/*.json`) derived from Design IR. The bundled exporter converts screens to separate artboards, resolves vertical/horizontal/grid/free layout, and maps supported visual styles to editable Sketch layers. Import fidelity can vary across Sketch-compatible apps — state that briefly after delivering the file.
 
 ## Language
 

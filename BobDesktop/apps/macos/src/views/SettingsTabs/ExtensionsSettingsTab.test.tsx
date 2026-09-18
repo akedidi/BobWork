@@ -3,7 +3,7 @@ import type { AppSettings } from '@bob-work/shared-types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppDialogProvider } from '../../components/AppDialog'
 import { translate } from '../../i18n/translate'
-import ExtensionsSettingsTab from './ExtensionsSettingsTab'
+import PermissionsSettingsTab from './PermissionsSettingsTab'
 
 const mocks = vi.hoisted(() => ({
   openMacosPrivacyPane: vi.fn(),
@@ -15,6 +15,13 @@ vi.mock('../../lib/ipc', () => ({
   openMacosPrivacyPane: mocks.openMacosPrivacyPane,
   requestChromeAutomationPermission: mocks.requestChromeAutomationPermission,
   requestAccessibilityPermission: mocks.requestAccessibilityPermission,
+  getNotificationAuthState: vi.fn().mockResolvedValue('authorized'),
+  getMicrophoneAuthorizationState: vi.fn().mockResolvedValue('authorized'),
+  getSpeechRecognitionAuthorizationState: vi.fn().mockResolvedValue('authorized'),
+  isNotificationAuthGranted: (state: string) => state === 'authorized',
+  requestNotificationAuthorization: vi.fn(),
+  requestVoiceDictationPermission: vi.fn(),
+  requestMicrophonePermission: vi.fn(),
   importConversations: vi.fn(),
   exportConversations: vi.fn(),
   openDataDir: vi.fn(),
@@ -22,9 +29,6 @@ vi.mock('../../lib/ipc', () => ({
   purgeAppCache: vi.fn(),
   createDatabaseBackup: vi.fn(),
   restoreDatabaseBackup: vi.fn(),
-  requestNotificationAuthorization: vi.fn(),
-  requestVoiceDictationPermission: vi.fn(),
-  requestMicrophonePermission: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
@@ -43,7 +47,7 @@ const settings = {
 } as AppSettings
 
 const longDeniedMessage =
-  'Autorisez Bob Work-test → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation. Si Bob Work-test n’apparaît pas dans la liste, cliquez d’abord sur « Demander Automatisation Chrome » dans Réglages → Permissions (macOS n’affiche une app qu’après son premier ordre Apple Event). Bob Work et Bob Work-test sont des applications distinctes : une case cochée pour l’une ne couvre pas l’autre. C’est « Bob Work-test » qu’il faut autoriser.'
+  'Autorisez Bob Work-test → Google Chrome dans Réglages Système → Confidentialité et sécurité → Automatisation.'
 
 function renderChromeTab(overrides: Record<string, unknown> = {}) {
   const setStatus = vi.fn()
@@ -51,7 +55,7 @@ function renderChromeTab(overrides: Record<string, unknown> = {}) {
   const refreshChromeStatus = vi.fn().mockResolvedValue(undefined)
   render(
     <AppDialogProvider>
-      <ExtensionsSettingsTab
+      <PermissionsSettingsTab
         t={t}
         settings={settings}
         settingsError={null}
@@ -77,6 +81,8 @@ function renderChromeTab(overrides: Record<string, unknown> = {}) {
         orcaCliLoading={false}
         orcaCliError={null}
         refreshOrcaCliStatus={vi.fn()}
+        mcpEnabled
+        subagentsEnabled
         setStatus={setStatus}
         showTransientStatus={showTransientStatus}
         {...overrides}
@@ -92,7 +98,7 @@ function renderComputerUseTab(overrides: Record<string, unknown> = {}) {
   const refreshComputerUseStatus = vi.fn().mockResolvedValue(undefined)
   render(
     <AppDialogProvider>
-      <ExtensionsSettingsTab
+      <PermissionsSettingsTab
         t={t}
         settings={{ ...settings, chromeControlEnabled: false, computerUseEnabled: true }}
         settingsError={null}
@@ -116,6 +122,8 @@ function renderComputerUseTab(overrides: Record<string, unknown> = {}) {
         orcaCliLoading={false}
         orcaCliError={null}
         refreshOrcaCliStatus={vi.fn()}
+        mcpEnabled
+        subagentsEnabled
         setStatus={setStatus}
         showTransientStatus={showTransientStatus}
         appName="Bob Work"
@@ -126,10 +134,17 @@ function renderComputerUseTab(overrides: Record<string, unknown> = {}) {
   return { setStatus, showTransientStatus, refreshComputerUseStatus }
 }
 
-describe('ExtensionsSettingsTab Chrome automation', () => {
+describe('PermissionsSettingsTab merged capabilities', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.openMacosPrivacyPane.mockResolvedValue(undefined)
+  })
+
+  it('shows section navigation and capability toggles', () => {
+    renderChromeTab()
+    expect(screen.getByRole('navigation', { name: t('settings.sectionNavLabel') })).toBeVisible()
+    expect(screen.getByRole('heading', { name: t('settings.sectionCapabilities'), level: 2 })).toBeVisible()
+    expect(screen.getByText(t('settings.chromeControl'))).toBeVisible()
   })
 
   it('shows request and System Settings actions when Automation is denied', () => {
@@ -137,8 +152,7 @@ describe('ExtensionsSettingsTab Chrome automation', () => {
 
     expect(screen.getByRole('button', { name: t('settings.requestAutomation') })).toBeVisible()
     expect(screen.getByRole('button', { name: t('settings.openAutomationForChrome') })).toBeVisible()
-    expect(screen.getByRole('button', { name: t('settings.recheck') })).toBeVisible()
-    expect(screen.queryByText(t('settings.managePermissionsInSettings'))).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: t('settings.recheck') }).length).toBeGreaterThan(0)
   })
 
   it('requests Chrome automation, refreshes status, and opens System Settings when denied', async () => {
@@ -155,10 +169,10 @@ describe('ExtensionsSettingsTab Chrome automation', () => {
     expect(showTransientStatus).toHaveBeenCalledWith(t('settings.automationDenied', { appName: 'Bob Work-test' }))
   })
 
-  it('rechecks Chrome automation from Access & control without requesting it there', async () => {
+  it('rechecks Chrome automation without requesting it', async () => {
     const { refreshChromeStatus, showTransientStatus } = renderChromeTab()
 
-    fireEvent.click(screen.getByRole('button', { name: t('settings.recheck') }))
+    fireEvent.click(screen.getAllByRole('button', { name: t('settings.recheck') })[0])
 
     await waitFor(() => {
       expect(refreshChromeStatus).toHaveBeenCalled()
@@ -168,7 +182,7 @@ describe('ExtensionsSettingsTab Chrome automation', () => {
   })
 })
 
-describe('ExtensionsSettingsTab macOS Accessibility', () => {
+describe('PermissionsSettingsTab macOS Accessibility', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.openMacosPrivacyPane.mockResolvedValue(undefined)

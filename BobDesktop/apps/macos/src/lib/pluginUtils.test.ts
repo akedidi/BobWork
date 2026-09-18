@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Plugin } from '@bob-work/shared-types'
-import { pluginKindLabel, pluginMentionId, pluginSkillsOf, skillNameFromPath } from './pluginUtils'
+import { pluginKindLabel, pluginMentionId, pluginSkillsOf, pluginWorkflowsOf, skillNameFromPath } from './pluginUtils'
 
 const personal = {
   id: 'agentic-bonjour-simple',
@@ -75,5 +75,43 @@ describe('pluginSkillsOf', () => {
       description: 'Break down a question',
       path: 'skills/mece/SKILL.md',
     })
+  })
+})
+
+describe('pluginWorkflowsOf', () => {
+  it('returns empty when workflows are absent', () => {
+    expect(pluginWorkflowsOf({})).toEqual([])
+  })
+
+  it('normalizes Open Workflow Specification 1.0 documents for the detail panel', () => {
+    const workflows = pluginWorkflowsOf({
+      workflows: [{
+        document: {
+          dsl: '1.0.0',
+          namespace: 'bob.work.plugins',
+          name: 'weekly-sales-review',
+          version: '1.0.0',
+          title: 'Weekly sales review',
+          summary: 'Detect anomalies and prepare a deck.',
+        },
+        schedule: { cron: '0 9 * * 1' },
+        do: [
+          { collect: { run: { shell: { command: 'python3' } }, metadata: { description: 'Collect files' } } },
+          { analyze: { set: { phase: 'analyze' }, metadata: { description: 'Detect anomalies' } } },
+        ],
+      }],
+    })
+    expect(workflows).toEqual([{
+      id: 'weekly-sales-review',
+      name: 'Weekly sales review',
+      description: 'Detect anomalies and prepare a deck.',
+      trigger: 'schedule',
+      schedule: '0 9 * * 1',
+      steps: [
+        { id: 'collect', name: 'Collect', description: 'Collect files', uses: 'run:shell' },
+        { id: 'analyze', name: 'Analyze', description: 'Detect anomalies', uses: 'set' },
+      ],
+      dsl: '1.0.0',
+    }])
   })
 })
